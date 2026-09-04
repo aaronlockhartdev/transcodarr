@@ -197,7 +197,7 @@ ffmpeg -hwaccel cuda -i "In.Movie.2024.2160p.HEVC.mkv" \
 - **Rust**, single static binary. `tokio` for async I/O; `rusqlite` for SQLite; **ffmpeg as a child process** — no libav bindings, so a crashed/hung encoder can never take the server down, and the binary stays cgo/FFI-free.
 - **Docker-first (canonical artifact).** Image bundles a **pinned ffmpeg build** — one Linux build with **NVENC + AMF + QSV** compiled in; x86-64 **and aarch64** (ARM NAS boxes). GPU userspace comes from the host via the vendor toolkits (nvidia-container-toolkit / ROCm / Intel oneAPI runtime). The image is the version control for ffmpeg.
 - **Bare binary** (macOS dev, non-Docker Linux): **detects a system ffmpeg** on PATH at startup, validates the version against a supported range, and probes available encoders (this probe also feeds the flow editor's device pickers). Missing/out-of-range → clear startup report in the UI, software path still works.
-- **Web**: HTTP API + embedded SPA (Svelte + Vite, embedded via `include_bytes!`) served from the same binary; WebSocket/SSE for live job progress.
+- **Web**: HTTP API + embedded SPA (**Svelte 5 + Vite + Tailwind CSS + shadcn-svelte** — copy-in-source, Melt UI primitives for accessibility; embedded via `include_bytes!`) served from the same binary; WebSocket/SSE for live job progress. In-repo additions on top: schema-driven picker wrappers (§5), step-card drag-reorder, CodeMirror 6 for the raw-JSON flow view, hand-rolled SVG for the two dashboard charts.
 - **Auth stance (v1)**: no built-in authentication. Bind to localhost/LAN as configured; exposure via a reverse proxy with auth is the documented pattern (the \*arr norm). Single-user tool.
 
 ---
@@ -281,4 +281,4 @@ Made during the design session; each is a deliberate default, not a constraint:
 7. Target container smart-default MP4-if-safe-else-MKV, overridable per operation.
 8. Docker image = canonical artifact; bare binary detects system ffmpeg.
 9. In-place renames adopt the true extension (orphaning \*arr records until re-scan; automation parked).
-10. Svelte for the SPA (swap for React freely — schema-driven, so it costs nothing).
+10. **Svelte 5 + Tailwind CSS + shadcn-svelte** for the SPA (copy-in-source; Melt UI underneath). The styling layer is swappable — the schema-driven editor (§5) does not depend on it.

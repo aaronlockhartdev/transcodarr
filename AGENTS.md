@@ -52,7 +52,7 @@ The repository currently contains **no code yet**. The following are the standin
 - Keep `core` pure and synchronous: `evaluate()` and the planner must be unit-testable without ffmpeg or a filesystem (design doc §5).
 
 **Frontend**
-- TypeScript strict mode; Prettier defaults; Svelte 5.
+- TypeScript strict mode; Prettier defaults; Svelte 5 + Tailwind CSS + shadcn-svelte (copy-in-source; Melt UI handles accessibility). UI components live in the repo and follow shadcn-svelte conventions — do not add a second component library.
 - The flow editor is **schema-driven**: render every condition/operation picker from `GET /api/schema/flow`. Never hardcode condition or operation field lists into components (design doc §5 — this is what keeps extension a Rust-only change).
 
 ## Testing
