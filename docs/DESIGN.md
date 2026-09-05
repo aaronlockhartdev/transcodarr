@@ -195,7 +195,7 @@ ffmpeg -hwaccel cuda -i "In.Movie.2024.2160p.HEVC.mkv" \
 ## 8. Stack & deployment
 
 - **Rust**, single static binary. `tokio` for async I/O; `rusqlite` for SQLite; **ffmpeg as a child process** — no libav bindings, so a crashed/hung encoder can never take the server down, and the binary stays cgo/FFI-free.
-- **Docker-first (canonical artifact).** Image bundles a **pinned ffmpeg build** — one Linux build with **NVENC + AMF + QSV** compiled in; x86-64 **and aarch64** (ARM NAS boxes). GPU userspace comes from the host via the vendor toolkits (nvidia-container-toolkit / ROCm / Intel oneAPI runtime). The image is the version control for ffmpeg.
+- **Docker-first (canonical artifact).** Image bundles a **pinned ffmpeg build** — one Linux build with **NVENC + VAAPI + QSV** compiled in; x86-64 **and aarch64** (ARM NAS boxes). GPU userspace comes from the host via the vendor toolkits (nvidia-container-toolkit / ROCm / Intel oneAPI runtime). The image is the version control for ffmpeg.
 - **Bare binary** (macOS dev, non-Docker Linux): **detects a system ffmpeg** on PATH at startup, validates the version against a supported range, and probes available encoders (this probe also feeds the flow editor's device pickers). Missing/out-of-range → clear startup report in the UI, software path still works.
 - **Web**: HTTP API + embedded SPA (**Svelte 5 + Vite + Tailwind CSS + shadcn-svelte** — copy-in-source, Melt UI primitives for accessibility; embedded via `include_bytes!`) served from the same binary; WebSocket/SSE for live job progress. In-repo additions on top: schema-driven picker wrappers (§5), step-card drag-reorder, CodeMirror 6 for the raw-JSON flow view, hand-rolled SVG for the two dashboard charts.
 - **Auth stance (v1)**: no built-in authentication. Bind to localhost/LAN as configured; exposure via a reverse proxy with auth is the documented pattern (the \*arr norm). Single-user tool.
@@ -251,7 +251,7 @@ Indexes: `files(library_id, status)`, `files(path)`, `jobs(state, started)`. Fil
 
 ## 11. v1 scope
 
-**In:** everything in §2–§10. Condition fields of §5; operations of §6 (h264/hevc targets, MP4/MKV, GPU = NVENC + AMF + QSV); in-place + output-tree lifecycle; watch + scan + manual triggers; the five UI screens; the multi-node seam (dormant).
+**In:** everything in §2–§10. Condition fields of §5; operations of §6 (h264/hevc targets, MP4/MKV, GPU = NVENC + VAAPI + QSV); in-place + output-tree lifecycle; watch + scan + manual triggers; the five UI screens; the multi-node seam (dormant).
 
 **Out (v1):** see §12.
 
