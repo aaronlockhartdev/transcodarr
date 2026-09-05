@@ -10,6 +10,7 @@
 	import ChevronUpIcon from "@lucide/svelte/icons/chevron-up";
 	import ChevronDownIcon from "@lucide/svelte/icons/chevron-down";
 	import TrashIcon from "@lucide/svelte/icons/trash-2";
+	import Undo2Icon from "@lucide/svelte/icons/undo-2";
 	import FlowField from "./FlowField.svelte";
 	import type { Device, FlowStep, FlowSchema, UiSchema } from "$lib/types.js";
 
@@ -120,10 +121,16 @@
 	// and parseable (video, for instance, requires codec).
 	function seedSection(name: string): Record<string, unknown> {
 		const f = schema.operation_sections[name]?.schema as
-			| { fields?: Record<string, { kind?: string; default?: unknown }> }
+			| { default?: unknown; fields?: Record<string, { kind?: string; default?: unknown }> }
 			| undefined;
+		if (!f) return {};
+		// A section with no per-field schema (e.g. `container`) is a
+		// single-select: its seed is the schema default itself (a string
+		// like "smart"), never an object — the top-level field has to
+		// match what Operation's serde expects.
+		if (!f.fields) return f.default as unknown as Record<string, unknown>;
 		const seeded: Record<string, unknown> = {};
-		for (const [k, fld] of Object.entries(f?.fields ?? {})) {
+		for (const [k, fld] of Object.entries(f.fields)) {
 			if (fld.default === undefined) continue;
 			seeded[k] = fld.kind === "bitrate_mode" ? { mode: fld.default } : fld.default;
 		}
@@ -163,6 +170,52 @@
 	}
 	function setRuleAction(i: number, action: unknown) {
 		setRules(rulesFor().map((r, j) => (j === i ? { ...r, action } : r)));
+	}
+	// The audio section's `default` field carries the policy schema (kind:
+	// audio_policy) shared by the rule-action select.
+	const policyOpts = $derived.by(() => {
+		const f = (schema.operation_sections["audio"]?.schema as { fields?: Record<string, { values?: { value: string; label: string }[] }> })?.fields?.["default"];
+		return f?.values ?? [];
+	});
+	function policySelectValue(action: unknown): string {
+		// A re-encode object must display under the "re_encode" option, not
+		// the first item in the list.
+		if (action !== null && typeof action === "object") return "re_encode";
+		return typeof action === "string" ? action : "copy";
+	}
+	function reencodeActionDefault(): Record<string, unknown> {
+		const f = (schema.operation_sections["audio"]?.schema as { fields?: Record<string, { reencode?: { codec?: { values?: { value: string }[] } } }> })?.fields?.["default"];
+		return { codec: f?.reencode?.codec?.values?.[0]?.value ?? "eac3" };
+	}
+	function ruleActionObj(i: number): Record<string, unknown> {
+		const a = rulesFor()[i]?.action;
+		return a !== null && typeof a === "object" ? { ...(a as Record<string, unknown>) } : {};
+	}
+	function writeRuleAction(i: number, a: Record<string, unknown>) {
+		// Empty rate/channels mean "keep the source" — drop the keys so they
+		// are omitted from the JSON entirely.
+		for (const k of ["sample_rate", "channels"]) {
+			const v = a[k];
+			if (v === undefined || v === null || v === "") delete a[k];
+		}
+		setRuleAction(i, a);
+	}
+	function setRuleReencodeCodec(i: number, codec: string) {
+		const a = ruleActionObj(i);
+		a.codec = codec;
+		writeRuleAction(i, a);
+	}
+	function setRuleReencodeRate(i: number, text: string) {
+		const a = ruleActionObj(i);
+		const n = Number.parseInt(text, 10);
+		a.sample_rate = Number.isNaN(n) ? undefined : n;
+		writeRuleAction(i, a);
+	}
+	function setRuleReencodeChannels(i: number, text: string) {
+		const a = ruleActionObj(i);
+		const n = Number.parseInt(text, 10);
+		a.channels = Number.isNaN(n) ? undefined : n;
+		writeRuleAction(i, a);
 	}
 	function setRuleLanguages(i: number, text: string) {
 		const rules = rulesFor().map((r) => ({ ...r, match: { ...r.match } }));
@@ -322,37 +375,39 @@
 														{/each}
 													</div>
 													<Input class="h-7 w-32" placeholder="langs (en,fr)" value={rule.match.languages.join(", ")} oninput={(e) => setRuleLanguages(i, (e.target as HTMLInputElement).value)} />
-													<span class="text-xs text-muted-foreground">→</span>
-													{#if typeof rule.action === "string"}
-														<select
-															class="h-7 w-28 rounded-lg border border-input bg-transparent px-2 text-xs"
-															value={rule.action}
-																// "re-encode" writes the object form (AudioPolicy's re-encode is an object, not a string).
-															onchange={(e) => {
-																const v = (e.target as HTMLSelectElement).value;
-																setRuleAction(i, v === "re-encode" ? { codec: "eac3", sample_rate: 48000, channels: 2 } : v);
-															}}
-														>
-															<option value="copy">Copy</option>
-															<option value="drop">Drop</option>
-															<option value="re-encode">Re-encode</option>
-														</select>
-													{:else}
-														<select
-															class="h-7 w-28 rounded-lg border border-input bg-transparent px-2 text-xs"
-															value={(rule.action as { codec?: string }).codec ?? "eac3"}
-															onchange={(e) =>
-																setRuleAction(i, {
-																	codec: (e.target as HTMLSelectElement).value,
-																	sample_rate: 48000,
-																	channels: 2,
-																})}
-														>
-														{#each reencodeCodecOpts as v (v.value)}
-															<option value={v.value}>{v.label}</option>
-														{/each}
-														</select>
-													{/if}
+															<span class="text-xs text-muted-foreground">→</span>
+															{#if typeof rule.action === "string"}
+																<select
+																	class="h-7 w-28 rounded-lg border border-input bg-transparent px-2 text-xs"
+																	value={policySelectValue(rule.action)}
+																	// "re_encode" writes the object form (the wire shape for re-encode is an object, not a string).
+																	onchange={(e) => {
+																		const v = (e.target as HTMLSelectElement).value;
+																		setRuleAction(i, v === "re_encode" ? reencodeActionDefault() : v);
+																	}}
+																>
+																	{#each policyOpts as v (v.value)}
+																		<option value={v.value}>{v.label}</option>
+																	{/each}
+																</select>
+															{:else}
+																<div class="flex flex-wrap items-center gap-1">
+																	<select
+																		class="h-7 w-24 rounded-lg border border-input bg-transparent px-2 text-xs"
+																		value={(rule.action as { codec?: string }).codec ?? ""}
+																		onchange={(e) => setRuleReencodeCodec(i, (e.target as HTMLSelectElement).value)}
+																	>
+																		{#each reencodeCodecOpts as v (v.value)}
+																			<option value={v.value}>{v.label}</option>
+																		{/each}
+																	</select>
+																	<Input class="h-7 w-16" placeholder="rate" title="Sample rate (Hz); empty keeps the source rate" value={(rule.action as { sample_rate?: number }).sample_rate ?? ""} oninput={(e) => setRuleReencodeRate(i, (e.target as HTMLInputElement).value)} />
+																	<Input class="h-7 w-14" placeholder="ch" title="Channel count; empty keeps the source" value={(rule.action as { channels?: number }).channels ?? ""} oninput={(e) => setRuleReencodeChannels(i, (e.target as HTMLInputElement).value)} />
+																	<Button variant="ghost" size="sm" title="Reset this action to Copy" onclick={() => setRuleAction(i, "copy")}>
+																		<Undo2Icon class="size-3.5" />
+																	</Button>
+																</div>
+															{/if}
 													<Button variant="ghost" size="sm" onclick={() => removeRule(i)}>
 														<TrashIcon class="size-3.5" />
 													</Button>

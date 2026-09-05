@@ -10,6 +10,7 @@
 	import { Switch } from "$lib/components/ui/switch";
 	import { Input } from "$lib/components/ui/input";
 	import { Button } from "$lib/components/ui/button";
+	import Undo2Icon from "@lucide/svelte/icons/undo-2";
 	import { cn } from "$lib/utils.js";
 	import type { Device, UiSchema } from "$lib/types.js";
 
@@ -102,40 +103,62 @@
 	]);
 
 	// audio_policy: "copy" | "drop" | {codec, sample_rate?, channels?}
+	// Empty rate/channels mean "keep the source" — the key is omitted
+	// entirely (same semantics as the rule-action editor).
 	const policy = $derived.by(() => {
 		if (typeof value === "string")
-			return { kind: value as string, codec: "eac3", sampleRate: 48000, channels: 2 };
+			return {
+				kind: value as string,
+				codec: "",
+				sampleRate: null as number | null,
+				channels: null as number | null,
+			};
 		const p = value as { codec?: string; sample_rate?: number; channels?: number } | undefined;
 		return {
 			kind: "re_encode",
-			codec: p?.codec ?? "eac3",
-			sampleRate: p?.sample_rate ?? 48000,
-			channels: p?.channels ?? 2,
+			codec: p?.codec ?? "",
+			sampleRate: p?.sample_rate ?? null,
+			channels: p?.channels ?? null,
 		};
 	});
 	const policySel = $derived(policy.kind);
-	const codecSel = $derived(policy.codec);
 	// Option vocabularies come from the server schema, never hardcoded.
 	type Opt = { value: string; label: string };
 	const schemaOpts = $derived((schema as { values?: Opt[] }).values ?? []);
 	const reencodeCodecs = $derived(
 		((schema as { reencode?: { codec?: { values?: Opt[] } } }).reencode?.codec?.values ?? []),
 	);
+	const codecSel = $derived(policy.codec || reencodeCodecs[0]?.value || "eac3");
 	function policyChanged(kind: string) {
 		if (kind === "copy") value = "copy";
 		else if (kind === "drop") value = "drop";
-		else value = { codec: policy.codec, sample_rate: policy.sampleRate, channels: policy.channels };
+		else {
+			const a: Record<string, unknown> = { codec: policy.codec || reencodeCodecs[0]?.value || "eac3" };
+			if (policy.sampleRate != null) a.sample_rate = policy.sampleRate;
+			if (policy.channels != null) a.channels = policy.channels;
+			value = a;
+		}
 	}
 	function codecChanged(codec: string) {
-		value = { codec, sample_rate: policy.sampleRate, channels: policy.channels };
+		// Changing the codec must not silently pin rate/channels.
+		const a: Record<string, unknown> = { codec };
+		if (policy.sampleRate != null) a.sample_rate = policy.sampleRate;
+		if (policy.channels != null) a.channels = policy.channels;
+		value = a;
 	}
 	function setPolicyRate(v: string) {
 		const n = Number(v);
-		value = { codec: policy.codec, sample_rate: n > 0 ? n : 48000, channels: policy.channels };
+		const a: Record<string, unknown> = { codec: codecSel };
+		if (policy.channels != null) a.channels = policy.channels;
+		if (Number.isFinite(n) && n > 0) a.sample_rate = Math.round(n);
+		value = a;
 	}
 	function setPolicyChannels(v: string) {
 		const n = Number(v);
-		value = { codec: policy.codec, sample_rate: policy.sampleRate, channels: n > 0 ? n : 2 };
+		const a: Record<string, unknown> = { codec: codecSel };
+		if (policy.sampleRate != null) a.sample_rate = policy.sampleRate;
+		if (Number.isFinite(n) && n > 0) a.channels = Math.round(n);
+		value = a;
 	}
 
 	// resolution (op field): [w, h] | undefined
@@ -244,10 +267,13 @@
 						<option value={v.value}>{v.label}</option>
 					{/each}
 				</select>
-				<Input type="number" value={String(policy.sampleRate)} oninput={(e) => setPolicyRate((e.target as HTMLInputElement).value)} class="w-24" placeholder="rate" />
+				<Input type="number" value={policy.sampleRate != null ? String(policy.sampleRate) : ""} title="Empty keeps the source rate" oninput={(e) => setPolicyRate((e.target as HTMLInputElement).value)} class="w-24" placeholder="rate" />
 				<span class="text-xs text-muted-foreground">Hz</span>
-				<Input type="number" min="1" value={String(policy.channels)} oninput={(e) => setPolicyChannels((e.target as HTMLInputElement).value)} class="w-16" placeholder="ch" />
+				<Input type="number" min="1" value={policy.channels != null ? String(policy.channels) : ""} title="Empty keeps the source channel count" oninput={(e) => setPolicyChannels((e.target as HTMLInputElement).value)} class="w-16" placeholder="ch" />
 				<span class="text-xs text-muted-foreground">ch</span>
+				<Button variant="ghost" size="sm" title="Reset this policy to Copy" onclick={() => policyChanged("copy")}>
+					<Undo2Icon class="size-3.5" />
+				</Button>
 			</div>
 		{/if}
 	</div>

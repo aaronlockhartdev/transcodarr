@@ -9,7 +9,13 @@ const POLL_MS = 5000;
 
 class Store {
 	libraries = $state<Library[]>([]);
-	filesByLibrary = $state(new Map<number, FileRow[]>());
+	// Plain state Record (NOT a Map): a $state Map does not reliably notify
+	// deriveds that first read a key while it was absent (a hard page reload
+	// starts with an empty map, so the derived evaluates against missing keys
+	// and later in-place .set() updates never re-render it). Property-level
+	// state on an object proxy is the canonical reliable pattern, and the
+	// per-poll writes below are plain property sets.
+	filesByLibrary = $state<Record<number, FileRow[]>>({});
 	jobs = $state<JobRow[]>([]);
 	devices = $state<Device[]>([]);
 	health = $state<Health | null>(null);
@@ -45,13 +51,13 @@ class Store {
 		const results = await Promise.allSettled(
 			this.libraries.map(async (lib) => {
 				const files = await api.listFiles(lib.id);
-				this.filesByLibrary.set(lib.id, files);
+				this.filesByLibrary[lib.id] = files;
 			}),
 		);
 		// A library that vanished mid-flight: drop its cache entry.
-		for (const [id] of this.filesByLibrary) {
-			if (!this.libraries.some((l) => l.id === id)) {
-				this.filesByLibrary.delete(id);
+		for (const id of Object.keys(this.filesByLibrary)) {
+			if (!this.libraries.some((l) => l.id === Number(id))) {
+				delete this.filesByLibrary[Number(id)];
 			}
 		}
 		return results;
@@ -59,7 +65,7 @@ class Store {
 
 	async refreshLibraryFiles(libraryId: number) {
 		try {
-			this.filesByLibrary.set(libraryId, await api.listFiles(libraryId));
+			this.filesByLibrary[libraryId] = await api.listFiles(libraryId);
 		} catch {
 			// transient; the next poll retries
 		}
@@ -92,7 +98,7 @@ class Store {
 	}
 
 	filesOf(libraryId: number): FileRow[] {
-		return this.filesByLibrary.get(libraryId) ?? [];
+		return this.filesByLibrary[libraryId] ?? [];
 	}
 }
 

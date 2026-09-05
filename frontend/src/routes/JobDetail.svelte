@@ -19,7 +19,7 @@
 	const job = $derived(store.jobs.find((j) => j.id === id));
 	const file = $derived.by(() => {
 		if (!job) return undefined;
-		for (const files of store.filesByLibrary.values()) {
+		for (const files of Object.values(store.filesByLibrary)) {
 			const hit = files.find((f) => f.id === job.file_id);
 			if (hit) return hit;
 		}

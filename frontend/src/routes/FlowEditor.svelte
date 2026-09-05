@@ -222,7 +222,6 @@
 					<Label for="flow-json">Flow JSON (validated against v{schema.flow_version})</Label>
 					<Textarea id="flow-json" bind:value={jsonText} class="min-h-96 font-mono text-xs" spellcheck={false} />
 					<div class="flex gap-2">
-						<Button variant="outline" onclick={applyJson}>Apply to step editor</Button>
 						<Button
 							variant="ghost"
 							onclick={() => {
@@ -232,12 +231,10 @@
 						>
 							Refresh from steps
 						</Button>
-					</div>
-					{#if dirty}
-						<Button onclick={applyJson} disabled={saving} class="w-fit">
-							{saving ? "Applying…" : "Apply JSON to steps"}
+						<Button variant="outline" onclick={applyJson} disabled={saving || !jsonDirty}>
+							{saving ? "Applying…" : "Apply"}
 						</Button>
-					{/if}
+					</div>
 				</div>
 			</Tabs.Content>
 		</Tabs.Root>
