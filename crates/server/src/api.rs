@@ -46,18 +46,15 @@ pub fn router(state: AppState) -> Router {
         .route("/api/devices", get(list_devices))
         .route("/api/libraries", get(list_libraries).post(create_library))
         .route(
-            "/api/libraries/:id",
+            "/api/libraries/{id}",
             get(get_library).put(update_library).delete(delete_library),
         )
-        .route(
-            "/api/libraries/:id/files",
-            get(list_files),
-        )
-        .route("/api/libraries/:id/scan", post(scan))
+        .route("/api/libraries/{id}/files", get(list_files))
+        .route("/api/libraries/{id}/scan", post(scan))
         .route("/api/jobs", get(list_jobs))
-        .route("/api/jobs/:id", get(get_job))
-        .route("/api/jobs/:id/log", get(job_log))
-        .route("/api/settings/:key", get(get_setting).put(set_setting))
+        .route("/api/jobs/{id}", get(get_job))
+        .route("/api/jobs/{id}/log", get(job_log))
+        .route("/api/settings/{key}", get(get_setting).put(set_setting))
         .with_state(state)
         .fallback(spa)
 }
