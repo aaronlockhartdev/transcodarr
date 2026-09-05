@@ -454,6 +454,22 @@ pub fn reclaim_jobs(conn: &Connection, expired_only: bool) -> Result<usize> {
     }
     Ok(n as usize)
 }
+/// Refresh a claimed job's lease (the heartbeat of a live encode): a
+/// running encode longer than the original lease must not be reclaimed
+/// by the in-process reaper. Only refreshes a job still claimed by the
+/// same owner; returns false when the job is gone or re-claimed.
+pub fn refresh_job_lease(
+    conn: &Connection,
+    id: i64,
+    claimed_by: &str,
+    lease_expires: i64,
+) -> Result<bool> {
+    let n = conn.execute(
+        "UPDATE jobs SET lease_expires = ?1\n         WHERE id = ?2\n           AND state IN ('running', 'verifying')\n           AND claimed_by = ?3",
+        params![lease_expires, id, claimed_by],
+    )?;
+    Ok(n > 0)
+}
 
 pub fn finish_job(
     conn: &Connection,

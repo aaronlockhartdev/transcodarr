@@ -101,7 +101,9 @@ fn plan_operation(
     operation: &Operation,
     facts: &FileFacts,
 ) -> crate::error::Result<FfmpegPlan> {
-    let mut video = VideoPlan::Copy;
+    // None = the input has no video stream: there is nothing to map,
+    // copy, or encode (a video section plans Identity for such files).
+    let mut video: Option<VideoPlan> = facts.video.is_some().then_some(VideoPlan::Copy);
     let mut audio: Option<crate::plan::AudioPlan> = None;
     let mut subtitles: Option<crate::plan::SubtitlePlan> = None;
 
@@ -111,7 +113,7 @@ fn plan_operation(
             .ok_or_else(|| CoreError::UnknownOperationSection(key.clone()))?;
         match section.plan(params, facts)? {
             SectionPlan::Identity => {}
-            SectionPlan::Video(v) => video = v,
+            SectionPlan::Video(v) => video = Some(v),
             SectionPlan::Audio(a) => audio = Some(a),
             SectionPlan::Subtitles(s) => subtitles = Some(s),
         }
@@ -230,7 +232,12 @@ mod tests {
         let Evaluation::Plan(p) = &e else {
             panic!("expected plan: {e:?}");
         };
-        let VideoPlan::Encode { codec, target_width, .. } = &p.video else {
+        let Some(VideoPlan::Encode {
+            codec,
+            target_width,
+            ..
+        }) = p.video.as_ref()
+        else {
             panic!("expected encode: {p:?}");
         };
         assert_eq!(*codec, crate::plan::VideoTargetCodec::H264);
@@ -316,5 +323,30 @@ mod tests {
         ));
         // eac3→ac3: container stays smart → mp4 (both are MP4-safe).
         assert_eq!(p.container, "mp4");
+    }
+
+    #[test]
+    fn audio_only_file_carries_no_video_in_plan() {
+        let r = registry();
+        let f = flow(vec![(
+            BTreeMap::new(),
+            json!({
+                "audio": {
+                    "rules": [{
+                        "match": { "codecs": ["eac3"] },
+                        "action": { "codec": "ac3" }
+                    }]
+                }
+            }),
+        )]);
+        let mut facts = h264_1080p_facts();
+        facts.video = None;
+        let e = evaluate(&r, &f, &facts).unwrap();
+        let Evaluation::Plan(p) = &e else {
+            panic!("expected plan: {e:?}");
+        };
+        // No video in the input ⇒ no video in the plan (to_argv must
+        // not emit a video -map for it).
+        assert!(p.video.is_none(), "{p:?}");
     }
 }

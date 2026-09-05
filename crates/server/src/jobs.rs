@@ -10,6 +10,8 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use anyhow::{Context, Result, anyhow};
@@ -31,8 +33,13 @@ use crate::verify::probe_to_facts;
 
 /// Job lease: a job whose lease expires without finishing is
 /// reclaimable (crash resilience; the `claimed_by` field carries the
-/// owner tag).
+/// owner tag). A live encode keeps its lease fresh with a heartbeat
+/// (see `lease_heartbeat`), so expiry means the worker is actually
+/// gone.
 const JOB_LEASE: i64 = 3600;
+
+/// How often the in-flight encode refreshes its job lease.
+const LEASE_HEARTBEAT_S: u64 = 60;
 
 /// Media extensions the scanner picks up (DESIGN §13.6).
 const MEDIA_EXTS: &[&str] = &["mkv", "mp4", "m2ts", "ts", "mov", "avi", "webm", "m4v"];
@@ -298,6 +305,28 @@ fn unix_now() -> i64 {
         .unwrap_or(0)
 }
 
+/// Lease heartbeat for an in-flight encode: while the ffmpeg child
+/// runs, the job's lease is refreshed every `LEASE_HEARTBEAT_S`.
+/// A live long encode can therefore never be reclaimed by the
+/// in-process reaper (which only takes jobs whose lease has lapsed),
+/// while a genuinely dead worker's lease still expires and is
+/// reclaimed. Stops itself when the job row is no longer claimed by
+/// us (finished or re-claimed elsewhere).
+fn lease_heartbeat(db: &Db, job_id: i64, stop: Arc<AtomicBool>) {
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(LEASE_HEARTBEAT_S));
+        if stop.load(Ordering::Relaxed) {
+            return;
+        }
+        let refreshed = db
+            .with(|c| db::refresh_job_lease(c, job_id, "transcodarr", unix_now() + JOB_LEASE))
+            .unwrap_or(false);
+        if !refreshed {
+            return;
+        }
+    }
+}
+
 /// Execute one job: encode to a sibling temp file, verify the output,
 /// then atomically swap (the original is moved to the quarantine dir,
 /// the output is renamed onto the original's path).
@@ -327,13 +356,24 @@ pub fn run_job(
 
     let plan: FfmpegPlan =
         serde_json::from_str(&job.plan_json).with_context(|| format!("job {} plan", job.id))?;
+
+    // Temp name unique per claim generation (job id + claim
+    // timestamp). A re-claimed job — lease expiry with a dead worker,
+    // or a process restart — must never write into a previous claim's
+    // temp file: two encoders on one path is the only way this runner
+    // can produce a corrupt file, and it would then be promoted over
+    // the original.
+    let claim_ts = unix_now();
     let dst = src.with_file_name(format!(
-        "{}.{}.transcodarr-tmp",
-        src.file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("out"),
-        plan.container
+        "{}.{}.{}.{}.transcodarr-tmp",
+        src.file_stem().and_then(|s| s.to_str()).unwrap_or("out"),
+        plan.container,
+        job.id,
+        claim_ts
     ));
+    // A stale file at this exact path can only be ours (unique name);
+    // remove it rather than let -y truncate-while-shared.
+    let _ = std::fs::remove_file(&dst);
 
     // ffmpeg stderr goes to a log file (kept on disk for the UI).
     let logs = data_dir.join("logs");
@@ -353,9 +393,22 @@ pub fn run_job(
     cmd.args(&argv)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::from(log_file));
-    let status = cmd
-        .status()
+    let mut child = cmd
+        .spawn()
         .with_context(|| format!("spawn ffmpeg: {ffmpeg}"))?;
+
+    // Keep this job's lease alive while the encode runs (a live
+    // multi-hour encode must not be reclaimed as stale).
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_hb = stop.clone();
+    let hb_db = db.clone();
+    let hb_job = job.id;
+    let heartbeat = std::thread::spawn(move || lease_heartbeat(&hb_db, hb_job, stop_hb));
+
+    let status = child.wait().with_context(|| "wait ffmpeg")?;
+
+    stop.store(true, Ordering::Relaxed);
+    let _ = heartbeat.join();
 
     if !status.success() {
         let tail = log_tail(&log_path, 20);
@@ -466,8 +519,10 @@ pub async fn run_loop(state: AppState, mut shutdown: watch::Receiver<bool>) -> R
         }
 
         // Reap jobs whose owner is gone (worker panicked, or lease
-        // expired). A crash mid-encode only ever leaves a sibling
-        // temp file behind, so re-running is safe.
+        // expired — with the heartbeat in place, expiry here means
+        // the encode process really is dead). A crash mid-encode
+        // only ever leaves a sibling temp file behind, so re-running
+        // is safe.
         if let Ok(n) = state.db.with(|c| db::reclaim_jobs(c, true)) {
             if n > 0 {
                 tracing::info!("reclaimed {n} stale job(s)");

@@ -26,8 +26,10 @@ fn duration_tolerance_s(source: f64) -> f64 {
 ///    (truncation is fine; a big delta means a broken encode).
 /// 3. **Stream inventory**: the audio and subtitle track counts match
 ///    the plan (dropped tracks absent; re-encoded ones present).
-/// 4. **Video codec** is the plan's target codec (when the video is
-///    re-encoded), or the source codec (when copied).
+/// 4. **Video** matches the plan: copied video must be present and
+///    keep its codec (a missing stream is a data-loss failure, never
+///    a pass), re-encoded video must be present in the target codec,
+///    and a file with no input video must not gain one.
 ///
 /// Returns `Ok(true)` when every check passes; `Ok(false)` (with the
 /// first failure named) otherwise.
@@ -66,16 +68,26 @@ pub fn verify_output(
     if output.subtitles.len() != expected_subs {
         return Ok(false);
     }
-    // 4. Video codec.
+    // 4. Video.
     match &plan.video {
-        VideoPlan::Copy => {
-            if let (Some(in_v), Some(out_v)) = (&input.video, &output.video) {
-                if !in_v.codec.eq_ignore_ascii_case(&out_v.codec) {
-                    return Ok(false);
-                }
+        None => {
+            // No video in the input: the output must not gain any.
+            if output.video.is_some() {
+                return Ok(false);
             }
         }
-        VideoPlan::Encode { codec, .. } => {
+        Some(VideoPlan::Copy) => {
+            // Video was copied: it must still be present, with the
+            // same codec. A missing stream here is the classic
+            // silent video-loss failure — it must fail, never pass.
+            let (Some(in_v), Some(out_v)) = (&input.video, &output.video) else {
+                return Ok(false);
+            };
+            if !in_v.codec.eq_ignore_ascii_case(&out_v.codec) {
+                return Ok(false);
+            }
+        }
+        Some(VideoPlan::Encode { codec, .. }) => {
             let Some(out_v) = &output.video else {
                 return Ok(false);
             };
@@ -124,7 +136,7 @@ mod tests {
     fn plan() -> FfmpegPlan {
         FfmpegPlan {
             container: "mp4".into(),
-            video: VideoPlan::Encode {
+            video: Some(VideoPlan::Encode {
                 codec: VideoTargetCodec::H264,
                 encoder: "libx264".into(),
                 profile: "high".into(),
@@ -137,7 +149,7 @@ mod tests {
                 filters: vec![],
                 target_width: 1920,
                 target_height: 1080,
-            },
+            }),
             audio: Some(AudioPlan {
                 per_track: vec![AudioTrackPlan::Copy, AudioTrackPlan::Drop],
             }),
@@ -210,5 +222,29 @@ mod tests {
         let mut out = output_facts();
         out.container = "mkv".into();
         assert!(!verify_output(&plan(), &input_facts(), &out).unwrap());
+    }
+
+    #[test]
+    fn copied_video_missing_from_output_fails() {
+        // The P0: a copy plan whose output lost the video stream is
+        // silent data loss — verification must fail, so the original
+        // is never swapped out.
+        let mut p = plan();
+        p.video = Some(VideoPlan::Copy);
+        let mut out = output_facts();
+        out.video = None;
+        assert!(!verify_output(&p, &input_facts(), &out).unwrap());
+    }
+
+    #[test]
+    fn copied_video_keeps_source_codec_passes() {
+        let mut p = plan();
+        p.video = Some(VideoPlan::Copy);
+        let mut out = output_facts();
+        out.video = Some(VideoFacts {
+            codec: "hevc".into(),
+            ..Default::default()
+        });
+        assert!(verify_output(&p, &input_facts(), &out).unwrap());
     }
 }

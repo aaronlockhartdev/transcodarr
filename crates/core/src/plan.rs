@@ -230,8 +230,10 @@ pub struct FfmpegPlan {
     /// Resolved target container (`"mp4"` | `"mkv"`; also the output
     /// extension, DESIGN §6.3).
     pub container: String,
-    /// Video decision (`Copy` = stream-copy).
-    pub video: VideoPlan,
+    /// Video decision (`Copy` = stream-copy the first video stream);
+    /// `None` when the input has no video stream at all (nothing to
+    /// map, copy, or encode).
+    pub video: Option<VideoPlan>,
     /// Per-track audio decisions (absent = all copied).
     pub audio: Option<AudioPlan>,
     /// Subtitles carried into the output (all copied, v1).
@@ -246,7 +248,7 @@ impl FfmpegPlan {
     #[must_use]
     pub fn changes_anything(&self) -> bool {
         self.remux
-            || self.video.changes_stream()
+            || self.video.as_ref().is_some_and(|v| v.changes_stream())
             || self.audio.as_ref().is_some_and(|a| a.changes_anything())
             || self.subtitles.as_ref().is_some_and(|s| s.changes_anything())
     }
@@ -267,20 +269,43 @@ impl FfmpegPlan {
 /// (ffmpeg's `0:<n>` in `-map 0:<type>:<n>`); the server's fact
 /// extractor must report per-type indices, not ffprobe's global
 /// stream indices.
+///
+/// **Note on `-map`:** the moment any explicit `-map` appears (audio
+/// or subtitles always emit some), ffmpeg's automatic stream
+/// selection is off — so the video stream is *always* mapped
+/// explicitly (`-map 0:v:0`), never left to defaults.
 #[must_use]
 pub fn to_argv(plan: &FfmpegPlan, device: &Device, src: &Path, dst: &Path) -> Vec<String> {
-    let mut a: Vec<String> = vec![
-        "-hide_banner".into(),
-        "-nostdin".into(),
-        "-y".into(),
-        "-i".into(),
-        src.to_string_lossy().into_owned(),
-    ];
+    let mut a: Vec<String> = vec!["-hide_banner".into(), "-nostdin".into(), "-y".into()];
+
+    // `-hwaccel` is an *input* option: it must come BEFORE `-i`, and
+    // only when a GPU device supplies the video encoder.
+    if let Some(VideoPlan::Encode { codec, .. }) = &plan.video {
+        if device.kind == crate::device::DeviceKind::Gpu {
+            if let Some(enc) = device.encoders.iter().find(|e| e.target == *codec) {
+                if let Some(h) = hwaccel_for(&enc.name).1 {
+                    a.push("-hwaccel".into());
+                    a.push(h.to_string());
+                }
+            }
+        }
+    }
+
+    a.push("-i".into());
+    a.push(src.to_string_lossy().into_owned());
 
     // ── Video ─────────────────────────────────────────────────────
     match &plan.video {
-        VideoPlan::Copy => a.push("-c:v".into()),
-        VideoPlan::Encode {
+        None => {
+            // No video stream in the input: nothing to map.
+        }
+        Some(VideoPlan::Copy) => {
+            a.push("-map".into());
+            a.push("0:v:0".into());
+            a.push("-c:v".into());
+            a.push("copy".into());
+        }
+        Some(VideoPlan::Encode {
             codec,
             encoder,
             profile,
@@ -292,24 +317,22 @@ pub fn to_argv(plan: &FfmpegPlan, device: &Device, src: &Path, dst: &Path) -> Ve
             pix_fmt,
             filters,
             ..
-        } => {
+        }) => {
+            a.push("-map".into());
+            a.push("0:v:0".into());
             // Device encoder resolution.
-            let (encoder, hwaccel) = if device.kind == crate::device::DeviceKind::Gpu {
+            let enc = if device.kind == crate::device::DeviceKind::Gpu {
                 device
                     .encoders
                     .iter()
                     .find(|e| e.target == *codec)
-                    .map(|e| (e.name.clone(), Some(hwaccel_name(&e.name))))
-                    .unwrap_or_else(|| (encoder.clone(), None))
+                    .map(|e| e.name.clone())
+                    .unwrap_or_else(|| encoder.clone())
             } else {
-                (encoder.clone(), None)
+                encoder.clone()
             };
             a.push("-c:v".into());
-            a.push(encoder);
-            if let Some(h) = hwaccel {
-                a.push("-hwaccel".into());
-                a.push(h.to_string());
-            }
+            a.push(enc);
             a.push("-profile:v".into());
             a.push(profile.clone());
             a.push("-level".into());
@@ -413,11 +436,7 @@ pub fn to_argv(plan: &FfmpegPlan, device: &Device, src: &Path, dst: &Path) -> Ve
     a
 }
 
-/// Hardware-accel flag for an encoder name (`h264_nvenc` → `cuda`).
-fn hwaccel_name(encoder: &str) -> &'static str {
-    let (_, accel) = hwaccel_for(encoder);
-    accel.unwrap_or("cuda")
-}
+// (the `-hwaccel` flag is derived inline in `to_argv` via `hwaccel_for`)
 
 #[cfg(test)]
 mod tests {
@@ -430,7 +449,7 @@ mod tests {
     fn plan() -> FfmpegPlan {
         FfmpegPlan {
             container: "mp4".into(),
-            video: VideoPlan::Encode {
+            video: Some(VideoPlan::Encode {
                 codec: VideoTargetCodec::H264,
                 encoder: "libx264".into(),
                 profile: "high".into(),
@@ -443,7 +462,7 @@ mod tests {
                 filters: vec!["scale=1920:1080:flags=lanczos".into()],
                 target_width: 1920,
                 target_height: 1080,
-            },
+            }),
             audio: Some(AudioPlan {
                 per_track: vec![
                     AudioTrackPlan::Copy,
@@ -472,11 +491,15 @@ mod tests {
     fn cpu_argv_is_device_independent() {
         let argv = to_argv(&plan(), &cpu(), Path::new("/in.mkv"), Path::new("/out.mp4"));
         let s = argv.join(" ");
-        assert!(s.contains("-c:v libx264"), "{s}");
+        // Video is always mapped explicitly (any -map disables
+        // ffmpeg's automatic stream selection).
+        assert!(s.contains("-map 0:v:0 -c:v libx264"), "{s}");
         assert!(s.contains("-profile:v high"), "{s}");
         assert!(s.contains("-level 4.2"), "{s}");
         assert!(s.contains("-b:v 12000000"), "{s}");
         assert!(s.contains("-vf scale=1920:1080:flags=lanczos"), "{s}");
+        // No hwaccel on CPU.
+        assert!(!s.contains("-hwaccel"), "{s}");
         // Track 0 copied, track 1 re-encoded, track 2 dropped.
         assert!(s.contains("0:a:0"), "{s}");
         assert!(s.contains("-c:a libeac3"), "{s}");
@@ -488,7 +511,7 @@ mod tests {
     }
 
     #[test]
-    fn gpu_device_swaps_encoder_and_hwaccel() {
+    fn gpu_device_swaps_encoder_and_hwaccel_before_input() {
         let mut gpu = Device {
             id: "gpu-nvidia-0".into(),
             kind: crate::device::DeviceKind::Gpu,
@@ -509,6 +532,31 @@ mod tests {
         let s = argv.join(" ");
         assert!(s.contains("-c:v h264_nvenc"), "{s}");
         assert!(s.contains("-hwaccel cuda"), "{s}");
+        // -hwaccel is an input option: it must precede -i.
+        let hi = argv.iter().position(|x| x == "-hwaccel").expect("-hwaccel present");
+        let ii = argv.iter().position(|x| x == "-i").expect("-i present");
+        assert!(hi < ii, "hwaccel must come before -i: {s}");
         let _ = &mut gpu;
+    }
+
+    #[test]
+    fn video_copy_is_mapped_and_copied() {
+        let mut p = plan();
+        p.video = Some(VideoPlan::Copy);
+        let argv = to_argv(&p, &cpu(), Path::new("/in.mkv"), Path::new("/out.mp4"));
+        let s = argv.join(" ");
+        assert!(s.contains("-map 0:v:0 -c:v copy"), "{s}");
+    }
+
+    #[test]
+    fn no_video_in_input_emits_no_video_args() {
+        let mut p = plan();
+        p.video = None;
+        p.audio = None;
+        p.subtitles = None;
+        let argv = to_argv(&p, &cpu(), Path::new("/in.mp3.mp4"), Path::new("/out.mp4"));
+        let s = argv.join(" ");
+        assert!(!s.contains("-c:v"), "no video stream, no -c:v: {s}");
+        assert!(!s.contains("-hwaccel"), "{s}");
     }
 }
