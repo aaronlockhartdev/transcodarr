@@ -9,3 +9,4 @@
 # Local state
 *.log
 .DS_Store
+.pi/
