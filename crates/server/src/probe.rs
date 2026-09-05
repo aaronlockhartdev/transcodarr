@@ -1,0 +1,312 @@
+//! I/O-bound fact extraction: run `ffprobe` and map its JSON into a
+//! pure `FileFacts` (the unit of evaluation, DESIGN §8).
+//!
+//! `map_facts` is pure and unit-testable; `probe` (the
+//! `FactExtractor` impl) shells out and delegates to it.
+
+use std::path::Path;
+
+use serde_json::Value;
+use transcodarr_core::facts::{AudioTrack, FileFacts, Hdr, SubtitleTrack, VideoFacts};
+use transcodarr_core::registry::FactExtractor;
+
+/// The ffprobe-backed fact extractor (registered in `Registry::v1()`
+/// at server startup, DESIGN §10).
+#[derive(Clone)]
+pub struct FfprobeFactExtractor {
+    pub path: String,
+}
+
+impl FfprobeFactExtractor {
+    pub fn new(path: impl Into<String>) -> Self {
+        Self { path: path.into() }
+    }
+}
+
+impl FactExtractor for FfprobeFactExtractor {
+    fn key(&self) -> &'static str {
+        "ffprobe"
+    }
+
+    fn probe(&self, path: &Path) -> std::io::Result<FileFacts> {
+        let out = std::process::Command::new(&self.path)
+            .args(["-v", "error", "-print_format", "json", "-show_format", "-show_streams"])
+            .arg(path)
+            .output()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        if !out.status.success() {
+            let err = String::from_utf8_lossy(&out.stderr);
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("ffprobe failed: {err}"),
+            ));
+        }
+        let doc: Value = serde_json::from_slice(&out.stdout).map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, e)
+        })?;
+        map_facts(path, &doc)
+    }
+}
+
+/// Map an ffprobe JSON document onto `FileFacts`.
+///
+/// Decisions:
+/// - **Container** is derived from the file extension, not
+///   `format_name` (which yields family strings like
+///   "matroska,webm" rather than an extension).
+/// - **Track indices** are per-type (0-based within their stream
+///   type) — the per-type indices are what ffmpeg `-map` uses in
+///   plan.rs.
+/// - **Atmos** is a heuristic (eac3 with ≥8 channels; ffprobe does
+///   not expose JOC metadata in v1).
+/// - **HDR** comes from stream side data: "Dolby Vision" →
+///   DolbyVision; "HDR10+" → Hdr10Plus; "HDR10" → Hdr10; "Content
+///   light level" (CLLI) without HDR10 → Hlg (the safe default that
+///   never triggers HDR-to-SDR on its own).
+pub fn map_facts(path: &Path, doc: &Value) -> std::io::Result<FileFacts> {
+    let container = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+
+    let size = doc
+        .get("format")
+        .and_then(|f| f.get("size"))
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
+    let duration_s = doc
+        .get("format")
+        .and_then(|f| f.get("duration"))
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    let bitrate_bps = doc
+        .get("format")
+        .and_then(|f| f.get("bit_rate"))
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<u64>().ok());
+
+    let mut video = None;
+    let mut audio = Vec::new();
+    let mut subtitles = Vec::new();
+    let (mut aidx, mut sidx) = (0u32, 0u32);
+
+    for s in doc.get("streams").and_then(|v| v.as_array()).into_iter().flatten() {
+        let r#type = s.get("codec_type").and_then(|v| v.as_str()).unwrap_or("");
+        let codec = s
+            .get("codec_name")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let language = s
+            .get("tags")
+            .and_then(|t| t.get("language"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        match r#type {
+            "video" => {
+                if video.is_some() {
+                    continue; // one video stream is the model (v1)
+                }
+                let mut hdr = Hdr::None;
+                for sd in s
+                    .get("side_data_list")
+                    .and_then(|v| v.as_array())
+                    .into_iter()
+                    .flatten()
+                {
+                    let name = sd
+                        .get("side_data_type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    if name.contains("Dolby Vision") {
+                        hdr = Hdr::DolbyVision;
+                    } else if name.contains("HDR10+") {
+                        hdr = Hdr::Hdr10Plus;
+                    } else if name.contains("HDR10") {
+                        hdr = Hdr::Hdr10;
+                    } else if name.contains("Content light level") {
+                        hdr = Hdr::Hlg;
+                    }
+                }
+                if matches!(hdr, Hdr::None)
+                    && s.get("color_transfer").and_then(|v| v.as_str()) == Some("smpte2084")
+                {
+                    hdr = Hdr::Hlg;
+                }
+                video = Some(VideoFacts {
+                    codec: codec.unwrap_or_default(),
+                    profile: s.get("profile").and_then(|v| v.as_str()).map(str::to_string),
+                    level: s
+                        .get("level")
+                        .and_then(|v| v.as_u64())
+                        .map(|l| norm_level(l, codec_str(s))),
+                    pixel_format: s.get("pix_fmt").and_then(|v| v.as_str()).map(str::to_string),
+                    width: s.get("width").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                    height: s.get("height").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                    frame_rate: s
+                        .get("avg_frame_rate")
+                        .and_then(|v| v.as_str())
+                        .and_then(parse_rate),
+                    hdr,
+                    bitrate_bps: s
+                        .get("bit_rate")
+                        .and_then(|v| v.as_str())
+                        .and_then(|v| v.parse().ok()),
+                });
+            }
+            "audio" => {
+                let channels = s.get("channels").and_then(|v| v.as_u64()).map(|v| v as u32);
+                let is_eac3 = codec
+                    .as_deref()
+                    .map(|c| c.to_ascii_lowercase().starts_with("eac3"))
+                    .unwrap_or(false);
+                audio.push(AudioTrack {
+                    index: aidx,
+                    codec: codec.unwrap_or_default(),
+                    language,
+                    channels,
+                    sample_rate: s.get("sample_rate").and_then(|v| v.as_u64()).map(|v| v as u32),
+                    atmos: is_eac3 && channels.map(|c| c >= 8).unwrap_or(false),
+                });
+                aidx += 1;
+            }
+            "subtitle" => {
+                subtitles.push(SubtitleTrack {
+                    index: sidx,
+                    codec: codec.unwrap_or_default(),
+                    language,
+                    forced: s
+                        .get("disposition")
+                        .and_then(|d| d.get("forced"))
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0)
+                        != 0,
+                });
+                sidx += 1;
+            }
+            _ => {}
+        }
+    }
+    Ok(FileFacts {
+        container,
+        video,
+        audio,
+        subtitles,
+        size,
+        duration_s,
+        bitrate_bps,
+    })
+}
+
+fn codec_str(s: &Value) -> &str {
+    s.get("codec_name").and_then(|v| v.as_str()).unwrap_or("")
+}
+
+/// Codec-aware level normalization (ffprobe `level` is `level_idc`).
+///
+/// H.264: `level_idc = major*10 + minor` (42 → 4.2).
+/// HEVC: the idc is a lookup table (100→4.0, 110→4.1, 120→5.0,
+/// 130→5.1, 140→5.2, 150→5.3, 153→6.0, 165→6.1) — NOT
+/// major*10+minor.
+fn norm_level(idc: u64, codec: &str) -> String {
+    let codec = codec.to_ascii_lowercase();
+    if codec == "hevc" || codec == "h265" {
+        return match idc {
+            100 => "4.0".into(),
+            110 => "4.1".into(),
+            120 => "5.0".into(),
+            130 => "5.1".into(),
+            140 => "5.2".into(),
+            150 => "5.3".into(),
+            153 => "6.0".into(),
+            165 => "6.1".into(),
+            _ => {
+                let major = idc / 100;
+                let minor = idc % 100;
+                format!("{major}.{minor}")
+            }
+        };
+    }
+    if codec == "h264" || codec == "avc" {
+        let major = idc / 10;
+        let minor = idc % 10;
+        return format!("{major}.{minor}");
+    }
+    idc.to_string()
+}
+
+/// Parse a rational frame rate string (`"24000/1001"`, `"25/1"`, `"0/0"`).
+fn parse_rate(s: &str) -> Option<f64> {
+    let (a, b) = s.split_once('/')?;
+    let a: f64 = a.trim().parse().ok()?;
+    let b: f64 = b.trim().parse().ok()?;
+    if b == 0.0 || a == 0.0 {
+        None
+    } else {
+        Some(a / b)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn doc(v: &str) -> Value {
+        serde_json::from_str(v).unwrap()
+    }
+
+    #[test]
+    fn maps_a_full_document() {
+        let d = doc(
+            r#"{
+              "format": {"duration": "100.5", "size": "12345", "bit_rate": "98765"},
+              "streams": [
+                {"codec_type": "video", "codec_name": "hevc", "profile": "Main",
+                 "level": 150, "pix_fmt": "yuv420p10le", "width": 3840, "height": 2160,
+                 "avg_frame_rate": "25/1", "bit_rate": "98765",
+                 "side_data_list": [{"side_data_type": "Dolby Vision"}]},
+                {"codec_type": "audio", "codec_name": "eac3", "channels": 8,
+                 "sample_rate": "48000", "tags": {"language": "eng"}},
+                {"codec_type": "subtitle", "codec_name": "mov_text",
+                 "tags": {"language": "eng"}, "disposition": {"forced": 1}}
+              ]
+            }"#,
+        );
+        let facts = map_facts(Path::new("/media/show.s01e01.mkv"), &d).unwrap();
+        assert_eq!(facts.container, "mkv");
+        let v = facts.video.as_ref().unwrap();
+        assert_eq!(&v.codec, "hevc");
+        // HEVC level 150 → 5.3 (NOT 15.0 — that's the H.264 encoding).
+        assert_eq!(v.level.as_deref(), Some("5.3"));
+        assert_eq!(v.width, 3840);
+        assert_eq!(v.frame_rate, Some(25.0));
+        assert!(matches!(v.hdr, Hdr::DolbyVision));
+        assert_eq!(facts.audio.len(), 1);
+        assert!(facts.audio[0].atmos);
+        assert_eq!(facts.audio[0].channels, Some(8));
+        assert_eq!(facts.subtitles[0].index, 0);
+        assert!(facts.subtitles[0].forced);
+    }
+
+    #[test]
+    fn h264_level_encoding_differs_from_hevc() {
+        let d = doc(
+            r#"{"format": {"duration": "10"}, "streams": [
+                {"codec_type": "video", "codec_name": "h264", "level": 42,
+                 "pix_fmt": "yuv420p", "width": 1920, "height": 1080}
+            ]}"#,
+        );
+        let facts = map_facts(Path::new("/x.mp4"), &d).unwrap();
+        assert_eq!(facts.video.as_ref().unwrap().level.as_deref(), Some("4.2"));
+    }
+
+    #[test]
+    fn empty_document_is_safe() {
+        let facts = map_facts(Path::new("/x.avi"), &doc("{}")).unwrap();
+        assert_eq!(facts.container, "avi");
+        assert!(facts.video.is_none());
+        assert!(facts.audio.is_empty());
+    }
+}

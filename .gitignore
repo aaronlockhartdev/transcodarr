@@ -1,0 +1,11 @@
+# Rust
+/target
+
+# Frontend
+/frontend/node_modules
+/frontend/dist
+/frontend/*.local
+
+# Local state
+*.log
+.DS_Store

@@ -1,0 +1,13 @@
+[package]
+name = "transcodarr-core"
+description = "Transcodarr pure core: flows, file facts, registries, evaluation, ffmpeg planning"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
