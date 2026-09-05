@@ -96,9 +96,9 @@
 	function setSection(name: string, enabled: boolean) {
 		const next = { ...step.operation };
 		if (enabled) {
-			if (!(name in next)) {
-				const f = schema.operation_sections[name]?.schema as { default?: unknown } | undefined;
-				next[name] = f?.default ?? {};
+			if (next[name] === undefined) {
+				// seedSection wraps the schema field defaults in wire shape.
+				next[name] = seedSection(name);
 			}
 		} else {
 			delete next[name];
@@ -114,6 +114,20 @@
 	function sectionValue(name: string): Record<string, unknown> {
 		const v = step.operation[name];
 		return (v as Record<string, unknown>) ?? {};
+	}
+	// Enable-time defaults, from the schema (never hardcoded): each field's
+	// default wrapped in its wire shape, so an enabled section is complete
+	// and parseable (video, for instance, requires codec).
+	function seedSection(name: string): Record<string, unknown> {
+		const f = schema.operation_sections[name]?.schema as
+			| { fields?: Record<string, { kind?: string; default?: unknown }> }
+			| undefined;
+		const seeded: Record<string, unknown> = {};
+		for (const [k, fld] of Object.entries(f?.fields ?? {})) {
+			if (fld.default === undefined) continue;
+			seeded[k] = fld.kind === "bitrate_mode" ? { mode: fld.default } : fld.default;
+		}
+		return seeded;
 	}
 	function setSectionField(name: string, field: string, value: unknown) {
 		const sec = { ...sectionValue(name) };
@@ -159,6 +173,17 @@
 		setRules(rules);
 	}
 
+	// The audio section's policy fragment supplies the re-encode codec list.
+	const reencodeCodecOpts = $derived.by(() => {
+		const f = (schema.operation_sections["audio"]?.schema as { fields?: Record<string, { reencode?: { codec?: { values?: { value: string; label: string }[] } } }> })?.fields?.["default"];
+		return f?.reencode?.codec?.values ?? [];
+	});
+	// Rule match-codec vocabulary from the audio section's rule item schema.
+	const ruleMatchCodecOpts = $derived.by(() => {
+		const f = (schema.operation_sections["audio"]?.schema as { fields?: Record<string, { item?: { match?: { codecs?: { values?: string[] } } } }> })?.fields?.["rules"];
+		return f?.item?.match?.codecs?.values ?? [];
+	});
+	
 	const noCondition = $derived.by(() => {
 		// Object.keys alone does not subscribe on a $state proxy — read each
 		// value so key add/remove re-runs this derived.
@@ -280,10 +305,11 @@
 									{#if name === "audio" && field === "rules"}
 										<div class="md:col-span-2">
 											<p class="mb-1 text-xs font-medium">Rules <span class="text-muted-foreground">(first match wins; re-encode applies to all matching tracks)</span></p>
+											
 											{#each rulesFor() as rule, i (i)}
 												<div class="mb-2 flex flex-wrap items-center gap-2 rounded border p-2">
 													<div class="flex flex-wrap gap-1">
-														{#each ["eac3", "ac3", "dts", "truehd", "aac", "opus"] as c (c)}
+												{#each ruleMatchCodecOpts as c (c)}
 															<Button
 																type="button"
 																variant={rule.match.codecs.includes(c) ? "default" : "outline"}
@@ -301,7 +327,11 @@
 														<select
 															class="h-7 w-28 rounded-lg border border-input bg-transparent px-2 text-xs"
 															value={rule.action}
-															onchange={(e) => setRuleAction(i, (e.target as HTMLSelectElement).value)}
+																// "re-encode" writes the object form (AudioPolicy's re-encode is an object, not a string).
+															onchange={(e) => {
+																const v = (e.target as HTMLSelectElement).value;
+																setRuleAction(i, v === "re-encode" ? { codec: "eac3", sample_rate: 48000, channels: 2 } : v);
+															}}
 														>
 															<option value="copy">Copy</option>
 															<option value="drop">Drop</option>
@@ -318,9 +348,9 @@
 																	channels: 2,
 																})}
 														>
-															<option value="eac3">E-AC-3</option>
-															<option value="ac3">AC-3</option>
-															<option value="aac">AAC</option>
+														{#each reencodeCodecOpts as v (v.value)}
+															<option value={v.value}>{v.label}</option>
+														{/each}
 														</select>
 													{/if}
 													<Button variant="ghost" size="sm" onclick={() => removeRule(i)}>

@@ -107,7 +107,7 @@
 			return { kind: value as string, codec: "eac3", sampleRate: 48000, channels: 2 };
 		const p = value as { codec?: string; sample_rate?: number; channels?: number } | undefined;
 		return {
-			kind: "re-encode",
+			kind: "re_encode",
 			codec: p?.codec ?? "eac3",
 			sampleRate: p?.sample_rate ?? 48000,
 			channels: p?.channels ?? 2,
@@ -115,6 +115,12 @@
 	});
 	const policySel = $derived(policy.kind);
 	const codecSel = $derived(policy.codec);
+	// Option vocabularies come from the server schema, never hardcoded.
+	type Opt = { value: string; label: string };
+	const schemaOpts = $derived((schema as { values?: Opt[] }).values ?? []);
+	const reencodeCodecs = $derived(
+		((schema as { reencode?: { codec?: { values?: Opt[] } } }).reencode?.codec?.values ?? []),
+	);
 	function policyChanged(kind: string) {
 		if (kind === "copy") value = "copy";
 		else if (kind === "drop") value = "drop";
@@ -180,15 +186,15 @@
 {:else if schema.kind === "bitrate_mode"}
 	<div class="flex flex-col gap-2">
 		<div class="flex gap-1">
-			{#each ["source_capped", "fixed", "crf"] as m (m)}
+			{#each schemaOpts as v (v.value)}
 				<Button
 					type="button"
-					variant={bitrate.mode === m ? "default" : "outline"}
+					variant={bitrate.mode === v.value ? "default" : "outline"}
 					size="sm"
 					class="h-auto px-2 py-1 text-xs capitalize"
-					onclick={() => setBitrateMode(m)}
+					onclick={() => setBitrateMode(v.value)}
 				>
-					{m.replace("_", " ")}
+					{v.label}
 				</Button>
 			{/each}
 		</div>
@@ -223,20 +229,20 @@
 			value={policySel}
 			onchange={(e) => policyChanged((e.target as HTMLSelectElement).value)}
 		>
-			<option value="copy">Copy</option>
-			<option value="drop">Drop</option>
-			<option value="re-encode">Re-encode</option>
+			{#each schemaOpts as v (v.value)}
+				<option value={v.value}>{v.label}</option>
+			{/each}
 		</select>
-		{#if policy.kind === "re-encode"}
+		{#if policy.kind === "re_encode"}
 			<div class="flex flex-wrap items-center gap-2">
 				<select
 					class={cn(SELECT_CLASS, "w-32")}
 					value={codecSel}
 					onchange={(e) => codecChanged((e.target as HTMLSelectElement).value)}
 				>
-					<option value="eac3">E-AC-3</option>
-					<option value="ac3">AC-3</option>
-					<option value="aac">AAC</option>
+					{#each reencodeCodecs as v (v.value)}
+						<option value={v.value}>{v.label}</option>
+					{/each}
 				</select>
 				<Input type="number" value={String(policy.sampleRate)} oninput={(e) => setPolicyRate((e.target as HTMLInputElement).value)} class="w-24" placeholder="rate" />
 				<span class="text-xs text-muted-foreground">Hz</span>

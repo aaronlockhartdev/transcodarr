@@ -23,10 +23,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 	});
 	if (res.status === 204) return undefined as T;
 	let body: unknown = null;
-	try {
-		body = await res.json();
-	} catch {
-		// non-JSON error body
+	const ct = res.headers.get("content-type") ?? "";
+	if (ct.includes("application/json")) {
+		try {
+			body = await res.json();
+		} catch {
+			// non-JSON error body
+		}
+	} else if (ct.includes("text/plain")) {
+		body = await res.text();
 	}
 	if (!res.ok) {
 		const msg =

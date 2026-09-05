@@ -44,18 +44,24 @@
 		for (const j of store.jobs) {
 			if (j.state !== "completed" || j.ended == null) continue;
 			const d = new Date(j.ended * 1000);
+			// Full date key (year included) so MM-DD never collides across years.
+			const iso = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+			const cutoff = new Date();
+			cutoff.setHours(0, 0, 0, 0);
+			cutoff.setDate(cutoff.getDate() - 29);
+			if (d < cutoff) continue;
 			const key = `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-			const slot = byDay.get(key) ?? { files: 0, bytes: 0 };
+			const slot = byDay.get(iso) ?? { files: 0, bytes: 0 };
 			const file = fileById[j.file_id];
 			slot.files += 1;
 			slot.bytes += file && file.input_size != null && file.output_size != null
 				? Math.max(0, file.input_size - file.output_size)
 				: 0;
-			byDay.set(key, slot);
+			byDay.set(iso, slot);
 		}
 		return [...byDay.entries()]
-			.map(([day, v]) => ({ day, files: v.files, bytes: v.bytes }))
-			.sort((a, b) => a.day.localeCompare(b.day))
+			.map(([iso, v]) => ({ day: iso.slice(5), iso, files: v.files, bytes: v.bytes }))
+			.sort((a, b) => a.iso.localeCompare(b.iso))
 			.slice(-30);
 	});
 	const chartConfig = {

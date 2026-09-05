@@ -92,9 +92,9 @@ export type UiSchema =
 	| { kind: "byte_range"; unit?: string; hint?: string }
 	| { kind: "text"; hint?: string; default?: string }
 	| { kind: "boolean"; hint?: string; default?: boolean }
-	| { kind: "bitrate_mode"; hint?: string; default?: string }
+	| { kind: "bitrate_mode"; values?: { value: string; label: string }[]; hint?: string; default?: string }
 	| { kind: "device_select"; hint?: string; default?: string }
-	| { kind: "audio_policy"; hint?: string; default?: string }
+	| { kind: "audio_policy"; values?: { value: string; label: string }[]; reencode?: { codec: { kind: "single_select"; default?: string; values: { value: string; label: string }[] }; sample_rate?: { kind: "text"; hint?: string }; channels?: { kind: "text"; hint?: string } }; hint?: string; default?: string }
 	| { kind: "resolution"; hint?: string }
 	| { kind: "list"; item: Record<string, unknown>; hint?: string }
 	| {

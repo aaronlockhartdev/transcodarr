@@ -23,7 +23,6 @@
 			case "canceled":
 				return { variant: "destructive" as const, text: status };
 			case "unscanned":
-			case "needs_work":
 				return { variant: "secondary" as const, text: status };
 			default:
 				return { variant: "outline" as const, text: status };

@@ -54,6 +54,7 @@
 	const dirty = $derived(
 		flow != null && JSON.stringify(flow, null, 2) !== savedJson,
 	);
+	const jsonDirty = $derived(flow != null && jsonText !== JSON.stringify(flow, null, 2)); // unapplied JSON-tab edits must be Applied before save
 	// Keep the Raw JSON tab live: re-serialize when the step editor mutates flow.
 	$effect(() => {
 		const f = flow;
@@ -105,6 +106,10 @@
 	let saving = $state(false);
 	async function save() {
 		if (!flow || !lib) return;
+		if (jsonDirty) {
+			toast.error("Apply the Raw JSON changes first, then save");
+			return;
+		}
 		saving = true;
 		try {
 			const flowJson = JSON.stringify(flow);
@@ -155,7 +160,7 @@
 				<PlusIcon class="size-4" data-icon="inline-start" />
 				Add step
 			</Button>
-			<Button onclick={save} disabled={!dirty || saving}>
+			<Button onclick={save} disabled={!dirty || saving || jsonDirty}>
 				{saving ? "Saving…" : "Save flow"}
 			</Button>
 		</div>
@@ -229,8 +234,8 @@
 						</Button>
 					</div>
 					{#if dirty}
-						<Button onclick={save} disabled={saving} class="w-fit">
-							{saving ? "Saving…" : "Save this JSON"}
+						<Button onclick={applyJson} disabled={saving} class="w-fit">
+							{saving ? "Applying…" : "Apply JSON to steps"}
 						</Button>
 					{/if}
 				</div>

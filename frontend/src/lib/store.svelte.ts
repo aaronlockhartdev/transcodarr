@@ -21,6 +21,7 @@ class Store {
 	private timer: ReturnType<typeof setInterval> | null = null;
 
 	async refreshCore() {
+		if (this.refreshing) return; // stale-response guard: never overlap in-flight refreshes
 		this.refreshing = true;
 		try {
 			const [libs, devs, health] = await Promise.all([
