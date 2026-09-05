@@ -101,7 +101,7 @@ A flow is versioned JSON (`"flow_version": 1`) stored per library. Every variabl
 | Registry | Entries (v1) | What an entry provides |
 |---|---|---|
 | **Condition fields** | container, video codec, resolution (min/max), pixel format, HDR, audio codec set, file size (min/max) | `key`, `match(&Facts) -> bool`, JSON (de)serializer, **UI schema** (picker description) |
-| **Operation sections** | video, audio, subtitles | parameter types + defaults, `plan(&Facts) -> FfmpegPlan contribution`, JSON (de)serializer, **UI schema** |
+| **Operation sections** | video, audio, container, subtitles | parameter types + defaults, `plan(&Facts) -> FfmpegPlan contribution`, JSON (de)serializer, **UI schema** |
 | **Fact extractors** | the ffprobe-based probe | `probe(path) -> FileFacts` (new sources/formats add here) |
 | **Verification checks** | metadata check, (optional) decode check | `verify(plan, output) -> Result` (new checks add here) |
 | **Devices** | CPU, each detected GPU | capabilities, encoder list, `max_concurrent` |
@@ -172,6 +172,10 @@ ffmpeg -hwaccel cuda -i "In.Movie.2024.2160p.HEVC.mkv" \
 
 `keep all` (default) / `keep forced-only` / `drop`. Copy only; **no burn-in in v1** (parked).
 
+### 6.4 Container section (`smart` is a resolution input; an explicit choice is an action)
+
+`smart` (default) / `mp4` / `mkv`. `smart` resolves per §13.7 (MP4 if every planned stream is MP4-safe, else MKV). An explicit `mp4`/`mkv` that differs from the source container turns an otherwise-stream-identical step into a **pure remux** (all streams copied, container changed) — this is how "remux all MKV to MP4" is expressed without enumerating source codecs. A stream-identical step with `smart` **never** remuxes on its own (otherwise enabling any video section would silently remux every MKV in the library).
+
 ---
 
 ## 7. Scheduling, concurrency & the multi-node seam
@@ -197,7 +201,7 @@ ffmpeg -hwaccel cuda -i "In.Movie.2024.2160p.HEVC.mkv" \
 - **Rust**, single static binary. `tokio` for async I/O; `rusqlite` for SQLite; **ffmpeg as a child process** — no libav bindings, so a crashed/hung encoder can never take the server down, and the binary stays cgo/FFI-free.
 - **Docker-first (canonical artifact).** Image bundles a **pinned ffmpeg build** — one Linux build with **NVENC + VAAPI + QSV** compiled in; x86-64 **and aarch64** (ARM NAS boxes). GPU userspace comes from the host via the vendor toolkits (nvidia-container-toolkit / ROCm / Intel oneAPI runtime). The image is the version control for ffmpeg.
 - **Bare binary** (macOS dev, non-Docker Linux): **detects a system ffmpeg** on PATH at startup, validates the version against a supported range, and probes available encoders (this probe also feeds the flow editor's device pickers). Missing/out-of-range → clear startup report in the UI, software path still works.
-- **Web**: HTTP API + embedded SPA (**Svelte 5 + Vite + Tailwind CSS + shadcn-svelte** — copy-in-source, Melt UI primitives for accessibility; embedded via `include_bytes!`) served from the same binary; WebSocket/SSE for live job progress. In-repo additions on top: schema-driven picker wrappers (§5), step-card drag-reorder, CodeMirror 6 for the raw-JSON flow view, hand-rolled SVG for the two dashboard charts.
+- **Web**: HTTP API + embedded SPA (**Svelte 5 + Vite + Tailwind CSS + shadcn-svelte** — copy-in-source, Melt UI primitives for accessibility; embedded via `include_bytes!`) served from the same binary; the SPA uses layerchart for the dashboard charts. **Live updates (planned, not in v1 — all updates currently ride the 5 s poll):** one **SSE** stream per client (`GET /api/events`) — deliberately **not** WebSocket: the event flow is strictly one-way (every client action is an ordinary POST), plain HTTP sits cleanly behind the reverse-proxy auth, and `EventSource` auto-reconnects with `Last-Event-ID` resume, which WebSocket would force us to rebuild.
 - **Auth stance (v1)**: no built-in authentication. Bind to localhost/LAN as configured; exposure via a reverse proxy with auth is the documented pattern (the \*arr norm). Single-user tool.
 
 ---
@@ -205,6 +209,9 @@ ffmpeg -hwaccel cuda -i "In.Movie.2024.2160p.HEVC.mkv" \
 ## 9. UI
 
 Navigation: **Dashboard** (home) · **Libraries** → (click a library) → **Library detail** · **Flows** · **Jobs** · **Settings**.
+
+### 9.0 Live data (planned — v1 polls at 5 s)
+**Target design (not yet implemented — v1 updates via the 5 s poll):** every value the UI displays is event-driven and current. Each browser client holds one **SSE** stream (`GET /api/events`); the server pushes the moment state changes — job transitions, **batched log output**, file verdicts from scan/watch, library and device changes. Initial page load is still a JSON fetch; SSE only *updates* after that, and the 5 s poll is retained purely as a disconnect fallback, never the primary update path. v1 implements the loading-state half of this today: pages render an explicit loading state until their first fetch completes — never a misleading default or an "empty" list while data is in flight.
 
 ### 9.1 Dashboard
 
@@ -227,7 +234,7 @@ All derived from existing tables; no new subsystem.
 
 ### 9.4 Jobs
 
-Running (live progress, device, kill) · completed · failed (log tail, quarantine link, retry) · quarantined. Queue-level pause/resume; per-device cap gauges.
+Running (live progress via poll, device, kill; **live log streaming is planned with the §9.0 SSE work** — v1's viewer polls the log endpoint) · completed · failed (full log from storage, quarantine link, retry) · quarantined. Queue-level pause/resume; per-device cap gauges.
 
 ### 9.5 Settings
 
@@ -241,7 +248,7 @@ Devices & per-device caps · system ceiling · default scan schedule · retentio
 |---|---|
 | `libraries` | id, name, path, lifecycle_mode, flow_json (versioned), auto_queue, retention_days, auto_delete, scan_schedule, watchable |
 | `files` | id, library_id, path, dev, inode, size, mtime, sample_hash, facts_json, status (`compliant / needs_work / unmatched / queued / running / failed / quarantined`), last_probed, last_evaluated, input_size, output_size |
-| `jobs` | id, file_id, library_id, flow_version, plan_json, state, device_id, claimed_by, lease_expires, started, ended, exit_kind, log_path, quarantine_path — **retained: this table *is* the per-file job history** |
+| `jobs` | id, file_id, library_id, flow_version, plan_json, state, device_id, claimed_by, lease_expires, started, ended, exit_kind, log_path (the job's ffmpeg output file — **planned:** replaced by a `log_zstd` BLOB, zstd-compressed on job end and served decompressed by the log endpoint), quarantine_path — **retained: this table *is* the per-file job history** |
 | `devices` | id, kind (`cpu / gpu`), name, encoders_json, max_concurrent |
 | `settings` | key, value |
 
@@ -282,3 +289,5 @@ Made during the design session; each is a deliberate default, not a constraint:
 8. Docker image = canonical artifact; bare binary detects system ffmpeg.
 9. In-place renames adopt the true extension (orphaning \*arr records until re-scan; automation parked).
 10. **Svelte 5 + Tailwind CSS + shadcn-svelte** for the SPA (copy-in-source; Melt UI underneath). The styling layer is swappable — the schema-driven editor (§5) does not depend on it.
+11. **Legacy wire forms are accepted at parse time and upgraded in place** (no flow-migration endpoint in v1): a device object without `kind` (`{"id": "…"}`) ⇒ GPU; `profile`/`level: null` ⇒ auto; the audio policy string `"re-encode"` ⇒ re-encode to the default target, source rate/channels kept.
+12. **Live updates will ride one SSE stream per client, not WebSockets** (planned — §9.0; v1 polls at 5 s) — the event flow is strictly one-way (client actions are ordinary POSTs); SSE is proxy-friendly, auto-reconnects, and resumes logs via `Last-Event-ID`.
