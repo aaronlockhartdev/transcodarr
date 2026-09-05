@@ -5,12 +5,12 @@
 //! `run_job` executes one job: ffmpeg encode to a temp file, verify,
 //! then atomically swap (original quarantined). `run_loop` claims
 //! queued jobs and dispatches them to a blocking thread.
-
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::sync::{Condvar, Mutex};
 use std::time::SystemTime;
 
@@ -29,7 +29,7 @@ use crate::api::AppState;
 use crate::db;
 use crate::dbhandle::Db;
 use crate::probe::FfprobeFactExtractor;
-use crate::verify::probe_to_facts;
+use crate::verify::{decode_file, probe_to_facts};
 
 /// Job lease: a job whose lease expires without finishing is
 /// reclaimable (crash resilience; the `claimed_by` field carries the
@@ -41,8 +41,27 @@ const JOB_LEASE: i64 = 3600;
 /// How often the in-flight encode refreshes its job lease.
 const LEASE_HEARTBEAT_S: u64 = 60;
 
+/// System-wide ceiling on concurrent encodes (in addition to each
+/// device's own `max_concurrent`). v1 default: 4.
+pub const MAX_CONCURRENT_JOBS: usize = 4;
+
 /// Media extensions the scanner picks up (DESIGN §13.6).
 const MEDIA_EXTS: &[&str] = &["mkv", "mp4", "m2ts", "ts", "mov", "avi", "webm", "m4v"];
+
+/// Monotonic sequence for quarantine names: the same file can be
+/// quarantined more than once in a single second (a crash-looping
+/// job), and the name must not overwrite a previous artifact.
+static QUARANTINE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A unique quarantine file name (`base.tag.nanos.seq`).
+fn quarantine_name(base: &str, tag: &str) -> String {
+    let nanos = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let seq = QUARANTINE_SEQ.fetch_add(1, Ordering::Relaxed);
+    format!("{base}.{tag}.{nanos}.{seq}")
+}
 
 /// FNV-1a over the first and last 8KB — the change-detection key.
 /// Cheap enough to run on every scan of every file, and stable for a
@@ -221,15 +240,11 @@ pub fn scan_library(
         let status = match evaluate::evaluate(registry, &flow, &facts) {
             Ok(Evaluation::Identity) => "compliant",
             Ok(Evaluation::Plan(plan)) => {
-                // Enqueue at most one live job per file.
-                let has_live_job = db
-                    .with(|c| db::list_jobs(c, 1000))?
-                    .iter()
-                    .any(|j| {
-                        j.file_id == file_id
-                            && matches!(j.state.as_str(), "queued" | "running" | "verifying")
-                    });
-                if !has_live_job {
+                // Enqueue at most one live job per file. A direct
+                // query on the jobs table — correct for any history
+                // depth, unlike a fixed row window.
+                let has_live = db.with(|c| db::has_live_job(c, file_id))?;
+                if !has_live {
                     // GPU preference is resolved at dispatch
                     // (run_loop); the job stays device-agnostic here
                     // so CPU can always take it.
@@ -339,9 +354,10 @@ fn lease_heartbeat(db: &Db, job_id: i64, stop: &Arc<(Condvar, Mutex<bool>)>) {
     }
 }
 
-/// Execute one job: encode to a sibling temp file, verify the output,
-/// then atomically swap (the original is moved to the quarantine dir,
-/// the output is renamed onto the original's path).
+/// Execute one job: encode to a sibling temp file, verify the output
+/// (metadata gate + full decode), then atomically swap (the original
+/// is moved to the quarantine dir, the output is renamed onto the
+/// original's path).
 ///
 /// On verify failure or encode failure the original is untouched;
 /// the failed output goes to the quarantine dir (DESIGN §13.6).
@@ -376,16 +392,30 @@ pub fn run_job(
     // can produce a corrupt file, and it would then be promoted over
     // the original.
     let claim_ts = unix_now();
+    let stem = src.file_stem().and_then(|s| s.to_str()).unwrap_or("out");
     let dst = src.with_file_name(format!(
-        "{}.{}.{}.{}.transcodarr-tmp",
-        src.file_stem().and_then(|s| s.to_str()).unwrap_or("out"),
-        plan.container,
-        job.id,
-        claim_ts
+        "{stem}.{}.{}.{}.transcodarr-tmp",
+        plan.container, job.id, claim_ts
     ));
-    // A stale file at this exact path can only be ours (unique name);
-    // remove it rather than let -y truncate-while-shared.
-    let _ = std::fs::remove_file(&dst);
+    // Sweep temp files left by earlier claims of THIS job (a
+    // crash-looping job must not accumulate a full-size orphan per
+    // claim), plus our own exact path.
+    if let Some(parent) = src.parent() {
+        // Every temp file for this job starts with this prefix
+        // (the claim timestamp comes after it).
+        let old_prefix = format!("{stem}.{}.{}.", plan.container, job.id);
+        let own_name = dst.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if let Ok(rd) = std::fs::read_dir(parent) {
+            for e in rd.flatten() {
+                let name = e.file_name().to_string_lossy().to_string();
+                if name == own_name
+                    || (name.ends_with(".transcodarr-tmp") && name.starts_with(&old_prefix))
+                {
+                    let _ = std::fs::remove_file(e.path());
+                }
+            }
+        }
+    }
 
     // ffmpeg stderr goes to a log file (kept on disk for the UI).
     let logs = data_dir.join("logs");
@@ -444,16 +474,43 @@ pub fn run_job(
         anyhow::bail!("output metadata mismatch (output quarantined)");
     }
 
-    // Swap: original → quarantine, output → original path.
+    // Decode integrity: the output must also decode cleanly (the
+    // metadata gate alone can pass a structurally broken file).
+    if !decode_file(ffmpeg, &dst).unwrap_or(false) {
+        let _ = finish(db, job, "failed", Some("decode_failed"), Some(&dst), data_dir);
+        anyhow::bail!("output failed the decode check (output quarantined)");
+    }
+
+    // Swap: original → quarantine, output → original path. If the
+    // second rename fails after the first, restore the original so
+    // the file is never missing from its path (a failed restore
+    // leaves both files in the quarantine dir, reported loudly).
     let quarantine = db::quarantine_dir(data_dir);
-    let original_backup = quarantine.join(format!(
-        "{}.original.{}",
+    let original_backup = quarantine.join(quarantine_name(
         src.file_name().and_then(|n| n.to_str()).unwrap_or("file"),
-        unix_now()
+        "original",
     ));
     std::fs::rename(&src, &original_backup)
         .with_context(|| format!("quarantine original {}", src.display()))?;
-    std::fs::rename(&dst, &src).with_context(|| format!("promote {}", dst.display()))?;
+    if let Err(e) = std::fs::rename(&dst, &src) {
+        let restored = std::fs::rename(&original_backup, &src);
+        tracing::error!("promote {} failed: {e}", dst.display());
+        if restored.is_err() {
+            tracing::error!(
+                "CRITICAL: could not restore {} from {} — both copies are in the quarantine dir",
+                src.display(),
+                original_backup.display()
+            );
+        } else {
+            tracing::error!(
+                "original restored to {} (failed output kept in {})",
+                src.display(),
+                original_backup.display()
+            );
+        }
+        let _ = finish(db, job, "failed", Some("swap_failed"), Some(&dst), data_dir);
+        anyhow::bail!("swap failed: {e}");
+    }
 
     // Idempotency gate (DESIGN §13.6): re-evaluate the NEW file. If it
     // still wants to change, the flow is not idempotent for this
@@ -494,7 +551,7 @@ fn finish(
     let q = quarantine_target.map(|p| {
         let dir = db::quarantine_dir(data_dir);
         let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("output");
-        let dest = dir.join(format!("{name}.failed.{}", unix_now()));
+        let dest = dir.join(quarantine_name(name, "failed"));
         std::fs::rename(p, &dest).ok();
         dest
     });
@@ -518,7 +575,10 @@ fn finish(
 
 /// The job worker: polls for queued jobs, claims one at a time
 /// (optimistic concurrency via `claim_job`), and dispatches each to
-/// a blocking thread. Runs until the shutdown flag is set.
+/// a blocking thread. Concurrency is capped both system-wide
+/// ([`MAX_CONCURRENT_JOBS`]) and per device (`Device::max_concurrent`);
+/// over-cap jobs simply stay queued. Runs until the shutdown flag is
+/// set.
 pub async fn run_loop(state: AppState, mut shutdown: watch::Receiver<bool>) -> Result<()> {
     loop {
         tokio::select! {
@@ -542,11 +602,22 @@ pub async fn run_loop(state: AppState, mut shutdown: watch::Receiver<bool>) -> R
             }
         }
 
+        // System-wide concurrency cap.
+        if state.in_flight.load(Ordering::Relaxed) >= MAX_CONCURRENT_JOBS {
+            continue;
+        }
+
         // Pick the next job. GPU-preferred: a job without an
         // explicit device runs on the first available GPU; CPU is
         // the fallback (never the default when a GPU can take it).
         let job_opt: Option<(Device, db::JobRow)> = state.db.with(|c| {
             for d in state.devices.iter().rev() {
+                // Per-device cap: never exceed what this device can
+                // handle concurrently.
+                let busy = db::running_jobs_count(c, Some(&d.id))?;
+                if busy >= d.max_concurrent as usize {
+                    continue;
+                }
                 if let Some(j) = db::next_queued_job(c, Some(&d.id))? {
                     return Ok(Some((d.clone(), j)));
                 }
@@ -559,6 +630,10 @@ pub async fn run_loop(state: AppState, mut shutdown: watch::Receiver<bool>) -> R
                         .find(|x| x.kind == DeviceKind::Cpu)
                         .cloned()
                         .unwrap_or_else(|| Device::cpu(1));
+                    let busy = db::running_jobs_count(c, Some(&cpu.id))?;
+                    if busy >= cpu.max_concurrent as usize {
+                        return Ok(None);
+                    }
                     Ok(Some((cpu, j)))
                 }
                 None => Ok(None),
@@ -585,17 +660,21 @@ pub async fn run_loop(state: AppState, mut shutdown: watch::Receiver<bool>) -> R
             continue;
         }
 
+        // Count it in flight; the spawned task decrements when done.
+        state.in_flight.fetch_add(1, Ordering::Relaxed);
+        let in_flight = state.in_flight.clone();
         let db2 = state.db.clone();
         let ffmpeg2 = state.ffmpeg.clone();
         let probe2 = state.probe.clone();
         let data2 = state.data_dir.clone();
         let registry2 = state.registry.clone();
         tokio::task::spawn_blocking(move || {
-            run_job(&db2, &job, &device, &ffmpeg2, &probe2, &data2, &registry2)
-                .map_err(|e| {
-                    tracing::error!("job {} failed: {e:?}", job.id);
-                    e
-                })
+            let r = run_job(&db2, &job, &device, &ffmpeg2, &probe2, &data2, &registry2);
+            in_flight.fetch_sub(1, Ordering::Relaxed);
+            r.map_err(|e| {
+                tracing::error!("job {} failed: {e:?}", job.id);
+                e
+            })
         });
     }
 }

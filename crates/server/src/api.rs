@@ -5,7 +5,7 @@
 //! fresh short-lived connection per operation (WAL mode; see that
 //! module for why a shared `Connection` is impossible in async).
 
-use std::sync::Arc;
+use std::sync::{Arc, atomic::AtomicUsize};
 
 use axum::extract::{OriginalUri, Path as PathParam, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
@@ -34,6 +34,7 @@ pub struct AppState {
     pub ffprobe: String,
     pub data_dir: std::path::PathBuf,
     pub devices: Vec<Device>,
+    pub in_flight: Arc<AtomicUsize>,
 }
 
 /// Build the router.

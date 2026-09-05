@@ -25,7 +25,9 @@ fn duration_tolerance_s(source: f64) -> f64 {
 /// 2. **Duration** is within the tolerance window of the source
 ///    (truncation is fine; a big delta means a broken encode).
 /// 3. **Stream inventory**: the audio and subtitle track counts match
-///    the plan (dropped tracks absent; re-encoded ones present).
+///    the plan (dropped tracks absent; re-encoded ones present), and
+///    each surviving audio track carries the codec the plan called for
+///    (a count alone would let a wrongly re-encoded track through).
 /// 4. **Video** matches the plan: copied video must be present and
 ///    keep its codec (a missing stream is a data-loss failure, never
 ///    a pass), re-encoded video must be present in the target codec,
@@ -60,6 +62,30 @@ pub fn verify_output(
     };
     if output.audio.len() != expected_audio {
         return Ok(false);
+    }
+    // 3b. Per-track audio codecs: a wrongly re-encoded track (or an
+    // Atmos track that got downmixed) can keep the count intact, so
+    // compare each surviving track's codec with the plan's target.
+    // (Counts are already equal, so the zip is a true pairing.)
+    let expected_codecs: Vec<String> = match &plan.audio {
+        Some(a) => input
+            .audio
+            .iter()
+            .zip(a.per_track.iter())
+            .filter_map(|(t, p)| match p {
+                crate::plan::AudioTrackPlan::Copy => Some(t.codec.clone()),
+                crate::plan::AudioTrackPlan::Reencode { codec, .. } => {
+                    Some(codec.name().to_string())
+                }
+                crate::plan::AudioTrackPlan::Drop => None,
+            })
+            .collect(),
+        None => input.audio.iter().map(|t| t.codec.clone()).collect(),
+    };
+    for (got, want) in output.audio.iter().zip(expected_codecs) {
+        if !got.codec.eq_ignore_ascii_case(&want) {
+            return Ok(false);
+        }
     }
     let expected_subs = match &plan.subtitles {
         Some(s) => s.tracks.len(),
@@ -103,7 +129,7 @@ pub fn verify_output(
 mod tests {
     use super::*;
     use crate::facts::{AudioTrack, VideoFacts};
-    use crate::plan::{AudioPlan, AudioTrackPlan, VideoTargetCodec};
+    use crate::plan::{AudioPlan, AudioTrackPlan, AudioTargetCodec, VideoTargetCodec};
 
     fn input_facts() -> FileFacts {
         FileFacts {
@@ -245,6 +271,40 @@ mod tests {
             codec: "hevc".into(),
             ..Default::default()
         });
+        assert!(verify_output(&p, &input_facts(), &out).unwrap());
+    }
+
+    #[test]
+    fn copied_audio_track_re_encoded_in_output_fails() {
+        // The P2: track 0 was supposed to be copied, but the output
+        // carries a different audio codec under the same count — the
+        // per-track codec check must catch what the count check
+        // cannot.
+        let mut out = output_facts();
+        out.audio[0].codec = "aac".into();
+        assert!(!verify_output(&plan(), &input_facts(), &out).unwrap());
+    }
+
+    #[test]
+    fn reencoded_audio_codec_is_verified() {
+        // Plan says re-encode track 0 to AAC: the output must be aac
+        // (not eac3), and the count must match.
+        let mut p = plan();
+        p.audio = Some(AudioPlan {
+            per_track: vec![
+                AudioTrackPlan::Reencode {
+                    codec: AudioTargetCodec::Aac,
+                    sample_rate: None,
+                    channels: None,
+                    bitrate_bps: Some(128_000),
+                },
+                AudioTrackPlan::Drop,
+            ],
+        });
+        let mut out = output_facts();
+        out.audio[0].codec = "eac3".into(); // wrong: still eac3
+        assert!(!verify_output(&p, &input_facts(), &out).unwrap());
+        out.audio[0].codec = "aac".into();
         assert!(verify_output(&p, &input_facts(), &out).unwrap());
     }
 }

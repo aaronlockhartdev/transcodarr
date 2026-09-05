@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use transcodarr_core::device::{Device, DeviceKind};
@@ -432,28 +432,76 @@ pub fn now_s() -> i64 {
 /// encode only ever left a sibling temp file behind — the original is
 /// intact until a verified swap, so re-running is safe.
 pub fn reclaim_jobs(conn: &Connection, expired_only: bool) -> Result<usize> {
-    let n = if expired_only {
-        conn.execute(
-            "UPDATE jobs SET state = 'queued', claimed_by = NULL, lease_expires = NULL, started = NULL\n             WHERE state IN ('running', 'verifying')\n               AND (lease_expires IS NULL OR lease_expires < ?1)",
-            params![now_s()],
-        )?
+    // Select the reclaim set first so both updates below are scoped
+    // to exactly those rows.
+    let select = if expired_only {
+        "SELECT id FROM jobs\n         WHERE state IN ('running', 'verifying')\n           AND (lease_expires IS NULL OR lease_expires < ?)"
     } else {
-        conn.execute(
-            "UPDATE jobs SET state = 'queued', claimed_by = NULL, lease_expires = NULL, started = NULL\n             WHERE state IN ('running', 'verifying')",
-            [],
-        )?
+        "SELECT id FROM jobs\n         WHERE state IN ('running', 'verifying')"
     };
-    if n > 0 {
-        // Files still showing a live state whose job just went back
-        // to the queue. (The id-subquery keeps this scoped to the
-        // reclaimed set on the expired-only path.)
-        conn.execute(
-            "UPDATE files SET status = 'queued'\n             WHERE status IN ('running', 'verifying')\n               AND id IN (SELECT file_id FROM jobs WHERE state = 'queued' AND file_id IS NOT NULL)",
-            [],
-        )?;
+    let mut stmt = conn.prepare(select)?;
+    let ids: Vec<i64> = if expired_only {
+        stmt.query_map(params![now_s()], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<i64>>>()?
+    } else {
+        stmt.query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<i64>>>()?
+    };
+    if ids.is_empty() {
+        return Ok(0);
     }
+    let list = vec!["?".to_string(); ids.len()].join(",");
+    conn.execute(
+        &format!(
+            "UPDATE jobs SET state = 'queued', claimed_by = NULL, lease_expires = NULL, started = NULL\n             WHERE id IN ({list})"
+        ),
+        params_from_iter(&ids),
+    )?;
+    // Files still showing a live state whose job just went back to
+    // the queue (scoped to the same set).
+    conn.execute(
+        &format!(
+            "UPDATE files SET status = 'queued'\n             WHERE status IN ('running', 'verifying')\n               AND id IN (SELECT file_id FROM jobs WHERE id IN ({list}) AND file_id IS NOT NULL)"
+        ),
+        params_from_iter(&ids),
+    )?;
+    Ok(ids.len())
+}
+
+/// Whether this file has a live job that must not be re-queued (one
+/// live job per file). A direct query on the jobs table — no
+/// arbitrary row window, so it stays correct no matter how much job
+/// history has accumulated.
+pub fn has_live_job(conn: &Connection, file_id: i64) -> Result<bool> {
+    let r: Option<i64> = conn
+        .query_row(
+            "SELECT 1 FROM jobs\n         WHERE file_id = ?1 AND state IN ('queued', 'running', 'verifying')\n           LIMIT 1",
+            params![file_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(r.is_some())
+}
+
+/// How many jobs are in flight (running or verifying) — overall
+/// (`device_key = None`) or on one device. Feeds the concurrency caps
+/// in `jobs::run_loop`.
+pub fn running_jobs_count(conn: &Connection, device_key: Option<&str>) -> Result<usize> {
+    let n: i64 = match device_key {
+        Some(key) => conn.query_row(
+            "SELECT COUNT(*) FROM jobs\n             WHERE state IN ('running', 'verifying') AND device_id = ?1",
+            params![key],
+            |r| r.get(0),
+        )?,
+        None => conn.query_row(
+            "SELECT COUNT(*) FROM jobs\n             WHERE state IN ('running', 'verifying')",
+            [],
+            |r| r.get(0),
+        )?,
+    };
     Ok(n as usize)
 }
+
 /// Refresh a claimed job's lease (the heartbeat of a live encode): a
 /// running encode longer than the original lease must not be reclaimed
 /// by the in-process reaper. Only refreshes a job still claimed by the

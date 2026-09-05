@@ -59,10 +59,15 @@ impl FactExtractor for FfprobeFactExtractor {
 ///   plan.rs.
 /// - **Atmos** is a heuristic (eac3 with ≥8 channels; ffprobe does
 ///   not expose JOC metadata in v1).
-/// - **HDR** comes from stream side data: "Dolby Vision" →
-///   DolbyVision; "HDR10+" → Hdr10Plus; "HDR10" → Hdr10; "Content
-///   light level" (CLLI) without HDR10 → Hlg (the safe default that
-///   never triggers HDR-to-SDR on its own).
+/// - **HDR** comes from stream side data, collected as flags first
+///   and decided afterwards: Dolby Vision → DolbyVision; "HDR10+"
+///   (should ffprobe ever label it) → Hdr10Plus; mastering display
+///   (± content light level) → Hdr10; content light level alone or
+///   a PQ color transfer → Hlg (the safe default that never
+///   triggers HDR-to-SDR on its own). A real HDR10 file carries
+///   *both* mastering display and CLLI, so mastering display must
+///   outrank CLLI — a per-entry "last one wins" chain misread those
+///   as HLG when CLLI was listed first.
 pub fn map_facts(path: &Path, doc: &Value) -> std::io::Result<FileFacts> {
     let container = path
         .extension()
@@ -110,6 +115,10 @@ pub fn map_facts(path: &Path, doc: &Value) -> std::io::Result<FileFacts> {
                     continue; // one video stream is the model (v1)
                 }
                 let mut hdr = Hdr::None;
+                let mut seen_dovi = false;
+                let mut seen_hdr10plus = false;
+                let mut seen_mastering = false;
+                let mut seen_clli = false;
                 for sd in s
                     .get("side_data_list")
                     .and_then(|v| v.as_array())
@@ -121,17 +130,24 @@ pub fn map_facts(path: &Path, doc: &Value) -> std::io::Result<FileFacts> {
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
                     if name.contains("Dolby Vision") {
-                        hdr = Hdr::DolbyVision;
+                        seen_dovi = true;
                     } else if name.contains("HDR10+") {
-                        hdr = Hdr::Hdr10Plus;
-                    } else if name.contains("HDR10") {
-                        hdr = Hdr::Hdr10;
+                        seen_hdr10plus = true;
+                    } else if name.contains("Mastering display") {
+                        seen_mastering = true;
                     } else if name.contains("Content light level") {
-                        hdr = Hdr::Hlg;
+                        seen_clli = true;
                     }
                 }
-                if matches!(hdr, Hdr::None)
-                    && s.get("color_transfer").and_then(|v| v.as_str()) == Some("smpte2084")
+                // Decide after seeing all side data.
+                if seen_dovi {
+                    hdr = Hdr::DolbyVision;
+                } else if seen_hdr10plus {
+                    hdr = Hdr::Hdr10Plus;
+                } else if seen_mastering {
+                    hdr = Hdr::Hdr10;
+                } else if seen_clli
+                    || s.get("color_transfer").and_then(|v| v.as_str()) == Some("smpte2084")
                 {
                     hdr = Hdr::Hlg;
                 }
@@ -300,6 +316,38 @@ mod tests {
         );
         let facts = map_facts(Path::new("/x.mp4"), &d).unwrap();
         assert_eq!(facts.video.as_ref().unwrap().level.as_deref(), Some("4.2"));
+    }
+
+    #[test]
+    fn hdr10_is_mastering_display_plus_clli() {
+        // A real HDR10 file carries both side data types. CLLI is
+        // usually listed first — a naive "last one wins" chain would
+        // misread this as HLG.
+        let d = doc(
+            r#"{"format": {"duration": "10"}, "streams": [
+                {"codec_type": "video", "codec_name": "hevc",
+                 "pix_fmt": "yuv420p10le", "width": 1920, "height": 1080,
+                 "side_data_list": [
+                   {"side_data_type": "Content light level"},
+                   {"side_data_type": "Mastering display color volume"}
+                 ]}
+            ]}"#,
+        );
+        let facts = map_facts(Path::new("/x.mkv"), &d).unwrap();
+        assert!(matches!(facts.video.as_ref().unwrap().hdr, Hdr::Hdr10));
+    }
+
+    #[test]
+    fn clli_alone_is_hlg() {
+        let d = doc(
+            r#"{"format": {"duration": "10"}, "streams": [
+                {"codec_type": "video", "codec_name": "hevc",
+                 "pix_fmt": "yuv420p10le", "width": 1920, "height": 1080,
+                 "side_data_list": [{"side_data_type": "Content light level"}]}
+            ]}"#,
+        );
+        let facts = map_facts(Path::new("/x.mkv"), &d).unwrap();
+        assert!(matches!(facts.video.as_ref().unwrap().hdr, Hdr::Hlg));
     }
 
     #[test]

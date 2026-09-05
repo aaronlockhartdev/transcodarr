@@ -7,6 +7,7 @@
 //! sub-millisecond, WAL mode allows many concurrent connections, and
 //! writes serialize on the file itself. Each [`Db::with`] call is a
 //! short, synchronous critical section.
+
 use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
@@ -31,6 +32,9 @@ impl Db {
     ) -> anyhow::Result<R> {
         let c = Connection::open(&self.path)?;
         c.pragma_update(None, "synchronous", "NORMAL")?;
+        // Under WAL, concurrent writers (reaper + workers + scan) can
+        // hit SQLITE_BUSY briefly; wait instead of erroring.
+        c.busy_timeout(std::time::Duration::from_secs(5))?;
         let r = f(&c)?;
         Ok(r)
     }

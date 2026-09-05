@@ -4,11 +4,10 @@
 //!
 //! `MetadataCheck` is the pure post-encode gate (container,
 //! duration window, stream inventory) — facts are probed by the
-//! runner and handed in, so the check itself does no I/O.
-//! `DecodeCheck` is a full-decode integrity check; in v1 it runs as
-//! a standalone helper (`decode_file`) because the pure `verify()`
-//! signature only sees `FileFacts` (which carry no path).
-
+//! runner and handed in, so the check itself does no I/O. The
+//! full-decode integrity check runs as the standalone
+//! [`decode_file`] helper (the pure `verify()` signature only
+//! sees `FileFacts`, which carry no path).
 use transcodarr_core::facts::FileFacts;
 use transcodarr_core::plan::FfmpegPlan;
 use transcodarr_core::registry::{FactExtractor, VerificationCheck};
@@ -39,31 +38,6 @@ impl VerificationCheck for MetadataCheck {
     }
 }
 
-/// Full-decode integrity check (runs out-of-band; see `decode_file`).
-#[derive(Clone)]
-pub struct DecodeCheck;
-
-impl VerificationCheck for DecodeCheck {
-    fn key(&self) -> &'static str {
-        "decode"
-    }
-
-    fn description(&self) -> &'static str {
-        "ffmpeg can decode the output to null without errors"
-    }
-
-    fn verify(
-        &self,
-        _plan: &FfmpegPlan,
-        _input: &FileFacts,
-        _output: &FileFacts,
-    ) -> std::io::Result<bool> {
-        // The pure signature has no path; the job runner calls
-        // `decode_file` directly for this check.
-        Ok(true)
-    }
-}
-
 /// Probe a path with the given ffprobe into facts (shared by the
 /// runner and the decode check).
 pub fn probe_to_facts(
@@ -73,7 +47,7 @@ pub fn probe_to_facts(
     probe.probe(path)
 }
 
-/// Full-decode-to-null integrity check on `path`.
+/// Full-decode-to-null integrity check on `path` (DESIGN §3.3).
 ///
 /// `ffmpeg -v error -i path -f null -` — any decode error is a
 /// failure. Runs on a blocking thread (it can take a while on a

@@ -8,7 +8,7 @@
 //! 4. start the job worker loop,
 //! 5. serve HTTP (API + embedded frontend) until SIGINT/SIGTERM.
 
-use std::sync::Arc;
+use std::sync::{Arc, atomic::AtomicUsize};
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -96,7 +96,6 @@ async fn run(cli: Cli, data_dir: std::path::PathBuf) -> Result<()> {
         let mut reg = Registry::v1();
         reg.with_fact_extractor(probe.clone());
         reg.with_verification_check(verify::MetadataCheck);
-        reg.with_verification_check(verify::DecodeCheck);
         reg
     });
 
@@ -139,6 +138,7 @@ async fn run(cli: Cli, data_dir: std::path::PathBuf) -> Result<()> {
         ffprobe: cli.ffprobe.clone(),
         data_dir,
         devices: detected,
+        in_flight: Arc::new(AtomicUsize::new(0)),
     };
 
     // 4. Job worker loop.
