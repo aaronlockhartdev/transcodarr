@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::facts::FileFacts;
 use crate::plan::{SubtitlePlan, SubtitlePolicy};
@@ -120,7 +120,10 @@ mod tests {
     fn keep_forced_lists_survivors() {
         let s = Subtitles;
         let p = s
-            .plan(&json!({ "policy": "keep_forced" }), &facts(&[true, false, true]))
+            .plan(
+                &json!({ "policy": "keep_forced" }),
+                &facts(&[true, false, true]),
+            )
             .unwrap();
         let SectionPlan::Subtitles(sp) = p else {
             panic!("{p:?}");

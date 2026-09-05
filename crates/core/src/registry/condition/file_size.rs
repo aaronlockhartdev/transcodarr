@@ -1,9 +1,9 @@
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::facts::FileFacts;
-use crate::registry::condition::parse;
 use crate::registry::ConditionField;
+use crate::registry::condition::parse;
 
 /// `file_size` — matches the file size in bytes.
 ///
@@ -80,7 +80,10 @@ mod tests {
     #[test]
     fn open_bound() {
         let c = FileSize;
-        assert!(c.match_facts(&json!({ "min": 100 }), &facts(10_000)).unwrap());
+        assert!(
+            c.match_facts(&json!({ "min": 100 }), &facts(10_000))
+                .unwrap()
+        );
         assert!(c.match_facts(&json!({ "max": 100 }), &facts(50)).unwrap());
         assert!(c.match_facts(&json!({}), &facts(50)).unwrap());
     }

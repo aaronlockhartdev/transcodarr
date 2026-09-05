@@ -8,12 +8,12 @@
 use std::sync::{Arc, atomic::AtomicUsize};
 
 use axum::extract::{OriginalUri, Path as PathParam, Query, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use transcodarr_core::device::Device;
 use transcodarr_core::evaluate::FLOW_VERSION;
@@ -38,7 +38,6 @@ pub struct AppState {
 }
 
 /// Build the router.
-#[must_use]
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/health", get(health))
@@ -71,7 +70,10 @@ async fn health() -> Json<Value> {
 /// `/api/schema/flow` — the single source of truth for the flow
 /// editor (DESIGN §5).
 async fn schema_flow(State(s): State<AppState>) -> Json<Value> {
-    Json(transcodarr_core::schema::flow_schema(&s.registry, &s.devices))
+    Json(transcodarr_core::schema::flow_schema(
+        &s.registry,
+        &s.devices,
+    ))
 }
 
 async fn list_devices(State(s): State<AppState>) -> Json<Vec<Device>> {
@@ -104,7 +106,7 @@ fn default_flow_json() -> String {
 }
 
 async fn list_libraries(State(s): State<AppState>) -> Result<Json<Vec<db::LibraryRow>>, ApiError> {
-    let libs = s.db.with(|c| db::list_libraries(c))?;
+    let libs = s.db.with(db::list_libraries)?;
     Ok(Json(libs))
 }
 
@@ -131,7 +133,10 @@ async fn create_library(
     if flow.flow_version != FLOW_VERSION {
         return Err(ApiError(
             StatusCode::UNPROCESSABLE_ENTITY,
-            format!("flow version {} unsupported (this build: {FLOW_VERSION})", flow.flow_version),
+            format!(
+                "flow version {} unsupported (this build: {FLOW_VERSION})",
+                flow.flow_version
+            ),
         ));
     }
     let row = db::LibraryRow {
@@ -275,7 +280,10 @@ async fn job_log(
                 .collect::<Vec<_>>()
                 .join("\n");
             let mut h = HeaderMap::new();
-            h.insert(header::CONTENT_TYPE, "text/plain; charset=utf-8".parse().unwrap());
+            h.insert(
+                header::CONTENT_TYPE,
+                "text/plain; charset=utf-8".parse().unwrap(),
+            );
             Ok((StatusCode::OK, h, tail))
         }
         Err(_) => Ok((
@@ -312,7 +320,6 @@ async fn set_setting(
 
 // SPA fallback ──────────────────────────────────────────────────────
 
-#[allow(clippy::include)]
 mod assets {
     include!(concat!(env!("OUT_DIR"), "/assets.rs"));
 }
@@ -320,22 +327,19 @@ mod assets {
 /// Serve embedded frontend assets; unknown non-API paths fall back to
 /// `index.html` (client-side routing).
 async fn spa(OriginalUri(url): OriginalUri) -> Response {
-    serve_asset(&url.path())
+    serve_asset(url.path())
 }
 
 fn serve_asset(path: &str) -> Response {
     let clean = path.strip_prefix('/').unwrap_or(path);
     // Exact match first, then index.html for client-side routes.
-    let asset = assets::ASSETS
-        .iter()
-        .find(|a| a.path == clean)
-        .or_else(|| {
-            if path.starts_with("/api/") {
-                None
-            } else {
-                assets::ASSETS.iter().find(|a| a.path == "index.html")
-            }
-        });
+    let asset = assets::ASSETS.iter().find(|a| a.path == clean).or_else(|| {
+        if path.starts_with("/api/") {
+            None
+        } else {
+            assets::ASSETS.iter().find(|a| a.path == "index.html")
+        }
+    });
     match asset {
         Some(a) => (
             StatusCode::OK,
@@ -372,7 +376,12 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         tracing::error!("{0}", self.1);
         let body = json!({ "error": self.1 });
-        (self.0, [(header::CONTENT_TYPE, "application/json")], body.to_string()).into_response()
+        (
+            self.0,
+            [(header::CONTENT_TYPE, "application/json")],
+            body.to_string(),
+        )
+            .into_response()
     }
 }
 

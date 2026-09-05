@@ -30,10 +30,17 @@ impl FactExtractor for FfprobeFactExtractor {
 
     fn probe(&self, path: &Path) -> std::io::Result<FileFacts> {
         let out = std::process::Command::new(&self.path)
-            .args(["-v", "error", "-print_format", "json", "-show_format", "-show_streams"])
+            .args([
+                "-v",
+                "error",
+                "-print_format",
+                "json",
+                "-show_format",
+                "-show_streams",
+            ])
             .arg(path)
             .output()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(std::io::Error::other)?;
         if !out.status.success() {
             let err = String::from_utf8_lossy(&out.stderr);
             return Err(std::io::Error::new(
@@ -41,9 +48,8 @@ impl FactExtractor for FfprobeFactExtractor {
                 format!("ffprobe failed: {err}"),
             ));
         }
-        let doc: Value = serde_json::from_slice(&out.stdout).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, e)
-        })?;
+        let doc: Value = serde_json::from_slice(&out.stdout)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         map_facts(path, &doc, None)
     }
 }
@@ -58,10 +64,17 @@ impl FfprobeFactExtractor {
         container: Option<&str>,
     ) -> std::io::Result<FileFacts> {
         let out = std::process::Command::new(&self.path)
-            .args(["-v", "error", "-print_format", "json", "-show_format", "-show_streams"])
+            .args([
+                "-v",
+                "error",
+                "-print_format",
+                "json",
+                "-show_format",
+                "-show_streams",
+            ])
             .arg(path)
             .output()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(std::io::Error::other)?;
         if !out.status.success() {
             let err = String::from_utf8_lossy(&out.stderr);
             return Err(std::io::Error::new(
@@ -69,9 +82,8 @@ impl FfprobeFactExtractor {
                 format!("ffprobe failed: {err}"),
             ));
         }
-        let doc: Value = serde_json::from_slice(&out.stdout).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, e)
-        })?;
+        let doc: Value = serde_json::from_slice(&out.stdout)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         map_facts(path, &doc, container)
     }
 }
@@ -135,7 +147,12 @@ pub fn map_facts(
     let mut subtitles = Vec::new();
     let (mut aidx, mut sidx) = (0u32, 0u32);
 
-    for s in doc.get("streams").and_then(|v| v.as_array()).into_iter().flatten() {
+    for s in doc
+        .get("streams")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+    {
         let r#type = s.get("codec_type").and_then(|v| v.as_str()).unwrap_or("");
         let codec = s
             .get("codec_name")
@@ -190,12 +207,18 @@ pub fn map_facts(
                 }
                 video = Some(VideoFacts {
                     codec: codec.unwrap_or_default(),
-                    profile: s.get("profile").and_then(|v| v.as_str()).map(str::to_string),
+                    profile: s
+                        .get("profile")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
                     level: s
                         .get("level")
                         .and_then(|v| v.as_u64())
                         .map(|l| norm_level(l, codec_str(s))),
-                    pixel_format: s.get("pix_fmt").and_then(|v| v.as_str()).map(str::to_string),
+                    pixel_format: s
+                        .get("pix_fmt")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
                     width: s.get("width").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
                     height: s.get("height").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
                     frame_rate: s
@@ -220,7 +243,10 @@ pub fn map_facts(
                     codec: codec.unwrap_or_default(),
                     language,
                     channels,
-                    sample_rate: s.get("sample_rate").and_then(|v| v.as_u64()).map(|v| v as u32),
+                    sample_rate: s
+                        .get("sample_rate")
+                        .and_then(|v| v.as_u64())
+                        .map(|v| v as u32),
                     atmos: is_eac3 && channels.map(|c| c >= 8).unwrap_or(false),
                 });
                 aidx += 1;
@@ -312,8 +338,7 @@ mod tests {
 
     #[test]
     fn maps_a_full_document() {
-        let d = doc(
-            r#"{
+        let d = doc(r#"{
               "format": {"duration": "100.5", "size": "12345", "bit_rate": "98765"},
               "streams": [
                 {"codec_type": "video", "codec_name": "hevc", "profile": "Main",
@@ -325,8 +350,7 @@ mod tests {
                 {"codec_type": "subtitle", "codec_name": "mov_text",
                  "tags": {"language": "eng"}, "disposition": {"forced": 1}}
               ]
-            }"#,
-        );
+            }"#);
         let facts = map_facts(Path::new("/media/show.s01e01.mkv"), &d, None).unwrap();
         assert_eq!(facts.container, "mkv");
         let v = facts.video.as_ref().unwrap();
@@ -345,12 +369,10 @@ mod tests {
 
     #[test]
     fn h264_level_encoding_differs_from_hevc() {
-        let d = doc(
-            r#"{"format": {"duration": "10"}, "streams": [
+        let d = doc(r#"{"format": {"duration": "10"}, "streams": [
                 {"codec_type": "video", "codec_name": "h264", "level": 42,
                  "pix_fmt": "yuv420p", "width": 1920, "height": 1080}
-            ]}"#,
-        );
+            ]}"#);
         let facts = map_facts(Path::new("/x.mp4"), &d, None).unwrap();
         assert_eq!(facts.video.as_ref().unwrap().level.as_deref(), Some("4.2"));
     }
@@ -360,29 +382,25 @@ mod tests {
         // A real HDR10 file carries both side data types. CLLI is
         // usually listed first — a naive "last one wins" chain would
         // misread this as HLG.
-        let d = doc(
-            r#"{"format": {"duration": "10"}, "streams": [
+        let d = doc(r#"{"format": {"duration": "10"}, "streams": [
                 {"codec_type": "video", "codec_name": "hevc",
                  "pix_fmt": "yuv420p10le", "width": 1920, "height": 1080,
                  "side_data_list": [
                    {"side_data_type": "Content light level"},
                    {"side_data_type": "Mastering display color volume"}
                  ]}
-            ]}"#,
-        );
+            ]}"#);
         let facts = map_facts(Path::new("/x.mkv"), &d, None).unwrap();
         assert!(matches!(facts.video.as_ref().unwrap().hdr, Hdr::Hdr10));
     }
 
     #[test]
     fn clli_alone_is_hlg() {
-        let d = doc(
-            r#"{"format": {"duration": "10"}, "streams": [
+        let d = doc(r#"{"format": {"duration": "10"}, "streams": [
                 {"codec_type": "video", "codec_name": "hevc",
                  "pix_fmt": "yuv420p10le", "width": 1920, "height": 1080,
                  "side_data_list": [{"side_data_type": "Content light level"}]}
-            ]}"#,
-        );
+            ]}"#);
         let facts = map_facts(Path::new("/x.mkv"), &d, None).unwrap();
         assert!(matches!(facts.video.as_ref().unwrap().hdr, Hdr::Hlg));
     }

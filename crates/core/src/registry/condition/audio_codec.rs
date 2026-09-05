@@ -1,9 +1,9 @@
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::facts::FileFacts;
-use crate::registry::condition::parse;
 use crate::registry::ConditionField;
+use crate::registry::condition::parse;
 
 /// `audio_codec` — matches when **any** audio track has one of the
 /// listed codecs (DESIGN §5: "audio codec set").
@@ -34,11 +34,10 @@ impl ConditionField for AudioCodec {
         if c.any_of.is_empty() {
             return Ok(true);
         }
-        Ok(facts.audio.iter().any(|t| {
-            c.any_of
-                .iter()
-                .any(|w| w.eq_ignore_ascii_case(&t.codec))
-        }))
+        Ok(facts
+            .audio
+            .iter()
+            .any(|t| c.any_of.iter().any(|w| w.eq_ignore_ascii_case(&t.codec))))
     }
 
     fn ui_schema(&self) -> Value {
@@ -52,8 +51,9 @@ impl ConditionField for AudioCodec {
 
 /// The source audio codec vocabulary shared by the `audio_codec` condition
 /// and the audio operation's rule matching (one place, both consumers).
-pub const AUDIO_CODECS: [&str; 10] =
-    ["eac3", "eac3_joc", "ac3", "dts", "dts_ma", "truehd", "aac", "flac", "mp3", "opus"];
+pub const AUDIO_CODECS: [&str; 10] = [
+    "eac3", "eac3_joc", "ac3", "dts", "dts_ma", "truehd", "aac", "flac", "mp3", "opus",
+];
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -86,6 +86,9 @@ mod tests {
     #[test]
     fn empty_is_any() {
         let c = AudioCodec;
-        assert!(c.match_facts(&json!({ "any_of": [] }), &facts(&[])).unwrap());
+        assert!(
+            c.match_facts(&json!({ "any_of": [] }), &facts(&[]))
+                .unwrap()
+        );
     }
 }

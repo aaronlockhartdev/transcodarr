@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::facts::FileFacts;
 use crate::plan::AudioPlan;
@@ -29,7 +29,6 @@ pub use crate::plan::{AudioTargetCodec as AudioCodec, AudioTrackPlan};
 /// ```
 ///
 /// v1 re-encode target codecs: see [`AudioCodec`].
-
 /// The re-encode payload — the object form of [`AudioPolicy`].
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -49,9 +48,10 @@ struct Reencode {
 /// Manual serde: an untagged enum cannot represent its unit variants
 /// as bare strings, so the documented `"copy"`/`"drop"` forms are
 /// handled explicitly (case-insensitive).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum AudioPolicy {
     /// Stream-copy (default — the design's "copy all").
+    #[default]
     Copy,
     /// Drop the track(s).
     Drop,
@@ -61,12 +61,6 @@ pub enum AudioPolicy {
         sample_rate: Option<u32>,
         channels: Option<u32>,
     },
-}
-
-impl Default for AudioPolicy {
-    fn default() -> Self {
-        Self::Copy
-    }
 }
 
 impl Serialize for AudioPolicy {
@@ -94,6 +88,15 @@ impl<'de> Deserialize<'de> for AudioPolicy {
         match v {
             Value::String(s) if s.eq_ignore_ascii_case("copy") => Ok(Self::Copy),
             Value::String(s) if s.eq_ignore_ascii_case("drop") => Ok(Self::Drop),
+            // Legacy: the old UI wrote the string "re-encode" for the
+            // re-encode policy. Map it to the default re-encode target
+            // (E-AC-3, source rate/channels kept) so pre-existing flows
+            // upgrade instead of failing at evaluation.
+            Value::String(s) if s.eq_ignore_ascii_case("re-encode") => Ok(Self::Reencode {
+                codec: AudioCodec::Eac3,
+                sample_rate: None,
+                channels: None,
+            }),
             Value::Object(_) => serde_json::from_value::<Reencode>(v)
                 .map(|r| Self::Reencode {
                     codec: r.codec,
@@ -122,16 +125,12 @@ pub struct AudioMatch {
 
 impl AudioMatch {
     fn matches(&self, track: &crate::facts::AudioTrack) -> bool {
-        let codec_ok = self
-            .codecs
-            .is_empty()
+        let codec_ok = self.codecs.is_empty()
             || self
                 .codecs
                 .iter()
                 .any(|c| c.eq_ignore_ascii_case(&track.codec));
-        let lang_ok = self
-            .languages
-            .is_empty()
+        let lang_ok = self.languages.is_empty()
             || track
                 .language
                 .as_deref()
@@ -189,12 +188,10 @@ fn plan_tracks(op: &AudioOp, facts: &FileFacts) -> Vec<AudioTrackPlan> {
                 AudioPolicy::Reencode {
                     codec: AudioCodec::Eac3,
                     ..
-                }
-                | AudioPolicy::Reencode {
+                } | AudioPolicy::Reencode {
                     codec: AudioCodec::Ac3,
                     ..
-                }
-                | AudioPolicy::Reencode {
+                } | AudioPolicy::Reencode {
                     codec: AudioCodec::Aac,
                     ..
                 }
@@ -213,8 +210,10 @@ fn plan_tracks(op: &AudioOp, facts: &FileFacts) -> Vec<AudioTrackPlan> {
             } => {
                 // If the target is the source codec, nothing changes.
                 let same_codec = match &codec {
-                    AudioCodec::Eac3 => track.codec.eq_ignore_ascii_case("eac3")
-                        || track.codec.eq_ignore_ascii_case("eac3_joc"),
+                    AudioCodec::Eac3 => {
+                        track.codec.eq_ignore_ascii_case("eac3")
+                            || track.codec.eq_ignore_ascii_case("eac3_joc")
+                    }
                     AudioCodec::Ac3 => track.codec.eq_ignore_ascii_case("ac3"),
                     AudioCodec::Aac => track.codec.eq_ignore_ascii_case("aac"),
                 };
@@ -252,9 +251,7 @@ impl OperationSection for Audio {
         if plans.iter().all(|p| matches!(p, AudioTrackPlan::Copy)) {
             return Ok(SectionPlan::Identity);
         }
-        Ok(SectionPlan::Audio(AudioPlan {
-            per_track: plans,
-        }))
+        Ok(SectionPlan::Audio(AudioPlan { per_track: plans }))
     }
 
     fn ui_schema(&self) -> Value {
@@ -326,12 +323,39 @@ mod tests {
     }
 
     #[test]
+    fn audio_policy_json_forms() {
+        let p: AudioPolicy = serde_json::from_str("\"copy\"").unwrap();
+        assert!(matches!(p, AudioPolicy::Copy));
+        let p: AudioPolicy = serde_json::from_str("\"drop\"").unwrap();
+        assert!(matches!(p, AudioPolicy::Drop));
+        let p: AudioPolicy =
+            serde_json::from_str(r#"{ "codec": "ac3", "sample_rate": 48000 }"#).unwrap();
+        assert!(matches!(
+            p,
+            AudioPolicy::Reencode {
+                codec: AudioCodec::Ac3,
+                sample_rate: Some(48_000),
+                channels: None
+            }
+        ));
+        // Legacy: the old UI wrote the string "re-encode" — it upgrades to
+        // the default re-encode target (E-AC-3, source rate/channels kept).
+        let p: AudioPolicy = serde_json::from_str("\"re-encode\"").unwrap();
+        assert!(matches!(
+            p,
+            AudioPolicy::Reencode {
+                codec: AudioCodec::Eac3,
+                sample_rate: None,
+                channels: None
+            }
+        ));
+        assert!(serde_json::from_str::<AudioPolicy>("\"reencode\"").is_err());
+    }
+
+    #[test]
     fn default_copy_is_identity() {
         let a = Audio;
-        let f = facts(vec![
-            track("dts", false),
-            track("truehd", true),
-        ]);
+        let f = facts(vec![track("dts", false), track("truehd", true)]);
         let p = a.plan(&json!({}), &f).unwrap();
         assert!(matches!(p, SectionPlan::Identity));
     }
@@ -431,8 +455,7 @@ mod tests {
         assert_eq!(s, "\"copy\"");
         let d: AudioPolicy = serde_json::from_str("\"DROP\"").unwrap();
         assert!(matches!(d, AudioPolicy::Drop));
-        let r: AudioPolicy =
-            serde_json::from_str("{\"codec\":\"aac\",\"channels\":2}").unwrap();
+        let r: AudioPolicy = serde_json::from_str("{\"codec\":\"aac\",\"channels\":2}").unwrap();
         assert!(matches!(
             r,
             AudioPolicy::Reencode {

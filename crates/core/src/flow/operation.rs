@@ -17,7 +17,7 @@ use super::super::registry::operation::video::{ContainerChoice, VideoOp};
 /// wrapper. It may be written as a top-level operation field
 /// (DESIGN §6.3) or nested inside the `video` section (the §6 worked
 /// example); top-level wins. Absent ⇒ `smart`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Operation {
     /// Target container (DESIGN §6.3). Top-level form; a value nested in
     /// the `video` section is also accepted (top-level wins).
@@ -27,15 +27,6 @@ pub struct Operation {
     /// Per-section parameters, keyed by section key.
     #[serde(flatten)]
     pub sections: BTreeMap<String, Value>,
-}
-
-impl Default for Operation {
-    fn default() -> Self {
-        Self {
-            container: None,
-            sections: BTreeMap::new(),
-        }
-    }
 }
 
 impl Operation {
@@ -53,9 +44,11 @@ impl Operation {
             return *c;
         }
         let video_json = self.sections.get("video");
-        let container = video_json
-            .and_then(|v| v.get("container"))
-            .or_else(|| video_json.and_then(|v| v.get("video")).and_then(|v| v.get("container")));
+        let container = video_json.and_then(|v| v.get("container")).or_else(|| {
+            video_json
+                .and_then(|v| v.get("video"))
+                .and_then(|v| v.get("container"))
+        });
         match container {
             Some(Value::String(s)) => match s.as_str() {
                 "smart" => ContainerChoice::Smart,

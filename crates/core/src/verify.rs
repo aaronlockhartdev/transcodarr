@@ -35,7 +35,6 @@ fn duration_tolerance_s(source: f64) -> f64 {
 ///
 /// Returns `Ok(true)` when every check passes; `Ok(false)` (with the
 /// first failure named) otherwise.
-#[must_use]
 pub fn verify_output(
     plan: &FfmpegPlan,
     input: &FileFacts,
@@ -46,10 +45,11 @@ pub fn verify_output(
         return Ok(false);
     }
     // 2. Duration.
-    if input.duration_s > 0.0 && output.duration_s > 0.0 {
-        if (output.duration_s - input.duration_s).abs() > duration_tolerance_s(input.duration_s) {
-            return Ok(false);
-        }
+    if input.duration_s > 0.0
+        && output.duration_s > 0.0
+        && (output.duration_s - input.duration_s).abs() > duration_tolerance_s(input.duration_s)
+    {
+        return Ok(false);
     }
     // 3. Stream inventory.
     let expected_audio = match &plan.audio {
@@ -129,7 +129,7 @@ pub fn verify_output(
 mod tests {
     use super::*;
     use crate::facts::{AudioTrack, VideoFacts};
-    use crate::plan::{AudioPlan, AudioTrackPlan, AudioTargetCodec, VideoTargetCodec};
+    use crate::plan::{AudioPlan, AudioTargetCodec, AudioTrackPlan, VideoTargetCodec};
 
     fn input_facts() -> FileFacts {
         FileFacts {

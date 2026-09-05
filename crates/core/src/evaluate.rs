@@ -20,6 +20,7 @@ use crate::error::CoreError;
 use crate::facts::FileFacts;
 use crate::flow::{Condition, Flow, Operation};
 use crate::plan::{FfmpegPlan, VideoPlan};
+use crate::registry::operation::video::ContainerChoice;
 use crate::registry::{Registry, SectionPlan};
 
 /// The flow schema version this build implements (DESIGN §2, §11).
@@ -32,7 +33,7 @@ pub enum Evaluation {
     /// nothing.
     Identity,
     /// A complete plan: exactly one output file for the input.
-    Plan(FfmpegPlan),
+    Plan(Box<FfmpegPlan>),
     /// No step matched; the file is left untouched (status `unmatched`).
     NoMatch,
 }
@@ -65,7 +66,7 @@ pub fn evaluate(
         // First match wins: this step's operation is the complete plan.
         let plan = plan_operation(registry, &step.operation, facts)?;
         if plan.changes_anything() {
-            return Ok(Evaluation::Plan(plan));
+            return Ok(Evaluation::Plan(Box::new(plan)));
         }
         return Ok(Evaluation::Identity);
     }
@@ -92,10 +93,12 @@ fn matches_condition(
 
 /// Build the plan for a matched operation (DESIGN §6, §7).
 ///
-/// Every section is planned independently; the container is resolved
-/// from the operation's `container` (or the smart default when the
-/// operation is present but says nothing about it). An **empty**
-/// operation is identity — the file is not even re-muxed.
+/// Every section is planned independently. The container: an **explicit**
+/// (non-smart) choice is an *action* — when it resolves to a different
+/// container than the source, even a stream-identical step remuxes to it
+/// (a pure remux step). **Smart** is only a resolution input: it picks
+/// the container when streams change, but never forces a remux by itself
+/// (a compliant file stays byte-identical, DESIGN §2, §13.7).
 fn plan_operation(
     registry: &Registry,
     operation: &Operation,
@@ -106,6 +109,7 @@ fn plan_operation(
     let mut video: Option<VideoPlan> = facts.video.is_some().then_some(VideoPlan::Copy);
     let mut audio: Option<crate::plan::AudioPlan> = None;
     let mut subtitles: Option<crate::plan::SubtitlePlan> = None;
+    let mut stream_change = false;
 
     for (key, params) in &operation.sections {
         let section = registry
@@ -113,20 +117,28 @@ fn plan_operation(
             .ok_or_else(|| CoreError::UnknownOperationSection(key.clone()))?;
         match section.plan(params, facts)? {
             SectionPlan::Identity => {}
-            SectionPlan::Video(v) => video = Some(v),
-            SectionPlan::Audio(a) => audio = Some(a),
-            SectionPlan::Subtitles(s) => subtitles = Some(s),
+            SectionPlan::Video(v) => {
+                video = Some(v);
+                stream_change = true;
+            }
+            SectionPlan::Audio(a) => {
+                audio = Some(a);
+                stream_change = true;
+            }
+            SectionPlan::Subtitles(s) => {
+                subtitles = Some(s);
+                stream_change = true;
+            }
         }
     }
 
-    // Container: absent ⇒ smart. An entirely empty operation changes
-    // nothing at all — not even the container (a compliant file stays
-    // byte-identical, DESIGN §2).
-    let container = if operation.is_empty() {
+    // Container: an explicit choice acts even on a stream-identical step
+    // (a pure remux request); smart never acts on its own.
+    let choice = operation.container();
+    let container = if !stream_change && matches!(choice, ContainerChoice::Smart) {
         facts.container.clone()
     } else {
-        let choice = operation.container();
-        crate::registry::operation::container::resolve(choice, facts, &audio).to_string()
+        crate::registry::operation::container::resolve(choice, facts, &video, &audio).to_string()
     };
     let remux = !facts.container.eq_ignore_ascii_case(&container);
 
@@ -194,6 +206,117 @@ mod tests {
     }
 
     #[test]
+    fn explicit_container_remuxes_stream_identical_step() {
+        // Container-only step (no sections): an explicit target that
+        // differs from the source container is a pure remux request.
+        let r = registry();
+        let f = flow(vec![(BTreeMap::new(), json!({ "container": "mp4" }))]);
+        let facts = FileFacts {
+            container: "mkv".into(),
+            video: Some(VideoFacts {
+                codec: "h264".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        match evaluate(&r, &f, &facts).unwrap() {
+            Evaluation::Plan(p) => {
+                assert_eq!(p.container, "mp4");
+                assert!(p.remux, "{p:?}");
+                assert!(matches!(p.video, Some(VideoPlan::Copy)), "{p:?}");
+                assert!(p.audio.is_none(), "{p:?}");
+            }
+            other => panic!("expected a remux plan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn smart_never_remuxes_on_its_own() {
+        // smart is a resolution input, not an action: an mkv file whose
+        // streams are MP4-safe stays untouched, and so does an mp4 file
+        // whose DTS audio would steer smart to MKV.
+        let r = registry();
+        let f = flow(vec![(BTreeMap::new(), json!({ "container": "smart" }))]);
+        let facts = FileFacts {
+            container: "mkv".into(),
+            video: Some(VideoFacts {
+                codec: "h264".into(),
+                ..Default::default()
+            }),
+            audio: vec![AudioTrack {
+                codec: "eac3".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(matches!(
+            evaluate(&r, &f, &facts).unwrap(),
+            Evaluation::Identity
+        ));
+        let facts = FileFacts {
+            container: "mp4".into(),
+            video: Some(VideoFacts {
+                codec: "h264".into(),
+                ..Default::default()
+            }),
+            audio: vec![AudioTrack {
+                codec: "dts".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(matches!(
+            evaluate(&r, &f, &facts).unwrap(),
+            Evaluation::Identity
+        ));
+    }
+
+    #[test]
+    fn explicit_same_container_is_identity() {
+        let r = registry();
+        let f = flow(vec![(BTreeMap::new(), json!({ "container": "mp4" }))]);
+        assert!(matches!(
+            evaluate(&r, &f, &h264_1080p_facts()).unwrap(),
+            Evaluation::Identity
+        ));
+    }
+
+    #[test]
+    fn smart_with_identity_video_section_never_remuxes() {
+        // A video section that plans no stream change does not turn
+        // smart into an action (previously this remuxed every
+        // MP4-safe-in-mkv file just because a video section was enabled).
+        let r = registry();
+        let f = flow(vec![(
+            BTreeMap::new(),
+            json!({
+                "video": { "codec": "h264", "container": "smart" }
+            }),
+        )]);
+        let facts = FileFacts {
+            container: "mkv".into(),
+            video: Some(VideoFacts {
+                codec: "h264".into(),
+                profile: Some("high".into()),
+                level: Some("4.2".into()),
+                width: 1920,
+                height: 1080,
+                bitrate_bps: Some(8_000_000),
+                ..Default::default()
+            }),
+            audio: vec![AudioTrack {
+                codec: "eac3".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(matches!(
+            evaluate(&r, &f, &facts).unwrap(),
+            Evaluation::Identity
+        ));
+    }
+
+    #[test]
     fn compliant_file_is_identity() {
         let r = registry();
         // 1080p H.264 already meets the 1080p H.264 target.
@@ -247,10 +370,7 @@ mod tests {
                 BTreeMap::from([("container".to_string(), json!({ "in": ["mkv"] }))]),
                 json!({ "video": { "codec": "h264", "downscale_to": [1280, 720] } }),
             ),
-            (
-                BTreeMap::new(),
-                json!({ "video": { "codec": "hevc" } }),
-            ),
+            (BTreeMap::new(), json!({ "video": { "codec": "hevc" } })),
         ]);
         let mut facts = h264_1080p_facts();
         facts.container = "mkv".into();
@@ -290,10 +410,7 @@ mod tests {
             json!({ "video": { "codec": "hevc" } }),
         )]);
         let e = evaluate(&r, &f, &h264_1080p_facts());
-        assert!(matches!(
-            e,
-            Err(CoreError::UnknownConditionField(_))
-        ));
+        assert!(matches!(e, Err(CoreError::UnknownConditionField(_))));
     }
 
     #[test]

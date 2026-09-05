@@ -10,7 +10,7 @@
 //! sees `FileFacts`, which carry no path).
 use transcodarr_core::facts::FileFacts;
 use transcodarr_core::plan::FfmpegPlan;
-use transcodarr_core::registry::{FactExtractor, VerificationCheck};
+use transcodarr_core::registry::VerificationCheck;
 
 use crate::probe::FfprobeFactExtractor;
 
@@ -33,8 +33,7 @@ impl VerificationCheck for MetadataCheck {
         input: &FileFacts,
         output: &FileFacts,
     ) -> std::io::Result<bool> {
-        transcodarr_core::verify::verify_output(plan, input, output)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+        transcodarr_core::verify::verify_output(plan, input, output).map_err(std::io::Error::other)
     }
 }
 
@@ -61,8 +60,8 @@ pub fn decode_file(ffmpeg: &str, path: &std::path::Path) -> std::io::Result<bool
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
+        .map_err(std::io::Error::other)?
         .wait_with_output()
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        .map_err(std::io::Error::other)?;
     Ok(out.status.success() && out.stderr.is_empty())
 }

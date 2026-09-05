@@ -6,7 +6,7 @@
 //! New registry entries appear here automatically — that is what makes
 //! "add a capability = one type + one line" true end to end.
 
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::device::Device;
 use crate::evaluate::FLOW_VERSION;

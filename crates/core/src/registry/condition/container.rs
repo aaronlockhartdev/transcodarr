@@ -1,9 +1,9 @@
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::facts::FileFacts;
-use crate::registry::condition::parse;
 use crate::registry::ConditionField;
+use crate::registry::condition::parse;
 
 /// `container` — matches the file's container format.
 ///
@@ -76,7 +76,10 @@ mod tests {
     fn empty_or_absent_is_any() {
         let c = Container;
         assert!(c.match_facts(&json!({}), &facts("whatever")).unwrap());
-        assert!(c.match_facts(&json!({ "in": [] }), &facts("whatever")).unwrap());
+        assert!(
+            c.match_facts(&json!({ "in": [] }), &facts("whatever"))
+                .unwrap()
+        );
     }
 
     #[test]

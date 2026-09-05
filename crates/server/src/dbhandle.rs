@@ -26,12 +26,13 @@ impl Db {
     }
 
     /// Run a closure with a fresh connection.
-    pub fn with<R>(
-        &self,
-        f: impl FnOnce(&Connection) -> anyhow::Result<R>,
-    ) -> anyhow::Result<R> {
+    pub fn with<R>(&self, f: impl FnOnce(&Connection) -> anyhow::Result<R>) -> anyhow::Result<R> {
         let c = Connection::open(&self.path)?;
         c.pragma_update(None, "synchronous", "NORMAL")?;
+        // SQLite disables foreign keys by default; with this ON the
+        // schema's ON DELETE CASCADE (library deletion removes its
+        // file and job rows) actually works.
+        c.pragma_update(None, "foreign_keys", "ON")?;
         // Under WAL, concurrent writers (reaper + workers + scan) can
         // hit SQLITE_BUSY briefly; wait instead of erroring.
         c.busy_timeout(std::time::Duration::from_secs(5))?;

@@ -1,9 +1,9 @@
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::facts::FileFacts;
-use crate::registry::condition::parse;
 use crate::registry::ConditionField;
+use crate::registry::condition::parse;
 
 /// `video_codec` — matches the file's video codec.
 ///
@@ -77,10 +77,26 @@ mod tests {
     fn no_video_never_matches() {
         let c = VideoCodec;
         let v = json!({ "in": ["hevc"] });
-        assert!(!c.match_facts(&v, &FileFacts { container: "mp3".into(), ..Default::default() })
-            .unwrap());
+        assert!(
+            !c.match_facts(
+                &v,
+                &FileFacts {
+                    container: "mp3".into(),
+                    ..Default::default()
+                }
+            )
+            .unwrap()
+        );
         // but "any" still matches a video-less file
-        assert!(c.match_facts(&json!({}), &FileFacts { container: "mp3".into(), ..Default::default() })
-            .unwrap());
+        assert!(
+            c.match_facts(
+                &json!({}),
+                &FileFacts {
+                    container: "mp3".into(),
+                    ..Default::default()
+                }
+            )
+            .unwrap()
+        );
     }
 }

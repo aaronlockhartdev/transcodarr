@@ -250,7 +250,10 @@ impl FfmpegPlan {
         self.remux
             || self.video.as_ref().is_some_and(|v| v.changes_stream())
             || self.audio.as_ref().is_some_and(|a| a.changes_anything())
-            || self.subtitles.as_ref().is_some_and(|s| s.changes_anything())
+            || self
+                .subtitles
+                .as_ref()
+                .is_some_and(|s| s.changes_anything())
     }
 }
 
@@ -433,9 +436,15 @@ pub fn to_argv(plan: &FfmpegPlan, device: &Device, src: &Path, dst: &Path) -> Ve
         a.push("+faststart".into());
     }
     // The temp output's extension is not a container name, so the
-    // muxer must be stated explicitly.
+    // muxer must be stated explicitly. FFmpeg registers the Matroska
+    // muxer under the name "matroska" — "mkv" is only its file
+    // extension alias, and `-f` matching never consults extensions.
     a.push("-f".into());
-    a.push(plan.container.clone());
+    a.push(if plan.container.eq_ignore_ascii_case("mkv") {
+        "matroska".to_string()
+    } else {
+        plan.container.clone()
+    });
     a.push(dst.to_string_lossy().into_owned());
     a
 }
@@ -509,11 +518,30 @@ mod tests {
         // Track 0 copied, track 1 re-encoded, track 2 dropped.
         assert!(s.contains("0:a:0"), "{s}");
         assert!(s.contains("-c:a libeac3"), "{s}");
-        assert!(!s.contains("0:a:2"), "dropped track must not be mapped: {s}");
+        assert!(
+            !s.contains("0:a:2"),
+            "dropped track must not be mapped: {s}"
+        );
         assert!(s.contains("0:s:0"), "{s}");
         assert!(s.contains("-c:s copy"), "{s}");
         assert!(s.contains("+faststart"), "{s}");
         assert!(s.ends_with("/out.mp4"), "{s}");
+    }
+
+    #[test]
+    fn mkv_target_uses_matroska_muxer_name() {
+        // FFmpeg's Matroska muxer is named "matroska"; "mkv" is only an
+        // extension alias, and -f matching never consults extensions —
+        // emitting "-f mkv" fails with 'format not known' (exit 234).
+        let mut p = plan();
+        p.container = "mkv".into();
+        let argv = to_argv(&p, &cpu(), Path::new("/in.mp4"), Path::new("/out.mkv"));
+        let s = argv.join(" ");
+        assert!(s.contains("-f matroska"), "{s}");
+        assert!(!s.contains("-f mkv"), "{s}");
+        // faststart is MP4-only.
+        assert!(!s.contains("+faststart"), "{s}");
+        assert!(s.ends_with("/out.mkv"), "{s}");
     }
 
     #[test]
@@ -539,7 +567,10 @@ mod tests {
         assert!(s.contains("-c:v h264_nvenc"), "{s}");
         assert!(s.contains("-hwaccel cuda"), "{s}");
         // -hwaccel is an input option: it must precede -i.
-        let hi = argv.iter().position(|x| x == "-hwaccel").expect("-hwaccel present");
+        let hi = argv
+            .iter()
+            .position(|x| x == "-hwaccel")
+            .expect("-hwaccel present");
         let ii = argv.iter().position(|x| x == "-i").expect("-i present");
         assert!(hi < ii, "hwaccel must come before -i: {s}");
         let _ = &mut gpu;

@@ -1,7 +1,7 @@
 use serde::de;
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::facts::{FileFacts, Hdr, VideoFacts};
 use crate::plan::VideoPlan;
@@ -30,7 +30,6 @@ pub use crate::plan::VideoTargetCodec as VideoCodec;
 ///   "hdr_to_sdr": false
 /// } }
 /// ```
-
 /// 1080p reference pixel count for bitrate-ceiling scaling.
 const REF_1080P_PIXELS: u64 = 1920 * 1080;
 
@@ -59,32 +58,22 @@ pub enum ContainerChoice {
 
 /// Profile: `auto` (sensible default per codec + bit depth) or an
 /// explicit ffmpeg profile name.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum ProfileSpec {
     /// Codec default (H.264: `high`/`high10`; HEVC: `main`/`main10`).
+    #[default]
     Auto,
     Explicit(String),
-}
-
-impl Default for ProfileSpec {
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 /// Level: `auto` (sensible default per codec + resolution) or an
 /// explicit level like `"4.2"`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum LevelSpec {
     /// Codec/resolution default (e.g. 4K HEVC → `5.1`, DESIGN §6.1).
+    #[default]
     Auto,
     Explicit(String),
-}
-
-impl Default for LevelSpec {
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 impl Serialize for ProfileSpec {
@@ -99,11 +88,14 @@ impl Serialize for ProfileSpec {
 impl<'de> Deserialize<'de> for ProfileSpec {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         // Bare `auto` means codec default; any other string is explicit.
-        let v = String::deserialize(d)?;
-        if v.eq_ignore_ascii_case("auto") {
-            Ok(Self::Auto)
-        } else {
-            Ok(Self::Explicit(v))
+        // `null` is accepted as `auto`: the earlier untagged serde
+        // serialized Auto as null, and pre-existing flows keep it.
+        let v = Value::deserialize(d)?;
+        match v {
+            Value::Null => Ok(Self::Auto),
+            Value::String(s) if s.eq_ignore_ascii_case("auto") => Ok(Self::Auto),
+            Value::String(s) => Ok(Self::Explicit(s)),
+            other => Err(de::Error::custom(format!("invalid profile spec: {other}"))),
         }
     }
 }
@@ -119,24 +111,27 @@ impl Serialize for LevelSpec {
 
 impl<'de> Deserialize<'de> for LevelSpec {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let v = String::deserialize(d)?;
-        if v.eq_ignore_ascii_case("auto") {
-            Ok(Self::Auto)
-        } else {
-            Ok(Self::Explicit(v))
+        // `null` is accepted as `auto` (the earlier untagged serde
+        // serialized Auto as null; pre-existing flows keep it).
+        let v = Value::deserialize(d)?;
+        match v {
+            Value::Null => Ok(Self::Auto),
+            Value::String(s) if s.eq_ignore_ascii_case("auto") => Ok(Self::Auto),
+            Value::String(s) => Ok(Self::Explicit(s)),
+            other => Err(de::Error::custom(format!("invalid level spec: {other}"))),
         }
     }
 }
-
 
 /// Bitrate mode (DESIGN §6.1).
 ///
 /// JSON: `{ "mode": "source_capped" | "fixed", "bps": … }` or
 /// `{ "mode": "crf", "value": … }`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum BitrateMode {
     /// Default: ≤ source bitrate, ceiling scaled by target resolution.
+    #[default]
     SourceCapped,
     /// Fixed bitrate in bits/s.
     Fixed { bps: u64 },
@@ -144,30 +139,19 @@ pub enum BitrateMode {
     Crf { value: u32 },
 }
 
-impl Default for BitrateMode {
-    fn default() -> Self {
-        Self::SourceCapped
-    }
-}
-
 /// Encode device choice (populated from the startup encoder probe;
 /// unavailable encoders are shown disabled in the UI — DESIGN §6.1).
 ///
 /// JSON: `"auto"` | `"software"` | `{ "kind": "gpu", "id": "…" }`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum DeviceChoice {
     /// Best available device at dispatch time (GPU first, CPU fallback).
+    #[default]
     Auto,
     /// Always the CPU pseudo-device.
     Software,
     /// A specific detected device by id.
     Gpu { id: String },
-}
-
-impl Default for DeviceChoice {
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 impl Serialize for DeviceChoice {
@@ -197,14 +181,24 @@ impl<'de> Deserialize<'de> for DeviceChoice {
                 "software" | "cpu" => Ok(Self::Software),
                 other => Err(de::Error::unknown_variant(other, &["auto", "software"])),
             },
-            Value::Object(m) => match (m.get("kind"), m.get("id")) {
-                (Some(Value::String(k)), Some(Value::String(id))) if k == "gpu" => {
-                    Ok(Self::Gpu { id: id.clone() })
+            Value::Object(m) => {
+                let id = m.get("id").and_then(Value::as_str);
+                let kind = m
+                    .get("kind")
+                    .and_then(Value::as_str)
+                    .map(str::to_ascii_lowercase);
+                match (kind, id) {
+                    // {"kind":"gpu","id":…} — canonical form.
+                    (Some(k), Some(id)) if k == "gpu" => Ok(Self::Gpu { id: id.into() }),
+                    // {"id":…} — how the old untagged derive serialized
+                    // Gpu (no kind tag); accepted so pre-existing flows
+                    // upgrade without a manual edit.
+                    (None, Some(id)) => Ok(Self::Gpu { id: id.into() }),
+                    _ => Err(de::Error::custom(
+                        "gpu device choice needs {\"kind\":\"gpu\",\"id\":\"…\"}".to_owned(),
+                    )),
                 }
-                _ => Err(de::Error::custom(
-                    "gpu device choice needs {\"kind\":\"gpu\",\"id\":\"…\"}".to_owned(),
-                )),
-            },
+            }
             other => Err(de::Error::custom(format!("invalid device choice: {other}"))),
         }
     }
@@ -286,11 +280,7 @@ pub fn default_level(codec: VideoCodec, target_pixels: u64) -> &'static str {
 
 /// Normalize a level for comparison (`"4.2"` ≡ `"42"`).
 fn norm_level(level: &str) -> u64 {
-    level
-        .trim()
-        .replace('.', "")
-        .parse()
-        .unwrap_or(0)
+    level.trim().replace('.', "").parse().unwrap_or(0)
 }
 
 /// Would this operation change anything for this file's video stream?
@@ -364,25 +354,20 @@ fn build_filters(v: &VideoFacts, op: &VideoOp, target_w: u32, target_h: u32) -> 
     let mut filters = Vec::new();
     let downscales = (target_w, target_h) != (v.width, v.height);
     if downscales {
-        filters.push(format!(
-            "scale={target_w}:{target_h}:flags=lanczos"
-        ));
+        filters.push(format!("scale={target_w}:{target_h}:flags=lanczos"));
     }
     // HDR→SDR. Only applied when the source is actually HDR (the
     // design: "no-op when source is SDR"). The exact chain is an
     // implementation detail (DESIGN §6.1).
     if op.hdr_to_sdr && v.hdr != Hdr::None {
-        let out_fmt = if v.is_10bit() { "yuv420p10le" } else { "yuv420p" };
-        filters.push(
-            "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709"
-                .to_string(),
-        );
-        filters.push(
-            "tonemap=tonemap=bt.2390:desat=0".to_string(),
-        );
-        filters.push(format!(
-            "zscale=t=bt709:m=bt709:r=tv,format={out_fmt}"
-        ));
+        let out_fmt = if v.is_10bit() {
+            "yuv420p10le"
+        } else {
+            "yuv420p"
+        };
+        filters.push("zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709".to_string());
+        filters.push("tonemap=tonemap=bt.2390:desat=0".to_string());
+        filters.push(format!("zscale=t=bt709:m=bt709:r=tv,format={out_fmt}"));
     }
     filters
 }
@@ -419,16 +404,8 @@ fn build_plan(op: &VideoOp, v: &VideoFacts) -> VideoPlan {
     let (bitrate, maxrate, bufsize, crf) = match op.bitrate {
         BitrateMode::SourceCapped => {
             let ceiling = source_capped_ceiling(op.codec, target_pixels);
-            let bps = v
-                .bitrate_bps
-                .map(|s| s.min(ceiling))
-                .unwrap_or(ceiling);
-            (
-                Some(bps),
-                Some(bps * 115 / 100),
-                Some(bps * 2),
-                None,
-            )
+            let bps = v.bitrate_bps.map(|s| s.min(ceiling)).unwrap_or(ceiling);
+            (Some(bps), Some(bps * 115 / 100), Some(bps * 2), None)
         }
         BitrateMode::Fixed { bps } => (Some(bps), Some(bps * 115 / 100), Some(bps * 2), None),
         BitrateMode::Crf { value } => (None, None, None, Some(value)),
@@ -537,6 +514,13 @@ mod tests {
         assert!(matches!(l, LevelSpec::Auto));
         let l: LevelSpec = serde_json::from_str("\"4.2\"").unwrap();
         assert!(matches!(l, LevelSpec::Explicit(ref x) if x == "4.2"));
+        // Legacy: the old untagged derive serialized Auto as null.
+        let p: ProfileSpec = serde_json::from_str("null").unwrap();
+        assert!(matches!(p, ProfileSpec::Auto));
+        let l: LevelSpec = serde_json::from_str("null").unwrap();
+        assert!(matches!(l, LevelSpec::Auto));
+        // Round-trip now normalizes null back to the string form.
+        assert_eq!(serde_json::to_string(&p).unwrap(), "\"auto\"");
     }
 
     fn video(codec: &str, w: u32, h: u32, bps: Option<u64>) -> VideoFacts {
@@ -574,11 +558,15 @@ mod tests {
         let s = Video;
         // 1080p h264, well under the source-capped ceiling → identity.
         let f = facts(Some(video("h264", 1920, 1080, Some(8_000_000))));
-        let op: VideoOp =
-            serde_json::from_value(json!({ "codec": "h264", "bitrate": { "mode": "source_capped" } }))
-                .unwrap();
-        assert!(is_identity(&op, &f.video().unwrap()));
-        assert!(matches!(s.plan(&json!({ "codec": "h264" }), &f).unwrap(), SectionPlan::Identity));
+        let op: VideoOp = serde_json::from_value(
+            json!({ "codec": "h264", "bitrate": { "mode": "source_capped" } }),
+        )
+        .unwrap();
+        assert!(is_identity(&op, f.video().unwrap()));
+        assert!(matches!(
+            s.plan(&json!({ "codec": "h264" }), &f).unwrap(),
+            SectionPlan::Identity
+        ));
     }
 
     #[test]
@@ -587,7 +575,9 @@ mod tests {
         let f = facts(Some(video("hevc", 1920, 1080, Some(6_000_000))));
         let p = s.plan(&json!({ "codec": "h264" }), &f).unwrap();
         assert!(!matches!(p, SectionPlan::Identity));
-        let VideoPlan::Encode { codec, .. } = enc(p) else { panic!("expected Encode") };
+        let VideoPlan::Encode { codec, .. } = enc(p) else {
+            panic!("expected Encode")
+        };
         assert_eq!(codec, VideoCodec::H264);
     }
 
@@ -614,9 +604,7 @@ mod tests {
             panic!("expected Encode")
         };
         assert_eq!((target_width, target_height), (1920, 1080));
-        assert!(filters
-            .iter()
-            .any(|f| f.starts_with("scale=1920:1080")));
+        assert!(filters.iter().any(|f| f.starts_with("scale=1920:1080")));
         // source-capped: ceiling at 1080p = 12 Mb/s → below the 80 Mb/s source.
         assert_eq!(bitrate_bps, Some(12_000_000));
         assert_eq!(maxrate_bps, Some(13_800_000));
@@ -651,13 +639,17 @@ mod tests {
         v.hdr = Hdr::Hdr10;
         let f = facts(Some(v));
         let j = json!({ "codec": "h264", "hdr_to_sdr": true });
-        let VideoPlan::Encode { filters, .. } = enc(s.plan(&j, &f).unwrap()) else { panic!("expected Encode") };
+        let VideoPlan::Encode { filters, .. } = enc(s.plan(&j, &f).unwrap()) else {
+            panic!("expected Encode")
+        };
         assert!(filters.iter().any(|f| f.contains("tonemap")));
 
         // SDR source → no-op, no filters.
         let f = facts(Some(video("h264", 1920, 1080, Some(8_000_000))));
         let j = json!({ "codec": "h264", "hdr_to_sdr": true, "profile": "high", "level": "4.2" });
-        let VideoPlan::Encode { filters, .. } = enc(s.plan(&j, &f).unwrap()) else { panic!("expected Encode") };
+        let VideoPlan::Encode { filters, .. } = enc(s.plan(&j, &f).unwrap()) else {
+            panic!("expected Encode")
+        };
         assert!(
             !filters.iter().any(|f| f.contains("tonemap")),
             "HDR→SDR must be a no-op on an SDR source"
@@ -715,20 +707,41 @@ mod tests {
     fn device_choice_json_forms_round_trip() {
         // Regression: untagged unit variants only match null, so the
         // documented string forms used to fail to deserialize.
-        assert_eq!(DeviceChoice::deserialize(&Value::String("auto".into())).unwrap(), DeviceChoice::Auto);
-        assert_eq!(DeviceChoice::deserialize(&Value::String("software".into())).unwrap(), DeviceChoice::Software);
+        assert_eq!(
+            DeviceChoice::deserialize(&Value::String("auto".into())).unwrap(),
+            DeviceChoice::Auto
+        );
+        assert_eq!(
+            DeviceChoice::deserialize(&Value::String("software".into())).unwrap(),
+            DeviceChoice::Software
+        );
         assert_eq!(
             DeviceChoice::deserialize(&json!({ "kind": "gpu", "id": "nvenc-0" })).unwrap(),
-            DeviceChoice::Gpu { id: "nvenc-0".into() }
+            DeviceChoice::Gpu {
+                id: "nvenc-0".into()
+            }
         );
-        assert_eq!(serde_json::to_string(&DeviceChoice::Auto).unwrap(), "\"auto\"");
-        assert_eq!(serde_json::to_string(&DeviceChoice::Software).unwrap(), "\"software\"");
+        assert_eq!(
+            serde_json::to_string(&DeviceChoice::Auto).unwrap(),
+            "\"auto\""
+        );
+        assert_eq!(
+            serde_json::to_string(&DeviceChoice::Software).unwrap(),
+            "\"software\""
+        );
         assert_eq!(
             serde_json::to_string(&DeviceChoice::Gpu { id: "x".into() }).unwrap(),
             "{\"kind\":\"gpu\",\"id\":\"x\"}"
         );
         assert!(DeviceChoice::deserialize(&Value::String("nvidia".into())).is_err());
-        assert!(DeviceChoice::deserialize(&json!({ "id": "x" })).is_err());
+        // Legacy bare {"id":…} (old untagged derive) still parses as Gpu.
+        assert_eq!(
+            DeviceChoice::deserialize(&json!({ "id": "x" })).unwrap(),
+            DeviceChoice::Gpu { id: "x".into() }
+        );
+        // A gpu object without the id (or with a foreign kind) is rejected.
+        assert!(DeviceChoice::deserialize(&json!({ "kind": "gpu" })).is_err());
+        assert!(DeviceChoice::deserialize(&json!({ "kind": "nvidia", "id": "x" })).is_err());
     }
-// (module closes)
+    // (module closes)
 }

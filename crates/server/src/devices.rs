@@ -69,7 +69,7 @@ fn test_encode(ffmpeg: &str, encoder: &str) -> bool {
         "-",
     ];
     std::process::Command::new(ffmpeg)
-        .args(&args)
+        .args(args)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()

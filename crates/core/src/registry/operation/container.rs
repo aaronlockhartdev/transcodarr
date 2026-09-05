@@ -1,12 +1,12 @@
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::facts::FileFacts;
-use crate::plan::{AudioPlan, AudioTrackPlan};
-use crate::registry::operation::parse;
-use crate::registry::operation::video::ContainerChoice;
+use crate::plan::{AudioPlan, AudioTrackPlan, VideoPlan};
 use crate::registry::OperationSection;
 use crate::registry::SectionPlan;
+use crate::registry::operation::parse;
+use crate::registry::operation::video::ContainerChoice;
 
 /// MP4-safe subtitle codecs (text-based). Bitmap subs (e.g. `hdmv_pgs_subtitle`)
 /// force MKV.
@@ -19,20 +19,30 @@ fn mp4_safe_subtitle(codec: &str) -> bool {
 
 /// The target container implied by a container choice (DESIGN §13.7):
 ///
-/// - `smart`: MP4 if every *surviving* stream is MP4-safe (video codec
-///   h264/hevc; audio eac3/ac3/aac — re-encoded tracks count by their
-///   **target** codec, dropped tracks are skipped; subtitles text-based),
-///   else MKV.
+/// - `smart`: MP4 if every *surviving* stream is MP4-safe (video h264/hevc
+///   — an encoded video counts by its **target** codec; audio eac3/ac3/aac
+///   — re-encoded tracks count by their **target** codec, dropped tracks
+///   are skipped; subtitles text-based), else MKV.
 /// - `mp4` / `mkv`: the named container, verbatim.
 #[must_use]
-pub fn resolve(choice: ContainerChoice, facts: &FileFacts, audio: &Option<AudioPlan>) -> &'static str {
+pub fn resolve(
+    choice: ContainerChoice,
+    facts: &FileFacts,
+    video: &Option<VideoPlan>,
+    audio: &Option<AudioPlan>,
+) -> &'static str {
     match choice {
         ContainerChoice::Mp4 => "mp4",
         ContainerChoice::Mkv => "mkv",
         ContainerChoice::Smart => {
-            // Video.
-            if let Some(v) = facts.video() {
-                if !matches!(v.codec.to_ascii_lowercase().as_str(), "h264" | "hevc" | "avc" | "h265") {
+            // Video — judged by the planned (target) codec: an encode
+            // to h264/hevc is MP4-safe even when the source codec isn't.
+            let video_codec = match video.as_ref() {
+                Some(VideoPlan::Encode { codec, .. }) => Some(codec.name().to_ascii_lowercase()),
+                _ => facts.video.as_ref().map(|v| v.codec.to_ascii_lowercase()),
+            };
+            if let Some(vc) = video_codec {
+                if !matches!(vc.as_str(), "h264" | "hevc" | "avc" | "h265") {
                     return "mkv";
                 }
             }
@@ -52,11 +62,7 @@ pub fn resolve(choice: ContainerChoice, facts: &FileFacts, audio: &Option<AudioP
                 }
             }
             // Subtitles — bitmap codecs force MKV.
-            if !facts
-                .subtitles
-                .iter()
-                .all(|s| mp4_safe_subtitle(&s.codec))
-            {
+            if !facts.subtitles.iter().all(|s| mp4_safe_subtitle(&s.codec)) {
                 return "mkv";
             }
             "mp4"
@@ -66,13 +72,17 @@ pub fn resolve(choice: ContainerChoice, facts: &FileFacts, audio: &Option<AudioP
 
 /// The `container` section.
 ///
-/// A container choice changes no stream — only the wrapper. For that
-/// reason this section always plans [`SectionPlan::Identity`]; the
-/// effective container is resolved by the evaluator from the
-/// [`Operation`](crate::flow::Operation) level (the `container` field,
-/// top-level or nested in `video`). The section exists so the flow
-/// schema/UI can advertise the choice and so an explicit
-/// `{"container": {"choice": …}}` form is accepted (and validated).
+/// A container choice changes no stream — only the wrapper, so this
+/// section always plans [`SectionPlan::Identity`]. The effective
+/// container is resolved at the
+/// [`Operation`](crate::flow::Operation) level: the top-level `container`
+/// field (where this section's UI control writes its value — a top-level
+/// `"container"` key is consumed by that named field and never reaches
+/// the sections map) or the `container` field nested in the `video`
+/// section (top-level wins). An **explicit** choice (`mp4`/`mkv`) that
+/// resolves to a container different from the source's triggers a pure
+/// remux even on a stream-identical step; **smart** is only a
+/// resolution input and never forces a remux by itself (DESIGN §13.7).
 ///
 /// Flow JSON: `{ "container": { "choice": "smart" | "mp4" | "mkv" } }`
 pub struct Container;
@@ -126,7 +136,7 @@ impl OperationSection for Container {
 mod tests {
     use super::*;
     use crate::facts::{AudioTrack, SubtitleTrack};
-    use crate::plan::AudioTargetCodec;
+    use crate::plan::{AudioTargetCodec, VideoTargetCodec};
 
     fn facts(container: &str, video: &str, audio: &[&str], subs: &[&str]) -> FileFacts {
         FileFacts {
@@ -156,25 +166,25 @@ mod tests {
     #[test]
     fn smart_is_mp4_for_safe_codecs() {
         let f = facts("mkv", "h264", &["eac3"], &["mov_text"]);
-        assert_eq!(resolve(ContainerChoice::Smart, &f, &None), "mp4");
+        assert_eq!(resolve(ContainerChoice::Smart, &f, &None, &None), "mp4");
     }
 
     #[test]
     fn smart_is_mkv_for_unsafe_video() {
         let f = facts("mkv", "av1", &["aac"], &[]);
-        assert_eq!(resolve(ContainerChoice::Smart, &f, &None), "mkv");
+        assert_eq!(resolve(ContainerChoice::Smart, &f, &None, &None), "mkv");
     }
 
     #[test]
     fn smart_is_mkv_for_unsafe_audio() {
         let f = facts("mkv", "h264", &["dts"], &[]);
-        assert_eq!(resolve(ContainerChoice::Smart, &f, &None), "mkv");
+        assert_eq!(resolve(ContainerChoice::Smart, &f, &None, &None), "mkv");
     }
 
     #[test]
     fn smart_is_mkv_for_unsafe_subtitles() {
         let f = facts("mp4", "h264", &["aac"], &["hdmv_pgs"]);
-        assert_eq!(resolve(ContainerChoice::Smart, &f, &None), "mkv");
+        assert_eq!(resolve(ContainerChoice::Smart, &f, &None, &None), "mkv");
     }
 
     #[test]
@@ -190,7 +200,7 @@ mod tests {
                 bitrate_bps: None,
             }],
         });
-        assert_eq!(resolve(ContainerChoice::Smart, &f, &audio), "mp4");
+        assert_eq!(resolve(ContainerChoice::Smart, &f, &None, &audio), "mp4");
     }
 
     #[test]
@@ -207,13 +217,42 @@ mod tests {
                 AudioTrackPlan::Drop,
             ],
         });
-        assert_eq!(resolve(ContainerChoice::Smart, &f, &audio), "mp4");
+        assert_eq!(resolve(ContainerChoice::Smart, &f, &None, &audio), "mp4");
+    }
+
+    #[test]
+    fn reencoded_video_counts_as_target_codec() {
+        // vp9 source → h264 target: smart is MP4 even though the
+        // source codec isn't MP4-safe.
+        let f = facts("mkv", "vp9", &["aac"], &[]);
+        let video = Some(VideoPlan::Encode {
+            codec: VideoTargetCodec::H264,
+            encoder: "libx264".into(),
+            profile: "high".into(),
+            level: "4.2".into(),
+            bitrate_bps: Some(8_000_000),
+            maxrate_bps: Some(9_200_000),
+            bufsize_bps: Some(16_000_000),
+            crf: None,
+            pix_fmt: "yuv420p".into(),
+            filters: vec![],
+            target_width: 3840,
+            target_height: 2160,
+        });
+        assert_eq!(resolve(ContainerChoice::Smart, &f, &video, &None), "mp4");
+    }
+
+    #[test]
+    fn copied_unsafe_video_still_forces_mkv() {
+        // vp9 with no video plan (Copy) stays MKV.
+        let f = facts("mkv", "vp9", &["aac"], &[]);
+        assert_eq!(resolve(ContainerChoice::Smart, &f, &None, &None), "mkv");
     }
 
     #[test]
     fn explicit_choice_passes_through() {
         let f = facts("mp4", "h264", &["aac"], &["hdmv_pgs"]);
-        assert_eq!(resolve(ContainerChoice::Mkv, &f, &None), "mkv");
-        assert_eq!(resolve(ContainerChoice::Mp4, &f, &None), "mp4");
+        assert_eq!(resolve(ContainerChoice::Mkv, &f, &None, &None), "mkv");
+        assert_eq!(resolve(ContainerChoice::Mp4, &f, &None, &None), "mp4");
     }
 }

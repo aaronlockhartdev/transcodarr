@@ -1,9 +1,9 @@
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::facts::FileFacts;
-use crate::registry::condition::parse;
 use crate::registry::ConditionField;
+use crate::registry::condition::parse;
 
 /// `resolution` — matches the file's video resolution by pixel count.
 ///
@@ -128,7 +128,15 @@ mod tests {
     fn no_video_never_matches() {
         let c = Resolution;
         let v = json!({ "min": [1920, 1080] });
-        assert!(!c.match_facts(&v, &FileFacts { container: "mp3".into(), ..Default::default() })
-            .unwrap());
+        assert!(
+            !c.match_facts(
+                &v,
+                &FileFacts {
+                    container: "mp3".into(),
+                    ..Default::default()
+                }
+            )
+            .unwrap()
+        );
     }
 }

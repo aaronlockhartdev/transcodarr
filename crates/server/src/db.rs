@@ -4,8 +4,8 @@
 //! operation — rusqlite's `Connection` is `!Send`). WAL mode.
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
-use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
+use anyhow::{Context, Result, bail};
+use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 use serde::{Deserialize, Serialize};
 
 use transcodarr_core::device::{Device, DeviceKind};
@@ -21,8 +21,7 @@ pub fn open(data_dir: &Path) -> Result<Connection> {
     std::fs::create_dir_all(data_dir)
         .with_context(|| format!("create data dir {}", data_dir.display()))?;
     let db_path = data_dir.join(DB_FILE);
-    let conn = Connection::open(&db_path)
-        .with_context(|| format!("open {}", db_path.display()))?;
+    let conn = Connection::open(&db_path).with_context(|| format!("open {}", db_path.display()))?;
     conn.pragma_update(None, "journal_mode", "WAL")
         .context("enable WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
@@ -349,16 +348,22 @@ fn file_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<FileRow> {
 }
 
 pub fn set_file_status(conn: &Connection, id: i64, status: &str) -> Result<()> {
-    conn.execute("UPDATE files SET status = ?2 WHERE id = ?1", params![id, status])
-        .context("set file status")?;
+    conn.execute(
+        "UPDATE files SET status = ?2 WHERE id = ?1",
+        params![id, status],
+    )
+    .context("set file status")?;
     Ok(())
 }
 
 /// Rename a file record's path (in-place container adoption,
 /// DESIGN §3.1). Errors on a UNIQUE violation of `files.path`.
 pub fn rename_file_path(conn: &Connection, id: i64, new_path: &str) -> Result<()> {
-    conn.execute("UPDATE files SET path = ?2 WHERE id = ?1", params![id, new_path])
-        .context("rename file path")?;
+    conn.execute(
+        "UPDATE files SET path = ?2 WHERE id = ?1",
+        params![id, new_path],
+    )
+    .context("rename file path")?;
     Ok(())
 }
 
@@ -491,6 +496,53 @@ pub fn has_live_job(conn: &Connection, file_id: i64) -> Result<bool> {
     Ok(r.is_some())
 }
 
+/// Whether this file has a running (in-flight) job. Unlike
+/// [`has_live_job`], a queued job does not count: queued work can
+/// still be cancelled, running work cannot.
+pub fn has_running_job(conn: &Connection, file_id: i64) -> Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM jobs WHERE file_id = ?1 AND state IN ('running', 'verifying')",
+        params![file_id],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// Cancel (fail) every queued job of a file with a given exit kind.
+/// Used when a flow edit makes a queued job's plan stale. Returns the
+/// number cancelled.
+pub fn cancel_queued_jobs(conn: &Connection, file_id: i64, exit_kind: &str) -> Result<usize> {
+    // One atomic, state-guarded statement: a job that a concurrent
+    // worker claims (or re-claims) in the meantime keeps running —
+    // only rows still `queued` at commit time are touched.
+    let n = conn.execute(
+        "UPDATE jobs SET state = 'failed', ended = ?2, exit_kind = ?3,
+                       claimed_by = NULL, lease_expires = NULL
+         WHERE file_id = ?1 AND state = 'queued'",
+        params![file_id, now_s(), exit_kind],
+    )?;
+    Ok(n)
+}
+
+/// Persist a re-evaluated file's status/timestamp without re-inserting:
+/// scoped to (id, path), so a row a concurrent job just renamed
+/// (in-place container adoption) is updated in place instead of
+/// re-created under the old path (a ghost row no scan can ever touch
+/// again). Returns the number of rows updated (0 = the row moved or
+/// was deleted).
+pub fn touch_file_eval(
+    conn: &Connection,
+    id: i64,
+    path: &str,
+    status: &str,
+    last_evaluated: Option<i64>,
+) -> Result<usize> {
+    Ok(conn.execute(
+        "UPDATE files SET status = ?3, last_evaluated = ?4 WHERE id = ?1 AND path = ?2",
+        params![id, path, status, last_evaluated],
+    )?)
+}
+
 /// How many jobs are in flight (running or verifying) — overall
 /// (`device_key = None`) or on one device. Feeds the concurrency caps
 /// in `jobs::run_loop`.
@@ -546,8 +598,11 @@ pub fn finish_job(
 }
 
 pub fn set_job_log_path(conn: &Connection, id: i64, path: &str) -> Result<()> {
-    conn.execute("UPDATE jobs SET log_path = ?2 WHERE id = ?1", params![id, path])
-        .context("set job log path")?;
+    conn.execute(
+        "UPDATE jobs SET log_path = ?2 WHERE id = ?1",
+        params![id, path],
+    )
+    .context("set job log path")?;
     Ok(())
 }
 
@@ -577,10 +632,7 @@ pub fn get_job(conn: &Connection, id: i64) -> Result<Option<JobRow>> {
     it.next().transpose().context("get job")
 }
 
-pub fn next_queued_job(
-    conn: &Connection,
-    device_key: Option<&str>,
-) -> Result<Option<JobRow>> {
+pub fn next_queued_job(conn: &Connection, device_key: Option<&str>) -> Result<Option<JobRow>> {
     let mut stmt = conn.prepare(
         "SELECT id, file_id, library_id, flow_version, plan_json, state,
                 device_id, claimed_by, lease_expires, started, ended,
@@ -629,13 +681,7 @@ pub fn upsert_devices(conn: &Connection, devices: &[Device]) -> Result<()> {
              VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(key) DO UPDATE SET kind = ?2, name = ?3,
                     encoders_json = ?4, max_concurrent = ?5",
-            params![
-                d.id,
-                kind_str(&d.kind),
-                d.name,
-                encoders,
-                d.max_concurrent,
-            ],
+            params![d.id, kind_str(&d.kind), d.name, encoders, d.max_concurrent,],
         )?;
     }
     Ok(())
@@ -697,4 +743,114 @@ pub fn quarantine_dir(data_dir: &Path) -> PathBuf {
     let dir = data_dir.join(QUARANTINE_DIR);
     let _ = std::fs::create_dir_all(&dir);
     dir
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_db(name: &str) -> (PathBuf, Connection) {
+        let dir =
+            std::env::temp_dir().join(format!("transcodarr-db-test-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let conn = open(&dir).unwrap();
+        (dir, conn)
+    }
+
+    fn lib_row() -> LibraryRow {
+        LibraryRow {
+            id: 0,
+            name: "L".into(),
+            path: "/l".into(),
+            lifecycle_mode: "auto".into(),
+            flow_json: "{}".into(),
+            auto_queue: true,
+            retention_days: 7,
+            auto_delete: false,
+            scan_schedule: None,
+            watchable: false,
+        }
+    }
+
+    fn file_row(library_id: i64, path: &str) -> FileRow {
+        FileRow {
+            id: 0,
+            library_id,
+            path: path.into(),
+            dev: 1,
+            inode: 2,
+            size: 3,
+            mtime: 4,
+            sample_hash: None,
+            facts_json: None,
+            status: "queued".into(),
+            last_probed: None,
+            last_evaluated: None,
+            input_size: None,
+            output_size: None,
+        }
+    }
+
+    #[test]
+    fn cancel_queued_jobs_fails_only_queued() {
+        let (dir, conn) = temp_db("cancel");
+        let lib = insert_library(&conn, &lib_row()).unwrap();
+        let fid = upsert_file(&conn, &file_row(lib, "/l/a.mkv")).unwrap();
+        let mut job = JobRow {
+            id: 0,
+            file_id: fid,
+            library_id: lib,
+            flow_version: 1,
+            plan_json: "{}".into(),
+            state: "queued".into(),
+            device_id: None,
+            claimed_by: None,
+            lease_expires: None,
+            started: None,
+            ended: None,
+            exit_kind: None,
+            log_path: None,
+            quarantine_path: None,
+        };
+        let qid = insert_job(&conn, &job).unwrap();
+        job.state = "running".into();
+        let rid = insert_job(&conn, &job).unwrap();
+        assert_eq!(cancel_queued_jobs(&conn, fid, "superseded").unwrap(), 1);
+        assert_eq!(
+            get_job(&conn, qid).unwrap().unwrap().exit_kind.as_deref(),
+            Some("superseded")
+        );
+        assert_eq!(get_job(&conn, qid).unwrap().unwrap().state, "failed");
+        assert_eq!(get_job(&conn, rid).unwrap().unwrap().state, "running");
+        assert!(has_running_job(&conn, fid).unwrap());
+        assert!(!has_running_job(&conn, fid + 1000).unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn touch_file_eval_is_scoped_to_id_and_path() {
+        let (dir, conn) = temp_db("touch");
+        let lib = insert_library(&conn, &lib_row()).unwrap();
+        let fid = upsert_file(&conn, &file_row(lib, "/l/a.mkv")).unwrap();
+        assert_eq!(
+            touch_file_eval(&conn, fid, "/l/a.mkv", "compliant", Some(5)).unwrap(),
+            1
+        );
+        // Row renamed in place (job adoption): the old path no longer matches,
+        // so a stale snapshot write is dropped instead of ghosting a new row.
+        rename_file_path(&conn, fid, "/l/a.mp4").unwrap();
+        assert_eq!(
+            touch_file_eval(&conn, fid, "/l/a.mkv", "unmatched", None).unwrap(),
+            0
+        );
+        assert_eq!(get_file(&conn, fid).unwrap().unwrap().status, "compliant");
+        assert_eq!(
+            touch_file_eval(&conn, fid, "/l/a.mp4", "completed", Some(6)).unwrap(),
+            1
+        );
+        let f = get_file(&conn, fid).unwrap().unwrap();
+        assert_eq!(f.status, "completed");
+        assert_eq!(f.last_evaluated, Some(6));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

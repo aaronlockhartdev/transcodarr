@@ -14,7 +14,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{Condvar, Mutex};
 use std::time::SystemTime;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use rusqlite;
 use tokio::sync::watch;
 
@@ -61,6 +61,12 @@ fn quarantine_name(base: &str, tag: &str) -> String {
         .unwrap_or(0);
     let seq = QUARANTINE_SEQ.fetch_add(1, Ordering::Relaxed);
     format!("{base}.{tag}.{nanos}.{seq}")
+}
+
+/// True when `path` is occupied by anything other than `src` (i.e. a
+/// different file a promote would silently overwrite).
+fn target_occupied(path: &Path, src: &Path) -> bool {
+    path != src && path.symlink_metadata().is_ok()
 }
 
 /// FNV-1a over the first and last 8KB — the change-detection key.
@@ -114,9 +120,10 @@ fn file_dev_ino(path: &Path) -> Result<(i64, i64)> {
 /// Walk `library`, probe what changed, evaluate against its flow,
 /// and enqueue jobs for files whose plan is non-identity.
 ///
-/// Returns (files_scanned, jobs_queued). A file that already has a
-/// live job (queued/running/verifying) is never re-queued — one job
-/// per file at a time.
+/// Returns (files_scanned, jobs_queued). Jobs queued by the
+/// re-evaluation path (flow edits) count in the total, too. A file
+/// that already has a live job (queued/running/verifying) is never
+/// re-queued — one job per file at a time.
 pub fn scan_library(
     db: &Db,
     library_id: i64,
@@ -178,7 +185,9 @@ pub fn scan_library(
             }
             // Flow changed: re-evaluate every unchanged file with cached facts.
             if let Some(mut e) = existing {
-                reevaluate_cached(db, &mut e, library_id, registry, &flow, &path)?;
+                if reevaluate_cached(db, &mut e, library_id, registry, &flow, &path)? {
+                    queued += 1;
+                }
             }
             continue;
         }
@@ -245,7 +254,13 @@ pub fn scan_library(
         // Evaluate against the library's flow.
         let now = unix_now();
         let status = match evaluate::evaluate(registry, &flow, &facts) {
-            Ok(Evaluation::Identity) => "compliant",
+            Ok(Evaluation::Identity) => {
+                // The file is now compliant — any job still queued (from
+                // an older facts snapshot) is stale: cancel it so it does
+                // not re-encode a file that needs nothing.
+                let _ = db.with(|c| db::cancel_queued_jobs(c, file_id, "superseded"));
+                "compliant"
+            }
             Ok(Evaluation::Plan(plan)) => {
                 // Enqueue at most one live job per file. A direct
                 // query on the jobs table — correct for any history
@@ -278,7 +293,9 @@ pub fn scan_library(
                 "queued"
             }
             Ok(Evaluation::NoMatch) => {
-                // Never silent (DESIGN §13.6).
+                // Never silent (DESIGN §13.6). A queued job from an
+                // older snapshot no longer matches either — cancel it.
+                let _ = db.with(|c| db::cancel_queued_jobs(c, file_id, "superseded"));
                 "unmatched"
             }
             Err(e) => {
@@ -296,59 +313,122 @@ pub fn scan_library(
 
 /// Re-evaluate an unchanged file against the current flow using its cached
 /// facts (a flow change must be applied to files that have not changed).
-/// Updates the row in place and persists it; None when facts are missing.
-fn reevaluate_cached<'a>(
+///
+/// Concurrency: this runs while jobs may be renaming file rows
+/// (in-place container adoption), so the write is scoped to
+/// (id, path) — if the row moved, it is skipped instead of
+/// re-inserting a ghost row for the freed path. Errors are logged,
+/// not propagated: one bad file never aborts a library-wide
+/// re-evaluation. A verdict that no longer needs work cancels the
+/// file's queued job (a stale plan must not re-encode a file the
+/// edited flow made compliant); a running job is left alone — its
+/// post-swap gate re-checks the new flow.
+///
+/// Returns whether this call enqueued a new job (the scan summary
+/// counts it in `queued`).
+fn reevaluate_cached(
     db: &Db,
-    file: &'a mut db::FileRow,
+    file: &mut db::FileRow,
     library_id: i64,
     registry: &Registry,
     flow: &Flow,
     path: &Path,
-) -> Result<Option<&'a str>> {
+) -> Result<bool> {
     let Some(facts) = file
         .facts_json
         .as_deref()
         .and_then(|j| serde_json::from_str::<FileFacts>(j).ok())
     else {
-        return Ok(None);
+        // No cached facts: nothing to re-evaluate here; the file is
+        // re-probed the next time it changes.
+        return Ok(false);
     };
     let now = unix_now();
-    let status: &str = match evaluate::evaluate(registry, flow, &facts) {
-        Ok(Evaluation::Identity) => "compliant",
+
+    // A running job can't be interrupted, and its displayed status is
+    // authoritative until it ends.
+    let running = db
+        .with(|c| db::has_running_job(c, file.id))
+        .unwrap_or(false);
+
+    let (status, enqueued, cancel) = match evaluate::evaluate(registry, flow, &facts) {
+        Ok(Evaluation::Identity) => (Some("compliant"), false, true),
+        Ok(Evaluation::NoMatch) => (Some("unmatched"), false, true),
         Ok(Evaluation::Plan(plan)) => {
-            if !db.with(|c| db::has_live_job(c, file.id))? {
-                let job = db::JobRow {
-                    id: 0,
-                    file_id: file.id,
-                    library_id,
-                    flow_version: flow.flow_version as i64,
-                    plan_json: serde_json::to_string(&plan)?,
-                    state: "queued".into(),
-                    device_id: None,
-                    claimed_by: None,
-                    lease_expires: None,
-                    started: None,
-                    ended: None,
-                    exit_kind: None,
-                    log_path: None,
-                    quarantine_path: None,
-                };
-                db.with(|c| db::insert_job(c, &job))?;
+            if db.with(|c| db::has_live_job(c, file.id)).unwrap_or(true) {
+                // A live job (possibly from an older flow) already
+                // covers this file — let it run.
+                (Some("queued"), false, false)
+            } else {
+                let enq = db.with(|c| {
+                    let plan_json = serde_json::to_string(&plan)?;
+                    let job = db::JobRow {
+                        id: 0,
+                        file_id: file.id,
+                        library_id,
+                        flow_version: flow.flow_version as i64,
+                        plan_json,
+                        state: "queued".into(),
+                        device_id: None,
+                        claimed_by: None,
+                        lease_expires: None,
+                        started: None,
+                        ended: None,
+                        exit_kind: None,
+                        log_path: None,
+                        quarantine_path: None,
+                    };
+                    db::insert_job(c, &job)?;
+                    Ok(())
+                });
+                match enq {
+                    Ok(()) => (Some("queued"), true, false),
+                    Err(e) => {
+                        tracing::warn!(path = %path.display(), %e, "failed to enqueue re-evaluation job");
+                        (None, false, false)
+                    }
+                }
             }
-            "queued"
         }
-        Ok(Evaluation::NoMatch) => "unmatched",
         Err(err) => {
-            // Evaluation error: keep the current status (don't clobber).
+            // A section parameter this build can't parse: surface it
+            // on the file, but never abort the surrounding scan.
             tracing::warn!("re-evaluating {path:?} failed: {err}");
-            file.last_evaluated = Some(now);
-            return Ok(Some(file.status.as_str()));
+            (Some("failed"), false, false)
         }
     };
-    file.status = status.into();
+
+    if cancel {
+        if let Err(e) = db.with(|c| db::cancel_queued_jobs(c, file.id, "superseded")) {
+            tracing::warn!(path = %path.display(), %e, "could not cancel superseded queued job");
+        }
+    }
+
     file.last_evaluated = Some(now);
-    db.with(|c| db::upsert_file(c, file))?;
-    Ok(Some(status))
+    if !running {
+        if let Some(s) = status {
+            file.status = s.to_string();
+        }
+    }
+
+    // Persist — scoped by (id, path) (see the doc): a blind upsert
+    // would re-insert a ghost row if a concurrent job just renamed
+    // this one.
+    match db
+        .with(|c| db::touch_file_eval(c, file.id, &file.path, &file.status, file.last_evaluated))
+    {
+        Ok(0) => tracing::debug!(
+            path = %path.display(),
+            "re-evaluate: row moved or deleted since the scan snapshot; write skipped"
+        ),
+        Ok(_) => {}
+        Err(e) => {
+            // A transient lock must not kill the whole rescan (the
+            // main scan path tolerates it the same way).
+            tracing::warn!(path = %path.display(), %e, "failed to persist re-evaluation (row keeps previous values)");
+        }
+    }
+    Ok(enqueued)
 }
 
 /// Recursive directory walk (iterative, depth-first).
@@ -400,7 +480,10 @@ fn lease_heartbeat(db: &Db, job_id: i64, stop: &Arc<(Condvar, Mutex<bool>)>) {
     let mut stopped = lock.lock().unwrap();
     let mut ticks: u64 = 0;
     loop {
-        stopped = cvar.wait_timeout(stopped, std::time::Duration::from_secs(5)).unwrap().0;
+        stopped = cvar
+            .wait_timeout(stopped, std::time::Duration::from_secs(5))
+            .unwrap()
+            .0;
         if *stopped {
             return;
         }
@@ -434,20 +517,39 @@ pub fn run_job(
     data_dir: &Path,
     registry: &Registry,
 ) -> Result<()> {
-    let file = db
-        .with(|c| db::get_file(c, job.file_id))?
-        .ok_or_else(|| anyhow!("file {} not found", job.file_id))?;
+    // Every error path below calls `finish`: a job that leaves this
+    // function without a terminal row would sit in "running" until
+    // the lease expires and be re-run for no reason.
+    let file = match db.with(|c| db::get_file(c, job.file_id)) {
+        Ok(Some(f)) => f,
+        Ok(None) => {
+            let _ = finish(db, job, "failed", Some("file_missing"), None, data_dir);
+            anyhow::bail!("file {} not found", job.file_id)
+        }
+        Err(e) => {
+            let _ = finish(db, job, "failed", Some("file_missing"), None, data_dir);
+            return Err(e);
+        }
+    };
     let src = PathBuf::from(&file.path);
+    // Missing/corrupt cached facts are not a hard error here: they
+    // make the (empty) input fail output verification below, the job
+    // ends `verification_failed`, and the next scan re-probes and
+    // heals the row.
     let input_facts: FileFacts = file
         .facts_json
         .as_deref()
-        .map(serde_json::from_str)
-        .transpose()
-        .context("parse cached facts")?
+        .and_then(|j| serde_json::from_str(j).ok())
         .unwrap_or_default();
 
-    let plan: FfmpegPlan =
-        serde_json::from_str(&job.plan_json).with_context(|| format!("job {} plan", job.id))?;
+    let plan: FfmpegPlan = match serde_json::from_str(&job.plan_json) {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = finish(db, job, "failed", Some("plan_invalid"), None, data_dir);
+            let _ = db.with(|c| db::set_file_status(c, job.file_id, "failed"));
+            return Err(e).with_context(|| format!("job {} plan", job.id));
+        }
+    };
 
     // Temp name unique per claim generation (job id + claim
     // timestamp). A re-claimed job — lease expiry with a dead worker,
@@ -461,6 +563,30 @@ pub fn run_job(
         "{stem}.{}.{}.{}.transcodarr-tmp",
         plan.container, job.id, claim_ts
     ));
+
+    // DESIGN §3.1: in-place mode adopts the true container extension
+    // (MKV→MP4 rename), deliberately orphaning *arr DB records until
+    // re-scan. Same extension → the file keeps its path.
+    let src_ext = src.extension().and_then(|e| e.to_str()).unwrap_or("");
+    let final_path = if src_ext.eq_ignore_ascii_case(&plan.container) {
+        src.clone()
+    } else {
+        src.with_extension(&plan.container)
+    };
+    // Never overwrite a different file at the target path (e.g.
+    // movie.mkv and movie.mp4 coexisting in one directory): both
+    // files stay exactly where they are, and the job fails loudly.
+    // Checked here to avoid a wasted encode, and again right
+    // before the swap (tracked files are fully covered; the
+    // residual race is noted there).
+    if target_occupied(&final_path, &src) {
+        let _ = finish(db, job, "failed", Some("swap_failed"), None, data_dir);
+        let _ = db.with(|c| db::set_file_status(c, job.file_id, "failed"));
+        anyhow::bail!(
+            "target {} is occupied by a different file; not overwriting",
+            final_path.display()
+        );
+    }
     // Sweep temp files left by earlier claims of THIS job (a
     // crash-looping job must not accumulate a full-size orphan per
     // claim), plus our own exact path.
@@ -473,7 +599,11 @@ pub fn run_job(
             for e in rd.flatten() {
                 let name = e.file_name().to_string_lossy().to_string();
                 if name == own_name
-                    || (name.ends_with(".transcodarr-tmp") && name.starts_with(&old_prefix) && name.get(old_prefix.len()..old_prefix.len() + 1).is_some_and(|c| c.chars().next().is_some_and(|c| c.is_ascii_digit())))
+                    || (name.ends_with(".transcodarr-tmp")
+                        && name.starts_with(&old_prefix)
+                        && name
+                            .get(old_prefix.len()..old_prefix.len() + 1)
+                            .is_some_and(|c| c.chars().next().is_some_and(|c| c.is_ascii_digit())))
                 {
                     let _ = std::fs::remove_file(e.path());
                 }
@@ -481,16 +611,28 @@ pub fn run_job(
         }
     }
 
-    // ffmpeg stderr goes to a log file (kept on disk for the UI).
+    // ffmpeg stderr goes to a log file (kept on disk for the UI). A
+    // transient FS failure here fails the job — it must never leave it
+    // stuck in `running`.
     let logs = data_dir.join("logs");
-    std::fs::create_dir_all(&logs)?;
+    if let Err(e) = std::fs::create_dir_all(&logs) {
+        let _ = finish(db, job, "failed", Some("encode_failed"), None, data_dir);
+        let _ = db.with(|c| db::set_file_status(c, job.file_id, "failed"));
+        return Err(e).context("create log dir");
+    }
     let log_path = logs.join(format!("job-{}.log", job.id));
     if let Ok(rel) = log_path.strip_prefix(data_dir) {
         let rel = rel.display().to_string();
         let _ = db.with(|c| db::set_job_log_path(c, job.id, &rel));
     }
-    let log_file =
-        File::create(&log_path).with_context(|| format!("log {}", log_path.display()))?;
+    let log_file = match File::create(&log_path) {
+        Ok(f) => f,
+        Err(e) => {
+            let _ = finish(db, job, "failed", Some("encode_failed"), None, data_dir);
+            let _ = db.with(|c| db::set_file_status(c, job.file_id, "failed"));
+            return Err(e).with_context(|| format!("log {}", log_path.display()));
+        }
+    };
 
     let argv = transcodarr_core::plan::to_argv(&plan, device, &src, &dst);
     tracing::info!("job {} on {}: {}", job.id, device.name, argv.join(" "));
@@ -499,9 +641,14 @@ pub fn run_job(
     cmd.args(&argv)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::from(log_file));
-    let mut child = cmd
-        .spawn()
-        .with_context(|| format!("spawn ffmpeg: {ffmpeg}"))?;
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = finish(db, job, "failed", Some("encode_failed"), None, data_dir);
+            let _ = db.with(|c| db::set_file_status(c, job.file_id, "failed"));
+            anyhow::bail!("spawn ffmpeg {ffmpeg}: {e}");
+        }
+    };
 
     // Keep this job's lease alive while the encode runs (a live
     // multi-hour encode must not be reclaimed as stale).
@@ -511,7 +658,24 @@ pub fn run_job(
     let hb_job = job.id;
     let heartbeat = std::thread::spawn(move || lease_heartbeat(&hb_db, hb_job, &stop_hb));
 
-    let status = child.wait().with_context(|| "wait ffmpeg")?;
+    let status = match child.wait() {
+        Ok(s) => s,
+        Err(e) => {
+            *stop.1.lock().unwrap() = true;
+            stop.0.notify_all();
+            let _ = heartbeat.join();
+            let _ = finish(
+                db,
+                job,
+                "failed",
+                Some("encode_failed"),
+                Some(&dst),
+                data_dir,
+            );
+            let _ = db.with(|c| db::set_file_status(c, job.file_id, "failed"));
+            anyhow::bail!("wait ffmpeg: {e}");
+        }
+    };
 
     *stop.1.lock().unwrap() = true;
     stop.0.notify_all();
@@ -520,8 +684,7 @@ pub fn run_job(
     if !status.success() {
         let tail = log_tail(&log_path, 20);
         let exit_code = status.code().unwrap_or(-1);
-        let _ =
-            db.with(|c| db::finish_job(c, job.id, "failed", "encode_failed", unix_now(), None));
+        let _ = db.with(|c| db::finish_job(c, job.id, "failed", "encode_failed", unix_now(), None));
         let _ = db.with(|c| db::set_file_status(c, job.file_id, "failed"));
         let _ = std::fs::remove_file(&dst);
         anyhow::bail!("ffmpeg exit {exit_code}: {tail}");
@@ -530,41 +693,91 @@ pub fn run_job(
     // Verify BEFORE touching the original (DESIGN §13.6): the pure
     // metadata comparison from core (container, duration window,
     // stream inventory, codec).
-    let out_facts = probe_to_facts(probe, &dst, Some(&plan.container)).with_context(|| "probe output")?;
-    let ok = transcodarr_core::verify::verify_output(&plan, &input_facts, &out_facts)
-        .map_err(anyhow::Error::from)?;
+    let out_facts = match probe_to_facts(probe, &dst, Some(&plan.container)) {
+        Ok(f) => f,
+        Err(e) => {
+            let _ = finish(
+                db,
+                job,
+                "failed",
+                Some("verification_failed"),
+                Some(&dst),
+                data_dir,
+            );
+            return Err(e).context("probe output");
+        }
+    };
+    let ok = match transcodarr_core::verify::verify_output(&plan, &input_facts, &out_facts) {
+        Ok(ok) => ok,
+        Err(e) => {
+            let _ = finish(
+                db,
+                job,
+                "failed",
+                Some("verification_failed"),
+                Some(&dst),
+                data_dir,
+            );
+            return Err(anyhow::Error::from(e));
+        }
+    };
     if !ok {
-        let _ = finish(db, job, "failed", Some("verification_failed"), Some(&dst), data_dir);
+        let _ = finish(
+            db,
+            job,
+            "failed",
+            Some("verification_failed"),
+            Some(&dst),
+            data_dir,
+        );
         anyhow::bail!("output metadata mismatch (output quarantined)");
     }
 
     // Decode integrity: the output must also decode cleanly (the
     // metadata gate alone can pass a structurally broken file).
     if !decode_file(ffmpeg, &dst).unwrap_or(false) {
-        let _ = finish(db, job, "failed", Some("decode_failed"), Some(&dst), data_dir);
+        let _ = finish(
+            db,
+            job,
+            "failed",
+            Some("decode_failed"),
+            Some(&dst),
+            data_dir,
+        );
         anyhow::bail!("output failed the decode check (output quarantined)");
     }
 
-    // Swap: original → quarantine, output → original path. If the
-    // DESIGN §3.1: in-place mode adopts the true container extension
-    // (MKV→MP4 rename), deliberately orphaning *arr DB records until
-    // re-scan. Same extension → the file keeps its path.
-    let src_ext = src.extension().and_then(|e| e.to_str()).unwrap_or("");
-    let final_path = if src_ext.eq_ignore_ascii_case(&plan.container) {
-        src.clone()
-    } else {
-        src.with_extension(&plan.container)
-    };
+    // Swap: original → quarantine, then output → final path. If the
     // second rename fails after the first, restore the original so
     // the file is never missing from its path (a failed restore
     // leaves both files in the quarantine dir, reported loudly).
+    if target_occupied(&final_path, &src) {
+        // A different (tracked) file appeared at the target since the
+        // early check — refuse rather than overwrite it (DESIGN §3.3).
+        // Residual race: an UNTRACKED external file that appears in
+        // the final check-to-rename gap can still be clobbered by the
+        // rename; closing that fully needs a link-based protocol.
+        let _ = finish(db, job, "failed", Some("swap_failed"), Some(&dst), data_dir);
+        let _ = db.with(|c| db::set_file_status(c, job.file_id, "failed"));
+        anyhow::bail!(
+            "target {} is occupied by a different file; not overwriting",
+            final_path.display()
+        );
+    }
     let quarantine = db::quarantine_dir(data_dir);
     let original_backup = quarantine.join(quarantine_name(
         src.file_name().and_then(|n| n.to_str()).unwrap_or("file"),
         "original",
     ));
-    std::fs::rename(&src, &original_backup)
-        .with_context(|| format!("quarantine original {}", src.display()))?;
+    match std::fs::rename(&src, &original_backup) {
+        Ok(()) => {}
+        Err(e) => {
+            // The original is still in place; only the temp is lost.
+            let _ = finish(db, job, "failed", Some("swap_failed"), Some(&dst), data_dir);
+            let _ = db.with(|c| db::set_file_status(c, job.file_id, "failed"));
+            anyhow::bail!("quarantine original {}: {e}", src.display());
+        }
+    }
     if let Err(e) = std::fs::rename(&dst, &final_path) {
         let restored = std::fs::rename(&original_backup, &src);
         tracing::error!("promote {} failed: {e}", dst.display());
@@ -589,7 +802,9 @@ pub fn run_job(
     // file record with it (keeps our path identity honest; external
     // *arr DBs are intentionally orphaned by the rename, DESIGN §3.1).
     if final_path != src {
-        if let Err(e) = db.with(|c| db::rename_file_path(c, job.file_id, &final_path.to_string_lossy())) {
+        if let Err(e) =
+            db.with(|c| db::rename_file_path(c, job.file_id, &final_path.to_string_lossy()))
+        {
             tracing::warn!(
                 "could not rename file record {} -> {} ({e}); keeping old path",
                 src.display(),
@@ -601,24 +816,91 @@ pub fn run_job(
     // Idempotency gate (DESIGN §13.6): re-evaluate the NEW file. If it
     // still wants to change, the flow is not idempotent for this
     // input — mark failed (non_idempotent), never loop.
-    let new_facts = probe_to_facts(probe, &final_path, None)?;
-    let lib = db
-        .with(|c| db::get_library(c, job.library_id))?
-        .ok_or_else(|| anyhow!("library {} not found", job.library_id))?;
-    let flow: Flow = serde_json::from_str(&lib.flow_json)?;
-    match evaluate::evaluate(registry, &flow, &new_facts)? {
-        Evaluation::Identity => {
+    let new_facts = match probe_to_facts(probe, &final_path, None) {
+        Ok(f) => f,
+        Err(e) => {
+            let _ = finish(
+                db,
+                job,
+                "failed",
+                Some("verification_failed"),
+                None,
+                data_dir,
+            );
+            let _ = db.with(|c| db::set_file_status(c, job.file_id, "failed"));
+            return Err(e).context("probe new file");
+        }
+    };
+    let lib = match db.with(|c| db::get_library(c, job.library_id)) {
+        Ok(Some(l)) => l,
+        Ok(None) => {
+            let _ = finish(
+                db,
+                job,
+                "failed",
+                Some("verification_failed"),
+                None,
+                data_dir,
+            );
+            let _ = db.with(|c| db::set_file_status(c, job.file_id, "failed"));
+            anyhow::bail!("library {} not found", job.library_id)
+        }
+        Err(e) => {
+            let _ = finish(
+                db,
+                job,
+                "failed",
+                Some("verification_failed"),
+                None,
+                data_dir,
+            );
+            let _ = db.with(|c| db::set_file_status(c, job.file_id, "failed"));
+            return Err(e);
+        }
+    };
+    let flow = match serde_json::from_str::<Flow>(&lib.flow_json) {
+        Ok(f) => f,
+        Err(e) => {
+            let _ = finish(
+                db,
+                job,
+                "failed",
+                Some("verification_failed"),
+                None,
+                data_dir,
+            );
+            let _ = db.with(|c| db::set_file_status(c, job.file_id, "failed"));
+            return Err(e).context("parse library flow");
+        }
+    };
+    match evaluate::evaluate(registry, &flow, &new_facts) {
+        Ok(Evaluation::Identity) => {
             let _ = finish(db, job, "completed", None, None, data_dir);
             let _ = db.with(|c| db::set_file_status(c, job.file_id, "completed"));
         }
-        Evaluation::Plan(_) => {
+        Ok(Evaluation::Plan(_)) => {
             let _ = finish(db, job, "failed", Some("non_idempotent"), None, data_dir);
             let _ = db.with(|c| db::set_file_status(c, job.file_id, "failed"));
             anyhow::bail!("flow not idempotent for {}", final_path.display());
         }
-        Evaluation::NoMatch => {
+        Ok(Evaluation::NoMatch) => {
             let _ = finish(db, job, "completed", None, None, data_dir);
             let _ = db.with(|c| db::set_file_status(c, job.file_id, "completed"));
+        }
+        Err(e) => {
+            // The flow no longer evaluates (e.g. an edit broke it): the
+            // swap already happened, so say so — the file shows failed
+            // until the flow is fixed and a re-scan re-evaluates.
+            let _ = finish(
+                db,
+                job,
+                "failed",
+                Some("verification_failed"),
+                None,
+                data_dir,
+            );
+            let _ = db.with(|c| db::set_file_status(c, job.file_id, "failed"));
+            return Err(e).context("re-evaluate after swap");
         }
     }
     Ok(())
@@ -780,4 +1062,32 @@ fn log_tail(path: &Path, n: usize) -> String {
                 .join("\n")
         })
         .unwrap_or_default()
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_root(name: &str) -> PathBuf {
+        let d =
+            std::env::temp_dir().join(format!("transcodarr-test-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn target_occupied_detects_foreign_file_only() {
+        let dir = temp_root("occupied");
+        let src = dir.join("movie.mkv");
+        std::fs::write(&src, b"orig").unwrap();
+        let other = dir.join("movie.mp4");
+        std::fs::write(&other, b"other").unwrap();
+        // A different file already at the target path: occupied.
+        assert!(target_occupied(&other, &src));
+        // The source itself: never occupied.
+        assert!(!target_occupied(&src, &src));
+        // A free target path: not occupied.
+        assert!(!target_occupied(&dir.join("movie.mov"), &src));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

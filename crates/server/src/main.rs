@@ -67,9 +67,7 @@ fn main() -> Result<()> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    rt.block_on(async move {
-        run(cli, data_dir).await
-    })
+    rt.block_on(async move { run(cli, data_dir).await })
 }
 
 async fn run(cli: Cli, data_dir: std::path::PathBuf) -> Result<()> {
@@ -84,10 +82,7 @@ async fn run(cli: Cli, data_dir: std::path::PathBuf) -> Result<()> {
     //     (crashed encodes only ever leave a sibling temp file).
     let reclaimed = dbh.with(|c| db::reclaim_jobs(c, false))?;
     if reclaimed > 0 {
-        info!(
-            "reclaimed {} job(s) orphaned by a previous run",
-            reclaimed
-        );
+        info!("reclaimed {} job(s) orphaned by a previous run", reclaimed);
     }
 
     // 2. Registry: pure v1 entries + I/O-bound entries.
@@ -102,10 +97,9 @@ async fn run(cli: Cli, data_dir: std::path::PathBuf) -> Result<()> {
     // 3. Device detection (bounded; a broken stack just means
     //    "no GPU device" — CPU is always present).
     let ffmpeg = cli.ffmpeg.clone();
-    let detected =
-        tokio::task::spawn_blocking(move || devices::detect(&ffmpeg))
-            .await
-            .context("device detection task")?;
+    let detected = tokio::task::spawn_blocking(move || devices::detect(&ffmpeg))
+        .await
+        .context("device detection task")?;
     let n_gpu = detected
         .iter()
         .filter(|d| d.kind != transcodarr_core::device::DeviceKind::Cpu)
@@ -115,17 +109,17 @@ async fn run(cli: Cli, data_dir: std::path::PathBuf) -> Result<()> {
     }
     dbh.with(|c| db::upsert_devices(c, &detected))
         .context("persist devices")?;
-    info!(
-        "devices: {} ({} gpu)",
-        detected.len(),
-        n_gpu
-    );
+    info!("devices: {} ({} gpu)", detected.len(), n_gpu);
     for d in &detected {
         info!(
             "  {:?} {:?} [{}]",
             d.kind,
             d.name,
-            d.encoders.iter().map(|e| e.name.as_str()).collect::<Vec<_>>().join(", ")
+            d.encoders
+                .iter()
+                .map(|e| e.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         );
     }
 
