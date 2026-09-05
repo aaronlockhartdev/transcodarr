@@ -10,8 +10,8 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::{Condvar, Mutex};
 use std::time::SystemTime;
 
 use anyhow::{Context, Result, anyhow};
@@ -312,12 +312,24 @@ fn unix_now() -> i64 {
 /// while a genuinely dead worker's lease still expires and is
 /// reclaimed. Stops itself when the job row is no longer claimed by
 /// us (finished or re-claimed elsewhere).
-fn lease_heartbeat(db: &Db, job_id: i64, stop: Arc<AtomicBool>) {
+///
+/// The loop checks its stop flag every 5s (not only at each refresh)
+/// so `run_job`'s final `join()` never stalls a finished job behind a
+/// tick.
+fn lease_heartbeat(db: &Db, job_id: i64, stop: &Arc<(Condvar, Mutex<bool>)>) {
+    let (cvar, lock) = &**stop;
+    let mut stopped = lock.lock().unwrap();
+    let mut ticks: u64 = 0;
     loop {
-        std::thread::sleep(std::time::Duration::from_secs(LEASE_HEARTBEAT_S));
-        if stop.load(Ordering::Relaxed) {
+        stopped = cvar.wait_timeout(stopped, std::time::Duration::from_secs(5)).unwrap().0;
+        if *stopped {
             return;
         }
+        ticks += 1;
+        if ticks * 5 < LEASE_HEARTBEAT_S {
+            continue;
+        }
+        ticks = 0;
         let refreshed = db
             .with(|c| db::refresh_job_lease(c, job_id, "transcodarr", unix_now() + JOB_LEASE))
             .unwrap_or(false);
@@ -399,15 +411,16 @@ pub fn run_job(
 
     // Keep this job's lease alive while the encode runs (a live
     // multi-hour encode must not be reclaimed as stale).
-    let stop = Arc::new(AtomicBool::new(false));
+    let stop = Arc::new((Condvar::new(), Mutex::new(false)));
     let stop_hb = stop.clone();
     let hb_db = db.clone();
     let hb_job = job.id;
-    let heartbeat = std::thread::spawn(move || lease_heartbeat(&hb_db, hb_job, stop_hb));
+    let heartbeat = std::thread::spawn(move || lease_heartbeat(&hb_db, hb_job, &stop_hb));
 
     let status = child.wait().with_context(|| "wait ffmpeg")?;
 
-    stop.store(true, Ordering::Relaxed);
+    *stop.1.lock().unwrap() = true;
+    stop.0.notify_all();
     let _ = heartbeat.join();
 
     if !status.success() {
