@@ -78,6 +78,18 @@ async fn run(cli: Cli, data_dir: std::path::PathBuf) -> Result<()> {
     let dbh = dbhandle::Db::new(&data_dir)
         .with_context(|| format!("open database in {}", data_dir.display()))?;
 
+    // 1b. A previous process that died mid-job leaves rows stuck in
+    //     `running`/`verifying`. This process holds no in-flight work,
+    //     so everything left over is reclaimable; re-run is safe
+    //     (crashed encodes only ever leave a sibling temp file).
+    let reclaimed = dbh.with(|c| db::reclaim_jobs(c, false))?;
+    if reclaimed > 0 {
+        info!(
+            "reclaimed {} job(s) orphaned by a previous run",
+            reclaimed
+        );
+    }
+
     // 2. Registry: pure v1 entries + I/O-bound entries.
     let probe = probe::FfprobeFactExtractor::new(&cli.ffprobe);
     let registry = Arc::new({

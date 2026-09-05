@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use anyhow::{Context, Result, anyhow};
+use rusqlite;
 use tokio::sync::watch;
 
 use transcodarr_core::device::{Device, DeviceKind};
@@ -166,7 +167,33 @@ pub fn scan_library(
             input_size: Some(size),
             output_size: None,
         };
-        let file_id = db.with(|c| db::upsert_file(c, &row))?;
+        // `files.path` is globally UNIQUE (one library per file):
+        // if another library already tracks this exact path, the
+        // upsert hits the integrity check. Skip the file rather than
+        // aborting the whole scan (first-registered-library-wins).
+        let file_id = match db.with(|c| db::upsert_file(c, &row)) {
+            Ok(id) => id,
+            Err(e) => {
+                let unique_violation = e
+                    .root_cause()
+                    .downcast_ref::<rusqlite::Error>()
+                    .is_some_and(|s| {
+                        matches!(
+                            s,
+                            rusqlite::Error::SqliteFailure(sql_err, _)
+                                if sql_err.code == rusqlite::ErrorCode::ConstraintViolation
+                        )
+                    });
+                if unique_violation {
+                    tracing::warn!(
+                        path = %row.path,
+                        "file already tracked by another library — skipping"
+                    );
+                    continue;
+                }
+                return Err(e);
+            }
+        };
         row.id = file_id;
 
         // Probe (fresh ffprobe; the change check already told us
@@ -436,6 +463,15 @@ pub async fn run_loop(state: AppState, mut shutdown: watch::Receiver<bool>) -> R
                 }
             }
             _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
+        }
+
+        // Reap jobs whose owner is gone (worker panicked, or lease
+        // expired). A crash mid-encode only ever leaves a sibling
+        // temp file behind, so re-running is safe.
+        if let Ok(n) = state.db.with(|c| db::reclaim_jobs(c, true)) {
+            if n > 0 {
+                tracing::info!("reclaimed {n} stale job(s)");
+            }
         }
 
         // Pick the next job. GPU-preferred: a job without an

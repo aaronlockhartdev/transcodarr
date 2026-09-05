@@ -413,6 +413,48 @@ pub fn claim_job(
     Ok(n == 1)
 }
 
+/// Current unix-epoch seconds (0 on failure — a conservative
+/// "already expired" for lease math).
+pub fn now_s() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Put unfinishable jobs back in the queue and return how many were
+/// reclaimed. With `expired_only`, only jobs whose lease has lapsed are
+/// touched (the in-process reaper: a hung or panicked worker); with
+/// `false`, every `running`/`verifying` job is reclaimed — correct at
+/// startup, when a fresh process by definition holds no in-flight
+/// work. Affected files drop from `running`/`verifying` back to
+/// `queued` so a scan (or the next poll) can re-claim them. A crashed
+/// encode only ever left a sibling temp file behind — the original is
+/// intact until a verified swap, so re-running is safe.
+pub fn reclaim_jobs(conn: &Connection, expired_only: bool) -> Result<usize> {
+    let n = if expired_only {
+        conn.execute(
+            "UPDATE jobs SET state = 'queued', claimed_by = NULL, lease_expires = NULL, started = NULL\n             WHERE state IN ('running', 'verifying')\n               AND (lease_expires IS NULL OR lease_expires < ?1)",
+            params![now_s()],
+        )?
+    } else {
+        conn.execute(
+            "UPDATE jobs SET state = 'queued', claimed_by = NULL, lease_expires = NULL, started = NULL\n             WHERE state IN ('running', 'verifying')",
+            [],
+        )?
+    };
+    if n > 0 {
+        // Files still showing a live state whose job just went back
+        // to the queue. (The id-subquery keeps this scoped to the
+        // reclaimed set on the expired-only path.)
+        conn.execute(
+            "UPDATE files SET status = 'queued'\n             WHERE status IN ('running', 'verifying')\n               AND id IN (SELECT file_id FROM jobs WHERE state = 'queued' AND file_id IS NOT NULL)",
+            [],
+        )?;
+    }
+    Ok(n as usize)
+}
+
 pub fn finish_job(
     conn: &Connection,
     id: i64,
