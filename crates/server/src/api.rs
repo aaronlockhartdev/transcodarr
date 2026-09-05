@@ -178,7 +178,7 @@ async fn update_library(
     let db2 = s.db.clone();
     let ffprobe2 = s.ffprobe.clone();
     let _ = tokio::task::spawn_blocking(move || {
-        crate::jobs::scan_library(&db2, id, &registry, &probe, &ffprobe2)
+        crate::jobs::scan_library(&db2, id, &registry, &probe, &ffprobe2, true)
     })
     .await;
     Ok(StatusCode::NO_CONTENT)
@@ -211,7 +211,7 @@ async fn scan(
     let db2 = s.db.clone();
     let ffprobe2 = s.ffprobe.clone();
     let (scanned, queued) = tokio::task::spawn_blocking(move || {
-        crate::jobs::scan_library(&db2, id, &registry, &probe, &ffprobe2)
+        crate::jobs::scan_library(&db2, id, &registry, &probe, &ffprobe2, false)
     })
     .await
     .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?

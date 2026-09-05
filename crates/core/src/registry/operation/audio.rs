@@ -261,16 +261,12 @@ impl OperationSection for Audio {
         json!({
             "kind": "object",
             "fields": {
-                "default": {
-                    "kind": "audio_policy",
-                    "default": "copy",
-                    "hint": "Applies to tracks no rule names."
-                },
+                "default": audio_policy_schema(),
                 "rules": {
                     "kind": "list",
                     "item": {
-                        "match": { "codecs": "multi_select", "languages": "multi_select" },
-                        "action": "audio_policy"
+                        "match": { "codecs": { "kind": "multi_select", "values": crate::registry::condition::audio_codec::AUDIO_CODECS }, "languages": { "kind": "multi_select" } },
+                        "action": audio_policy_schema()
                     },
                     "hint": "First matching rule wins. Re-encode applies to ALL matching tracks."
                 }
@@ -279,6 +275,33 @@ impl OperationSection for Audio {
     }
 }
 
+/// The `audio_policy` ui_schema fragment — the single source for the
+/// copy/drop/re-encode vocabulary and the re-encode target codecs, so the
+/// frontend renders from the schema (a new codec is a Rust-only change).
+pub fn audio_policy_schema() -> Value {
+    json!({
+        "kind": "audio_policy",
+        "default": "copy",
+        "values": [
+            { "value": "copy", "label": "Copy" },
+            { "value": "drop", "label": "Drop" },
+            { "value": "re_encode", "label": "Re-encode" }
+        ],
+        "reencode": {
+            "codec": {
+                "kind": "single_select",
+                "default": "eac3",
+                "values": [
+                    { "value": "eac3", "label": "E-AC-3" },
+                    { "value": "ac3", "label": "AC-3" },
+                    { "value": "aac", "label": "AAC" }
+                ]
+            },
+            "sample_rate": { "kind": "text", "hint": "Hertz, e.g. 48000. Leave empty to keep the source rate." },
+            "channels": { "kind": "text", "hint": "Leave empty to keep the source channel count." }
+        }
+    })
+}
 #[cfg(test)]
 mod tests {
     use super::*;

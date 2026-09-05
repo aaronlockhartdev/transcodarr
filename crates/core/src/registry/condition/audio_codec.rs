@@ -44,12 +44,16 @@ impl ConditionField for AudioCodec {
     fn ui_schema(&self) -> Value {
         json!({
             "kind": "multi_select",
-            "values": ["eac3", "eac3_joc", "ac3", "dts", "dts_ma", "truehd", "aac", "flac", "mp3", "opus"],
+            "values": AUDIO_CODECS,
             "hint": "Matches if ANY track has a listed codec. Leave empty for any.",
         })
     }
 }
 
+/// The source audio codec vocabulary shared by the `audio_codec` condition
+/// and the audio operation's rule matching (one place, both consumers).
+pub const AUDIO_CODECS: [&str; 10] =
+    ["eac3", "eac3_joc", "ac3", "dts", "dts_ma", "truehd", "aac", "flac", "mp3", "opus"];
 #[cfg(test)]
 mod tests {
     use super::*;

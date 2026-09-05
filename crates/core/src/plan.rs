@@ -402,7 +402,7 @@ pub fn to_argv(plan: &FfmpegPlan, device: &Device, src: &Path, dst: &Path) -> Ve
     } else {
         // No audio plan: copy all audio streams.
         a.push("-map".into());
-        a.push("0:a".into());
+        a.push("0:a?".into());
         a.push("-c:a".into());
         a.push("copy".into());
     }
@@ -422,7 +422,7 @@ pub fn to_argv(plan: &FfmpegPlan, device: &Device, src: &Path, dst: &Path) -> Ve
         }
     } else {
         a.push("-map".into());
-        a.push("0:s".into());
+        a.push("0:s?".into());
         a.push("-c:s".into());
         a.push("copy".into());
     }
@@ -432,6 +432,10 @@ pub fn to_argv(plan: &FfmpegPlan, device: &Device, src: &Path, dst: &Path) -> Ve
         a.push("-movflags".into());
         a.push("+faststart".into());
     }
+    // The temp output's extension is not a container name, so the
+    // muxer must be stated explicitly.
+    a.push("-f".into());
+    a.push(plan.container.clone());
     a.push(dst.to_string_lossy().into_owned());
     a
 }
@@ -495,6 +499,8 @@ mod tests {
         // ffmpeg's automatic stream selection).
         assert!(s.contains("-map 0:v:0 -c:v libx264"), "{s}");
         assert!(s.contains("-profile:v high"), "{s}");
+        // The temp-file extension is not a container: the format is explicit.
+        assert!(s.contains("-f mp4"), "{s}");
         assert!(s.contains("-level 4.2"), "{s}");
         assert!(s.contains("-b:v 12000000"), "{s}");
         assert!(s.contains("-vf scale=1920:1080:flags=lanczos"), "{s}");

@@ -123,6 +123,7 @@ pub fn scan_library(
     registry: &Registry,
     probe: &FfprobeFactExtractor,
     _ffprobe: &str,
+    reevaluate: bool,
 ) -> Result<(u32, u32)> {
     let lib = db
         .with(|c| db::get_library(c, library_id))?
@@ -172,7 +173,13 @@ pub fn scan_library(
                 && e.sample_hash != Some(0)
         });
         if unchanged {
-            // Nothing changed since last probe — keep cached facts.
+            if !reevaluate {
+                continue;
+            }
+            // Flow changed: re-evaluate every unchanged file with cached facts.
+            if let Some(mut e) = existing {
+                reevaluate_cached(db, &mut e, library_id, registry, &flow, &path)?;
+            }
             continue;
         }
 
@@ -285,6 +292,63 @@ pub fn scan_library(
         let _ = db.with(|c| db::upsert_file(c, &row));
     }
     Ok((scanned, queued))
+}
+
+/// Re-evaluate an unchanged file against the current flow using its cached
+/// facts (a flow change must be applied to files that have not changed).
+/// Updates the row in place and persists it; None when facts are missing.
+fn reevaluate_cached<'a>(
+    db: &Db,
+    file: &'a mut db::FileRow,
+    library_id: i64,
+    registry: &Registry,
+    flow: &Flow,
+    path: &Path,
+) -> Result<Option<&'a str>> {
+    let Some(facts) = file
+        .facts_json
+        .as_deref()
+        .and_then(|j| serde_json::from_str::<FileFacts>(j).ok())
+    else {
+        return Ok(None);
+    };
+    let now = unix_now();
+    let status: &str = match evaluate::evaluate(registry, flow, &facts) {
+        Ok(Evaluation::Identity) => "compliant",
+        Ok(Evaluation::Plan(plan)) => {
+            if !db.with(|c| db::has_live_job(c, file.id))? {
+                let job = db::JobRow {
+                    id: 0,
+                    file_id: file.id,
+                    library_id,
+                    flow_version: flow.flow_version as i64,
+                    plan_json: serde_json::to_string(&plan)?,
+                    state: "queued".into(),
+                    device_id: None,
+                    claimed_by: None,
+                    lease_expires: None,
+                    started: None,
+                    ended: None,
+                    exit_kind: None,
+                    log_path: None,
+                    quarantine_path: None,
+                };
+                db.with(|c| db::insert_job(c, &job))?;
+            }
+            "queued"
+        }
+        Ok(Evaluation::NoMatch) => "unmatched",
+        Err(err) => {
+            // Evaluation error: keep the current status (don't clobber).
+            tracing::warn!("re-evaluating {path:?} failed: {err}");
+            file.last_evaluated = Some(now);
+            return Ok(Some(file.status.as_str()));
+        }
+    };
+    file.status = status.into();
+    file.last_evaluated = Some(now);
+    db.with(|c| db::upsert_file(c, file))?;
+    Ok(Some(status))
 }
 
 /// Recursive directory walk (iterative, depth-first).
@@ -466,7 +530,7 @@ pub fn run_job(
     // Verify BEFORE touching the original (DESIGN §13.6): the pure
     // metadata comparison from core (container, duration window,
     // stream inventory, codec).
-    let out_facts = probe_to_facts(probe, &dst).with_context(|| "probe output")?;
+    let out_facts = probe_to_facts(probe, &dst, Some(&plan.container)).with_context(|| "probe output")?;
     let ok = transcodarr_core::verify::verify_output(&plan, &input_facts, &out_facts)
         .map_err(anyhow::Error::from)?;
     if !ok {
@@ -482,6 +546,15 @@ pub fn run_job(
     }
 
     // Swap: original → quarantine, output → original path. If the
+    // DESIGN §3.1: in-place mode adopts the true container extension
+    // (MKV→MP4 rename), deliberately orphaning *arr DB records until
+    // re-scan. Same extension → the file keeps its path.
+    let src_ext = src.extension().and_then(|e| e.to_str()).unwrap_or("");
+    let final_path = if src_ext.eq_ignore_ascii_case(&plan.container) {
+        src.clone()
+    } else {
+        src.with_extension(&plan.container)
+    };
     // second rename fails after the first, restore the original so
     // the file is never missing from its path (a failed restore
     // leaves both files in the quarantine dir, reported loudly).
@@ -492,7 +565,7 @@ pub fn run_job(
     ));
     std::fs::rename(&src, &original_backup)
         .with_context(|| format!("quarantine original {}", src.display()))?;
-    if let Err(e) = std::fs::rename(&dst, &src) {
+    if let Err(e) = std::fs::rename(&dst, &final_path) {
         let restored = std::fs::rename(&original_backup, &src);
         tracing::error!("promote {} failed: {e}", dst.display());
         if restored.is_err() {
@@ -512,10 +585,23 @@ pub fn run_job(
         anyhow::bail!("swap failed: {e}");
     }
 
+    // The on-disk file may now live under a new extension: move the
+    // file record with it (keeps our path identity honest; external
+    // *arr DBs are intentionally orphaned by the rename, DESIGN §3.1).
+    if final_path != src {
+        if let Err(e) = db.with(|c| db::rename_file_path(c, job.file_id, &final_path.to_string_lossy())) {
+            tracing::warn!(
+                "could not rename file record {} -> {} ({e}); keeping old path",
+                src.display(),
+                final_path.display()
+            );
+        }
+    }
+
     // Idempotency gate (DESIGN §13.6): re-evaluate the NEW file. If it
     // still wants to change, the flow is not idempotent for this
     // input — mark failed (non_idempotent), never loop.
-    let new_facts = probe_to_facts(probe, &src)?;
+    let new_facts = probe_to_facts(probe, &final_path, None)?;
     let lib = db
         .with(|c| db::get_library(c, job.library_id))?
         .ok_or_else(|| anyhow!("library {} not found", job.library_id))?;
@@ -528,7 +614,7 @@ pub fn run_job(
         Evaluation::Plan(_) => {
             let _ = finish(db, job, "failed", Some("non_idempotent"), None, data_dir);
             let _ = db.with(|c| db::set_file_status(c, job.file_id, "failed"));
-            anyhow::bail!("flow not idempotent for {}", src.display());
+            anyhow::bail!("flow not idempotent for {}", final_path.display());
         }
         Evaluation::NoMatch => {
             let _ = finish(db, job, "completed", None, None, data_dir);

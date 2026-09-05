@@ -43,8 +43,9 @@ impl VerificationCheck for MetadataCheck {
 pub fn probe_to_facts(
     probe: &FfprobeFactExtractor,
     path: &std::path::Path,
+    container: Option<&str>,
 ) -> std::io::Result<FileFacts> {
-    probe.probe(path)
+    probe.probe_with_container(path, container)
 }
 
 /// Full-decode-to-null integrity check on `path` (DESIGN §3.3).

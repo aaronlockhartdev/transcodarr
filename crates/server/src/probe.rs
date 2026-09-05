@@ -44,7 +44,35 @@ impl FactExtractor for FfprobeFactExtractor {
         let doc: Value = serde_json::from_slice(&out.stdout).map_err(|e| {
             std::io::Error::new(std::io::ErrorKind::InvalidData, e)
         })?;
-        map_facts(path, &doc)
+        map_facts(path, &doc, None)
+    }
+}
+
+impl FfprobeFactExtractor {
+    /// Like `probe`, but names the container explicitly — for
+    /// intermediate files whose file name carries no container
+    /// extension (temp files, quarantined copies).
+    pub fn probe_with_container(
+        &self,
+        path: &Path,
+        container: Option<&str>,
+    ) -> std::io::Result<FileFacts> {
+        let out = std::process::Command::new(&self.path)
+            .args(["-v", "error", "-print_format", "json", "-show_format", "-show_streams"])
+            .arg(path)
+            .output()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        if !out.status.success() {
+            let err = String::from_utf8_lossy(&out.stderr);
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("ffprobe failed: {err}"),
+            ));
+        }
+        let doc: Value = serde_json::from_slice(&out.stdout).map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, e)
+        })?;
+        map_facts(path, &doc, container)
     }
 }
 
@@ -68,12 +96,21 @@ impl FactExtractor for FfprobeFactExtractor {
 ///   *both* mastering display and CLLI, so mastering display must
 ///   outrank CLLI — a per-entry "last one wins" chain misread those
 ///   as HLG when CLLI was listed first.
-pub fn map_facts(path: &Path, doc: &Value) -> std::io::Result<FileFacts> {
-    let container = path
+pub fn map_facts(
+    path: &Path,
+    doc: &Value,
+    container_override: Option<&str>,
+) -> std::io::Result<FileFacts> {
+    let mut container = path
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
+    // Intermediate files (temp/quarantine names) carry no container
+    // extension: the caller supplies the known container instead.
+    if let Some(c) = container_override {
+        container = c.to_ascii_lowercase();
+    }
 
     let size = doc
         .get("format")
@@ -290,7 +327,7 @@ mod tests {
               ]
             }"#,
         );
-        let facts = map_facts(Path::new("/media/show.s01e01.mkv"), &d).unwrap();
+        let facts = map_facts(Path::new("/media/show.s01e01.mkv"), &d, None).unwrap();
         assert_eq!(facts.container, "mkv");
         let v = facts.video.as_ref().unwrap();
         assert_eq!(&v.codec, "hevc");
@@ -314,7 +351,7 @@ mod tests {
                  "pix_fmt": "yuv420p", "width": 1920, "height": 1080}
             ]}"#,
         );
-        let facts = map_facts(Path::new("/x.mp4"), &d).unwrap();
+        let facts = map_facts(Path::new("/x.mp4"), &d, None).unwrap();
         assert_eq!(facts.video.as_ref().unwrap().level.as_deref(), Some("4.2"));
     }
 
@@ -333,7 +370,7 @@ mod tests {
                  ]}
             ]}"#,
         );
-        let facts = map_facts(Path::new("/x.mkv"), &d).unwrap();
+        let facts = map_facts(Path::new("/x.mkv"), &d, None).unwrap();
         assert!(matches!(facts.video.as_ref().unwrap().hdr, Hdr::Hdr10));
     }
 
@@ -346,13 +383,13 @@ mod tests {
                  "side_data_list": [{"side_data_type": "Content light level"}]}
             ]}"#,
         );
-        let facts = map_facts(Path::new("/x.mkv"), &d).unwrap();
+        let facts = map_facts(Path::new("/x.mkv"), &d, None).unwrap();
         assert!(matches!(facts.video.as_ref().unwrap().hdr, Hdr::Hlg));
     }
 
     #[test]
     fn empty_document_is_safe() {
-        let facts = map_facts(Path::new("/x.avi"), &doc("{}")).unwrap();
+        let facts = map_facts(Path::new("/x.avi"), &doc("{}"), None).unwrap();
         assert_eq!(facts.container, "avi");
         assert!(facts.video.is_none());
         assert!(facts.audio.is_empty());

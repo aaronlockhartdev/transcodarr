@@ -213,6 +213,33 @@ mod tests {
     }
 
     #[test]
+    fn compliant_720p_source_capped_is_identity() {
+        let r = registry();
+        let f = flow(vec![(
+            BTreeMap::new(),
+            json!({
+                "video": {
+                    "codec": "h264",
+                    "profile": "auto",
+                    "level": "auto",
+                    "bitrate": { "mode": "source_capped" },
+                    "container": "smart",
+                    "device": "auto",
+                    "hdr_to_sdr": false
+                }
+            }),
+        )]);
+        let mut facts = h264_1080p_facts();
+        let v = facts.video.as_mut().unwrap();
+        v.width = 1280;
+        v.height = 720;
+        v.level = Some("3.1".into());
+        v.bitrate_bps = Some(2_704_640);
+        let e = evaluate(&r, &f, &facts).unwrap();
+        assert!(matches!(e, Evaluation::Identity), "{e:?}");
+    }
+
+    #[test]
     fn first_match_wins() {
         let r = registry();
         let f = flow(vec![

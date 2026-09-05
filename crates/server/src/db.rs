@@ -354,6 +354,14 @@ pub fn set_file_status(conn: &Connection, id: i64, status: &str) -> Result<()> {
     Ok(())
 }
 
+/// Rename a file record's path (in-place container adoption,
+/// DESIGN §3.1). Errors on a UNIQUE violation of `files.path`.
+pub fn rename_file_path(conn: &Connection, id: i64, new_path: &str) -> Result<()> {
+    conn.execute("UPDATE files SET path = ?2 WHERE id = ?1", params![id, new_path])
+        .context("rename file path")?;
+    Ok(())
+}
+
 // ── Jobs ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

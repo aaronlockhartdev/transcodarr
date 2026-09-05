@@ -3,7 +3,7 @@
 //! Adding a condition field = one file here implementing
 //! [`super::ConditionField`] + one line in [`v1_condition_fields`].
 
-mod audio_codec;
+pub mod audio_codec;
 mod container;
 mod file_size;
 mod hdr;

@@ -1,4 +1,6 @@
-use serde::{Deserialize, Serialize};
+use serde::de;
+use serde::ser::SerializeStruct;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{json, Value};
 
 use crate::facts::{FileFacts, Hdr, VideoFacts};
@@ -57,8 +59,7 @@ pub enum ContainerChoice {
 
 /// Profile: `auto` (sensible default per codec + bit depth) or an
 /// explicit ffmpeg profile name.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ProfileSpec {
     /// Codec default (H.264: `high`/`high10`; HEVC: `main`/`main10`).
     Auto,
@@ -73,8 +74,7 @@ impl Default for ProfileSpec {
 
 /// Level: `auto` (sensible default per codec + resolution) or an
 /// explicit level like `"4.2"`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum LevelSpec {
     /// Codec/resolution default (e.g. 4K HEVC → `5.1`, DESIGN §6.1).
     Auto,
@@ -86,6 +86,48 @@ impl Default for LevelSpec {
         Self::Auto
     }
 }
+
+impl Serialize for ProfileSpec {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Auto => s.serialize_str("auto"),
+            Self::Explicit(p) => s.serialize_str(p),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ProfileSpec {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        // Bare `auto` means codec default; any other string is explicit.
+        let v = String::deserialize(d)?;
+        if v.eq_ignore_ascii_case("auto") {
+            Ok(Self::Auto)
+        } else {
+            Ok(Self::Explicit(v))
+        }
+    }
+}
+
+impl Serialize for LevelSpec {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Auto => s.serialize_str("auto"),
+            Self::Explicit(l) => s.serialize_str(l),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for LevelSpec {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let v = String::deserialize(d)?;
+        if v.eq_ignore_ascii_case("auto") {
+            Ok(Self::Auto)
+        } else {
+            Ok(Self::Explicit(v))
+        }
+    }
+}
+
 
 /// Bitrate mode (DESIGN §6.1).
 ///
@@ -112,8 +154,7 @@ impl Default for BitrateMode {
 /// unavailable encoders are shown disabled in the UI — DESIGN §6.1).
 ///
 /// JSON: `"auto"` | `"software"` | `{ "kind": "gpu", "id": "…" }`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(untagged)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeviceChoice {
     /// Best available device at dispatch time (GPU first, CPU fallback).
     Auto,
@@ -126,6 +167,46 @@ pub enum DeviceChoice {
 impl Default for DeviceChoice {
     fn default() -> Self {
         Self::Auto
+    }
+}
+
+impl Serialize for DeviceChoice {
+    fn serialize<S: Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Auto => ser.serialize_str("auto"),
+            Self::Software => ser.serialize_str("software"),
+            Self::Gpu { id } => {
+                let mut s = ser.serialize_struct("Gpu", 2)?;
+                s.serialize_field("kind", "gpu")?;
+                s.serialize_field("id", id)?;
+                s.end()
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for DeviceChoice {
+    fn deserialize<D: Deserializer<'de>>(des: D) -> Result<Self, D::Error> {
+        // Unit variants cannot sit inside an untagged enum (they only match
+        // null, making Auto and Software indistinguishable), so the three
+        // documented JSON forms are matched explicitly.
+        let v = Value::deserialize(des)?;
+        match v {
+            Value::String(s) => match s.to_ascii_lowercase().as_str() {
+                "auto" => Ok(Self::Auto),
+                "software" | "cpu" => Ok(Self::Software),
+                other => Err(de::Error::unknown_variant(other, &["auto", "software"])),
+            },
+            Value::Object(m) => match (m.get("kind"), m.get("id")) {
+                (Some(Value::String(k)), Some(Value::String(id))) if k == "gpu" => {
+                    Ok(Self::Gpu { id: id.clone() })
+                }
+                _ => Err(de::Error::custom(
+                    "gpu device choice needs {\"kind\":\"gpu\",\"id\":\"…\"}".to_owned(),
+                )),
+            },
+            other => Err(de::Error::custom(format!("invalid device choice: {other}"))),
+        }
     }
 }
 
@@ -416,12 +497,13 @@ impl OperationSection for Video {
                         { "value": "h264", "label": "H.264" },
                         { "value": "hevc", "label": "HEVC (H.265)" }
                     ],
+                    "default": "h264",
                     "hint": "AV1 is parked (design §12)."
                 },
                 "profile": { "kind": "text", "default": "auto", "hint": "auto = codec default for the source bit depth" },
                 "level": { "kind": "text", "default": "auto", "hint": "auto = codec default for the target resolution" },
                 "bitrate": {
-                    "kind": "bitrate_mode",
+                    "kind": "bitrate_mode", "values": [{ "value": "source_capped", "label": "Source capped" }, { "value": "fixed", "label": "Fixed (bps)" }, { "value": "crf", "label": "CRF" }],
                     "default": "source_capped",
                     "hint": "source_capped: ≤ source bitrate, ceiling scaled by target resolution"
                 },
@@ -443,6 +525,19 @@ impl OperationSection for Video {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn profile_level_auto_string_round_trips() {
+        let p: ProfileSpec = serde_json::from_str("\"auto\"").unwrap();
+        assert!(matches!(p, ProfileSpec::Auto));
+        assert_eq!(serde_json::to_string(&p).unwrap(), "\"auto\"");
+        let p: ProfileSpec = serde_json::from_str("\"high\"").unwrap();
+        assert!(matches!(p, ProfileSpec::Explicit(ref x) if x == "high"));
+        let l: LevelSpec = serde_json::from_str("\"auto\"").unwrap();
+        assert!(matches!(l, LevelSpec::Auto));
+        let l: LevelSpec = serde_json::from_str("\"4.2\"").unwrap();
+        assert!(matches!(l, LevelSpec::Explicit(ref x) if x == "4.2"));
+    }
 
     fn video(codec: &str, w: u32, h: u32, bps: Option<u64>) -> VideoFacts {
         VideoFacts {
@@ -615,4 +710,25 @@ mod tests {
             .unwrap();
         assert!(matches!(p, SectionPlan::Identity));
     }
+
+    #[test]
+    fn device_choice_json_forms_round_trip() {
+        // Regression: untagged unit variants only match null, so the
+        // documented string forms used to fail to deserialize.
+        assert_eq!(DeviceChoice::deserialize(&Value::String("auto".into())).unwrap(), DeviceChoice::Auto);
+        assert_eq!(DeviceChoice::deserialize(&Value::String("software".into())).unwrap(), DeviceChoice::Software);
+        assert_eq!(
+            DeviceChoice::deserialize(&json!({ "kind": "gpu", "id": "nvenc-0" })).unwrap(),
+            DeviceChoice::Gpu { id: "nvenc-0".into() }
+        );
+        assert_eq!(serde_json::to_string(&DeviceChoice::Auto).unwrap(), "\"auto\"");
+        assert_eq!(serde_json::to_string(&DeviceChoice::Software).unwrap(), "\"software\"");
+        assert_eq!(
+            serde_json::to_string(&DeviceChoice::Gpu { id: "x".into() }).unwrap(),
+            "{\"kind\":\"gpu\",\"id\":\"x\"}"
+        );
+        assert!(DeviceChoice::deserialize(&Value::String("nvidia".into())).is_err());
+        assert!(DeviceChoice::deserialize(&json!({ "id": "x" })).is_err());
+    }
+// (module closes)
 }
