@@ -149,50 +149,52 @@
 	</Card.Root>
 </div>
 
-<div class="mt-6 rounded-lg border">
-	<div class="border-b px-4 py-3">
-		<h2 class="font-semibold">Devices</h2>
-		<p class="text-sm text-muted-foreground">
+<Card.Root class="mt-6">
+	<Card.Header>
+		<Card.Title>Devices</Card.Title>
+		<Card.Description>
 			Detected at startup with a real test-encode; a device is listed only if at least one of its encoders works.
-		</p>
-	</div>
-	<Table.Root>
-		<Table.Header>
-			<Table.Row>
-				<Table.Head>Device</Table.Head>
-				<Table.Head>Type</Table.Head>
-				<Table.Head>Encoders</Table.Head>
-				<Table.Head class="text-right">Max concurrent</Table.Head>
-				<Table.Head class="text-right">Busy</Table.Head>
-			</Table.Row>
-		</Table.Header>
-		<Table.Body>
-			{#each store.devices as d (d.id)}
+		</Card.Description>
+	</Card.Header>
+	<Card.Content class="p-0">
+		<Table.Root>
+			<Table.Header>
 				<Table.Row>
-					<Table.Cell>
-						<div class="font-medium">{d.name}</div>
-						<div class="font-mono text-xs text-muted-foreground">{d.id}</div>
-					</Table.Cell>
-					<Table.Cell>
-						<Badge variant={d.kind === "gpu" ? "default" : "secondary"}>{d.kind}</Badge>
-					</Table.Cell>
-					<Table.Cell>
-						<div class="flex flex-wrap gap-1">
-							{#each d.encoders as e (e.name)}
-								<Badge variant="outline" class="font-mono">{e.name}</Badge>
-							{/each}
-						</div>
-					</Table.Cell>
-					<Table.Cell class="text-right tabular-nums">{d.max_concurrent}</Table.Cell>
-					<Table.Cell class="text-right tabular-nums">{busyCount(d.id)}</Table.Cell>
+					<Table.Head>Device</Table.Head>
+					<Table.Head>Type</Table.Head>
+					<Table.Head>Encoders</Table.Head>
+					<Table.Head class="text-right">Max concurrent</Table.Head>
+					<Table.Head class="text-right">Busy</Table.Head>
 				</Table.Row>
-			{:else}
-				<Table.Row>
-					<Table.Cell class="py-10 text-center text-muted-foreground" colspan={5}>
-						No devices detected (a CPU fallback always exists on the server).
-					</Table.Cell>
-				</Table.Row>
-			{/each}
-		</Table.Body>
-	</Table.Root>
-</div>
+			</Table.Header>
+			<Table.Body>
+				{#each store.devices as d (d.id)}
+					<Table.Row>
+						<Table.Cell>
+							<div class="font-medium">{d.name}</div>
+							<div class="font-mono text-xs text-muted-foreground">{d.id}</div>
+						</Table.Cell>
+						<Table.Cell>
+							<Badge variant={d.kind === "gpu" ? "default" : "secondary"}>{d.kind}</Badge>
+						</Table.Cell>
+						<Table.Cell>
+							<div class="flex flex-wrap gap-1">
+								{#each d.encoders as e (e.name)}
+									<Badge variant="outline" class="font-mono">{e.name}</Badge>
+								{/each}
+							</div>
+						</Table.Cell>
+						<Table.Cell class="text-right tabular-nums">{d.max_concurrent}</Table.Cell>
+						<Table.Cell class="text-right tabular-nums">{busyCount(d.id)}</Table.Cell>
+					</Table.Row>
+				{:else}
+					<Table.Row>
+						<Table.Cell class="py-10 text-center text-muted-foreground" colspan={5}>
+							No devices detected (a CPU fallback always exists on the server).
+						</Table.Cell>
+					</Table.Row>
+				{/each}
+			</Table.Body>
+		</Table.Root>
+	</Card.Content>
+</Card.Root>

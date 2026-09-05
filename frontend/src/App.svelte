@@ -32,27 +32,34 @@
 	});
 </script>
 
-<Sidebar.Provider>
-	<AppSidebar />
-	<main class="flex-1 overflow-y-auto p-6">
-		{#if route.name === "dashboard"}
-			<Dashboard />
-		{:else if route.name === "libraries"}
-			<Libraries />
-		{:else if route.name === "library"}
-			<LibraryDetail id={Number(route.id)} />
-		{:else if route.name === "flow"}
-			<FlowEditor id={Number(route.id)} />
-		{:else if route.name === "jobs"}
-			<Jobs />
-		{:else if route.name === "job"}
-			<JobDetail id={Number(route.id)} />
-		{:else if route.name === "settings"}
-			<Settings />
-		{:else}
-			<div class="flex h-full items-center justify-center text-muted-foreground">Not found.</div>
-		{/if}
-	</main>
-</Sidebar.Provider>
+<!-- The page canvas (bg-sidebar: a light gray in light mode, the darkest
+     surface in dark mode) shows through the gap around the two cards, which
+     is what separates the bar from the content. -->
+<div class="flex h-svh w-full overflow-hidden bg-sidebar dark:bg-background">
+	<Sidebar.Provider>
+		<AppSidebar />
+		<Sidebar.Inset>
+			<div class="min-h-0 flex-1 overflow-y-auto p-6">
+				{#if route.name === "dashboard"}
+					<Dashboard />
+				{:else if route.name === "libraries"}
+					<Libraries />
+				{:else if route.name === "library"}
+					<LibraryDetail id={Number(route.id)} />
+				{:else if route.name === "flow"}
+					<FlowEditor id={Number(route.id)} />
+				{:else if route.name === "jobs"}
+					<Jobs />
+				{:else if route.name === "job"}
+					<JobDetail id={Number(route.id)} />
+				{:else if route.name === "settings"}
+					<Settings />
+				{:else}
+					<div class="flex h-full items-center justify-center text-muted-foreground">Not found.</div>
+				{/if}
+			</div>
+		</Sidebar.Inset>
+	</Sidebar.Provider>
+</div>
 
 <Toaster />

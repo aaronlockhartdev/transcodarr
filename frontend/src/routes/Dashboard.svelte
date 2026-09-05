@@ -1,7 +1,7 @@
 <script lang="ts">
 	import FilmIcon from "@lucide/svelte/icons/film";
 	import { scaleBand } from "d3-scale";
-	import { BarChart } from "layerchart";
+	import { Axis, BarChart } from "layerchart";
 	import * as Chart from "$lib/components/ui/chart";
 	import * as Card from "$lib/components/ui/card";
 	import * as Empty from "$lib/components/ui/empty";
@@ -59,11 +59,22 @@
 				: 0;
 			byDay.set(iso, slot);
 		}
-		return [...byDay.entries()]
-			.map(([iso, v]) => ({ day: iso.slice(5), iso, files: v.files, bytes: v.bytes }))
-			.sort((a, b) => a.iso.localeCompare(b.iso))
-			.slice(-30);
+		// Zero-fill all 30 calendar days so one busy day can't stretch a
+		// single band across the whole plot.
+		const days: { day: string; iso: string; files: number; bytes: number }[] = [];
+		for (let i = 29; i >= 0; i--) {
+			const d = new Date();
+			d.setHours(0, 0, 0, 0);
+			d.setDate(d.getDate() - i);
+			const iso = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+			const v = byDay.get(iso) ?? { files: 0, bytes: 0 };
+			days.push({ day: iso.slice(5), iso, files: v.files, bytes: v.bytes });
+		}
+		return days;
 	});
+
+	const hasCompleted = $derived(store.jobs.some((j) => j.state === "completed" && j.ended != null));
+
 	const chartConfig = {
 		files: { label: "files completed", color: "var(--chart-1)" },
 	} satisfies Chart.ChartConfig;
@@ -155,21 +166,21 @@
 				<Card.Description>Files per day from job history</Card.Description>
 			</Card.Header>
 			<Card.Content>
-				{#if chartData.length === 0}
+				{#if !hasCompleted}
 					<p class="py-8 text-center text-sm text-muted-foreground">Nothing completed yet.</p>
 				{:else}
+					{#snippet axis(props: { context: import("layerchart").ChartState; facet: import("layerchart").Facet })}
+						<Axis placement="bottom" ticks={6} />
+					{/snippet}
 					<Chart.Container config={chartConfig} class="min-h-[220px] w-full">
 						<BarChart
 							data={chartData}
 							xScale={scaleBand().padding(0.3)}
 							x="day"
-							axis="x"
+							tooltipContext={false}
 							series={[{ key: "files", label: chartConfig.files.label, color: chartConfig.files.color }]}
-						>
-							{#snippet tooltip()}
-								<Chart.Tooltip />
-							{/snippet}
-						</BarChart>
+							axis={axis}
+						/>
 					</Chart.Container>
 				{/if}
 			</Card.Content>

@@ -96,7 +96,7 @@
 			<div
 				data-sidebar="sidebar"
 				data-slot="sidebar-inner"
-				class="bg-sidebar group-data-[variant=floating]:rounded-lg group-data-[variant=floating]:shadow-sm group-data-[variant=floating]:ring-1 group-data-[variant=floating]:ring-sidebar-border flex size-full flex-col"
+				class="bg-sidebar group-data-[variant=floating]:rounded-lg group-data-[variant=floating]:shadow-sm group-data-[variant=floating]:ring-1 group-data-[variant=floating]:ring-sidebar-border group-data-[variant=inset]:bg-background dark:group-data-[variant=inset]:bg-card group-data-[variant=inset]:rounded-xl group-data-[variant=inset]:shadow-sm group-data-[variant=inset]:ring-1 group-data-[variant=inset]:ring-sidebar-border flex size-full flex-col"
 			>
 				{@render children?.()}
 			</div>

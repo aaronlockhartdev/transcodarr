@@ -2,13 +2,15 @@
 	import { onMount, onDestroy } from "svelte";
 	import { toast } from "svelte-sonner";
 	import ChevronLeftIcon from "@lucide/svelte/icons/chevron-left";
+	import HistoryIcon from "@lucide/svelte/icons/history";
 	import ScanIcon from "@lucide/svelte/icons/scan";
+	import * as Card from "$lib/components/ui/card";
 	import * as Table from "$lib/components/ui/table";
 	import * as Sheet from "$lib/components/ui/sheet";
+	import * as Tooltip from "$lib/components/ui/tooltip";
 	import { Badge } from "$lib/components/ui/badge";
 	import { Button } from "$lib/components/ui/button";
 	import * as Empty from "$lib/components/ui/empty";
-	import * as DropdownMenu from "$lib/components/ui/dropdown-menu";
 	import LibraryFormDialog from "$lib/components/LibraryFormDialog.svelte";
 	import StatusBadge from "$lib/components/StatusBadge.svelte";
 	import { api } from "$lib/api.js";
@@ -127,7 +129,7 @@
 		</div>
 		<div class="flex shrink-0 gap-2">
 			<Button variant="outline" onclick={() => navigate(`/flows/${lib.id}`)}>Edit flow</Button>
-			<Button variant="outline" onclick={() => (editOpen = true)}>Edit</Button>
+			<Button variant="outline" onclick={() => (editOpen = true)}>Edit library</Button>
 			<Button onclick={scanNow} disabled={scanning}>
 				<ScanIcon class="size-4" data-icon="inline-start" />
 				{scanning ? "Scanning…" : "Scan now"}
@@ -135,62 +137,69 @@
 		</div>
 	</div>
 
-	<div class="mt-6 rounded-lg border">
-		<Table.Root>
-			<Table.Header>
-				<Table.Row>
-					<Table.Head>File</Table.Head>
-					<Table.Head>Resolution</Table.Head>
-					<Table.Head>Video</Table.Head>
-					<Table.Head>Audio</Table.Head>
-					<Table.Head>Status</Table.Head>
-					<Table.Head class="text-right">Size</Table.Head>
-					<Table.Head class="text-right">Δ after transcode</Table.Head>
-					<Table.Head>Last checked</Table.Head>
-					<Table.Head class="w-10" />
-				</Table.Row>
-			</Table.Header>
-			<Table.Body>
-				{#each files as f (f.id)}
-					{@const facts = parseFacts(f.facts_json)}
-					{@const delta = deltaOf(f)}
+	<Card.Root class="mt-6">
+		<Card.Content class="p-0">
+			<Table.Root>
+				<Table.Header>
 					<Table.Row>
-						<Table.Cell class="max-w-80">
-							<div class="truncate font-medium" title={f.path}>{basename(f.path)}</div>
-							<div class="truncate font-mono text-xs text-muted-foreground" title={f.path}>{f.path}</div>
-						</Table.Cell>
-						<Table.Cell class="whitespace-nowrap">{resolutionOf(f) ?? "—"}</Table.Cell>
-						<Table.Cell class="whitespace-nowrap font-mono text-xs">{facts?.video?.codec ?? "—"}</Table.Cell>
-						<Table.Cell class="max-w-44 truncate font-mono text-xs" title={audioOf(f) ?? ""}>{audioOf(f) ?? "—"}</Table.Cell>
-						<Table.Cell><StatusBadge status={f.status} /></Table.Cell>
-						<Table.Cell class="whitespace-nowrap text-right tabular-nums">{formatBytes(f.size)}</Table.Cell>
-						<Table.Cell class="whitespace-nowrap text-right tabular-nums {delta != null && delta < 0 ? 'text-emerald-600' : ''}">
-							{delta == null ? "—" : `${delta < 0 ? "−" : "+"}${formatBytes(Math.abs(delta))}`}
-						</Table.Cell>
-						<Table.Cell class="whitespace-nowrap text-muted-foreground">{formatUnixSeconds(f.last_probed)}</Table.Cell>
-						<Table.Cell class="text-right">
-							<DropdownMenu.Root>
-								<DropdownMenu.Trigger class="rounded-md outline-none">⋯</DropdownMenu.Trigger>
-								<DropdownMenu.Content align="end">
-									<DropdownMenu.Group>
-										<DropdownMenu.Item onclick={() => (historyFile = f, historyOpen = true)}>
-											Job history
-										</DropdownMenu.Item>
-									</DropdownMenu.Group>
-								</DropdownMenu.Content>
-							</DropdownMenu.Root>
-						</Table.Cell>
+						<Table.Head>File</Table.Head>
+						<Table.Head>Resolution</Table.Head>
+						<Table.Head>Video</Table.Head>
+						<Table.Head>Audio</Table.Head>
+						<Table.Head>Status</Table.Head>
+						<Table.Head class="text-right">Size</Table.Head>
+						<Table.Head class="text-right">Δ after transcode</Table.Head>
+						<Table.Head>Last checked</Table.Head>
+						<Table.Head class="w-10" />
 					</Table.Row>
-				{:else}
-					<Table.Row>
-						<Table.Cell class="py-10 text-center text-muted-foreground" colspan={9}>
-							No files yet — run a scan.
-						</Table.Cell>
-					</Table.Row>
-				{/each}
-			</Table.Body>
-		</Table.Root>
-	</div>
+				</Table.Header>
+				<Table.Body>
+					{#each files as f (f.id)}
+						{@const facts = parseFacts(f.facts_json)}
+						{@const delta = deltaOf(f)}
+						<Table.Row>
+							<Table.Cell class="max-w-80">
+								<div class="truncate font-medium" title={f.path}>{basename(f.path)}</div>
+								<div class="truncate font-mono text-xs text-muted-foreground" title={f.path}>{f.path}</div>
+							</Table.Cell>
+							<Table.Cell class="whitespace-nowrap">{resolutionOf(f) ?? "—"}</Table.Cell>
+							<Table.Cell class="whitespace-nowrap font-mono text-xs">{facts?.video?.codec ?? "—"}</Table.Cell>
+							<Table.Cell class="max-w-44 truncate font-mono text-xs" title={audioOf(f) ?? ""}>{audioOf(f) ?? "—"}</Table.Cell>
+							<Table.Cell><StatusBadge status={f.status} /></Table.Cell>
+							<Table.Cell class="whitespace-nowrap text-right tabular-nums">{formatBytes(f.size)}</Table.Cell>
+							<Table.Cell class="whitespace-nowrap text-right tabular-nums {delta != null && delta < 0 ? 'text-emerald-600' : ''}">
+								{delta == null ? "—" : `${delta < 0 ? "−" : "+"}${formatBytes(Math.abs(delta))}`}
+							</Table.Cell>
+							<Table.Cell class="whitespace-nowrap text-muted-foreground">{formatUnixSeconds(f.last_probed)}</Table.Cell>
+							<Table.Cell class="text-right">
+								<Tooltip.Root>
+									<Tooltip.Trigger>
+										{#snippet child({ props })}
+											<button
+												class="inline-flex size-7 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
+												{...props}
+												onclick={() => (historyFile = f, historyOpen = true)}
+											>
+												<span class="sr-only">Job history for {basename(f.path)}</span>
+												<HistoryIcon class="size-4" data-icon="inline-start" />
+											</button>
+										{/snippet}
+									</Tooltip.Trigger>
+									<Tooltip.Content side="top">Job history</Tooltip.Content>
+								</Tooltip.Root>
+							</Table.Cell>
+						</Table.Row>
+					{:else}
+						<Table.Row>
+							<Table.Cell class="py-10 text-center text-muted-foreground" colspan={9}>
+								No files yet — run a scan.
+							</Table.Cell>
+						</Table.Row>
+					{/each}
+				</Table.Body>
+			</Table.Root>
+		</Card.Content>
+	</Card.Root>
 {/if}
 
 <LibraryFormDialog lib={lib ?? null} bind:open={editOpen} onSaved={() => void store.refreshCore()} />
