@@ -453,7 +453,7 @@ pub fn reclaim_jobs(conn: &Connection, expired_only: bool) -> Result<usize> {
     let list = vec!["?".to_string(); ids.len()].join(",");
     conn.execute(
         &format!(
-            "UPDATE jobs SET state = 'queued', claimed_by = NULL, lease_expires = NULL, started = NULL\n             WHERE id IN ({list})"
+            "UPDATE jobs SET state = 'queued', claimed_by = NULL, lease_expires = NULL, started = NULL\n             WHERE id IN ({list}) AND state IN ('running','verifying')"
         ),
         params_from_iter(&ids),
     )?;

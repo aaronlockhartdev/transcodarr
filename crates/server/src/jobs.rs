@@ -409,7 +409,7 @@ pub fn run_job(
             for e in rd.flatten() {
                 let name = e.file_name().to_string_lossy().to_string();
                 if name == own_name
-                    || (name.ends_with(".transcodarr-tmp") && name.starts_with(&old_prefix))
+                    || (name.ends_with(".transcodarr-tmp") && name.starts_with(&old_prefix) && name.get(old_prefix.len()..old_prefix.len() + 1).is_some_and(|c| c.chars().next().is_some_and(|c| c.is_ascii_digit())))
                 {
                     let _ = std::fs::remove_file(e.path());
                 }
