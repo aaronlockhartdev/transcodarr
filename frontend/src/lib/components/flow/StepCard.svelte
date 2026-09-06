@@ -115,8 +115,8 @@
 		setList(field, list);
 	}
 
-	// resolution_range: {min?: [w,h], max?: [w,h]} — free text in (a common
-	// name like "1080p" or "width×height"), pixel bounds out.
+	// resolution_range: {min?: [w,h], max?: [w,h]} — each bound is edited as
+	// two integer pixel inputs (width and height; compared as w*h server-side).
 	type ResRange = { min?: [number, number]; max?: [number, number] };
 	function resFor(): ResRange {
 		return (step.condition["resolution"] as ResRange) ?? {};
@@ -127,43 +127,34 @@
 		else delete r[which];
 		step.condition = { ...step.condition, resolution: r };
 	}
-	const resCommon = $derived.by(() => {
-		const f = schema.condition_fields["resolution"] as
-			| { schema?: { common?: Record<string, [number, number]> } }
-			| undefined;
-		return f?.schema?.common ?? {};
-	});
-	function parseRes(text: string): [number, number] | null {
-		const t = text.trim().toLowerCase();
-		if (t === "") return null;
-		if (resCommon[t]) return resCommon[t];
-		const m = t.match(/^(\d{2,5})\s*[x×]\s*(\d{2,5})$/);
-		return m ? [Number(m[1]), Number(m[2])] : null;
-	}
-	function resDisplay(which: "min" | "max"): string {
-		const wh = resFor()[which];
-		if (!wh) return "";
-		for (const [k, pair] of Object.entries(resCommon)) {
-			if (pair[0] === wh[0] && pair[1] === wh[1]) return k;
-		}
-		return `${wh[0]}×${wh[1]}`;
-	}
-	let resMinText = $state("");
-	let resMaxText = $state("");
+	let resMinW = $state("");
+	let resMinH = $state("");
+	let resMaxW = $state("");
+	let resMaxH = $state("");
 	$effect(() => {
-		// Resync the edit buffers from the constraint (commit → canonical
-		// display normalizes what was typed).
-		resMinText = resDisplay("min");
-		resMaxText = resDisplay("max");
+		// Resync the edit buffers from the constraint (a commit normalizes
+		// whatever was typed back into these fields).
+		const [mw, mh] = resFor().min ?? [null, null];
+		const [xw, xh] = resFor().max ?? [null, null];
+		resMinW = mw == null ? "" : String(mw);
+		resMinH = mh == null ? "" : String(mh);
+		resMaxW = xw == null ? "" : String(xw);
+		resMaxH = xh == null ? "" : String(xh);
 	});
+	function resPair(w: string, h: string): [number, number] | null {
+		const wi = /^\d+$/.test(w.trim()) ? Number(w.trim()) : -1;
+		const hi = /^\d+$/.test(h.trim()) ? Number(h.trim()) : -1;
+		return wi > 0 && hi > 0 ? [wi, hi] : null;
+	}
 	function commitRes(which: "min" | "max") {
-		const text = which === "min" ? resMinText : resMaxText;
-		if (text.trim() === "") {
+		const w = which === "min" ? resMinW : resMaxW;
+		const h = which === "min" ? resMinH : resMaxH;
+		if (w.trim() === "" && h.trim() === "") {
 			setRes(which); // cleared → unbounded
 			return;
 		}
-		// An invalid edit keeps the previous bound.
-		setRes(which, parseRes(text) ?? resFor()[which]);
+		// An incomplete or invalid pair keeps the previous bound.
+		setRes(which, resPair(w, h) ?? resFor()[which]);
 	}
 
 	// byte_range: {min?, max?} in bytes, edited in megabytes.
@@ -433,33 +424,56 @@
 										{/each}
 									</div>
 								{:else if f.schema.kind === "resolution_range"}
-									<div class="flex flex-wrap items-center gap-2 text-xs">
-										<span class="text-muted-foreground">At least</span>
-										<Input
-											list="resolution-common"
-											class="h-8 w-28"
-											value={resMinText}
-											oninput={(e) => (resMinText = (e.target as HTMLInputElement).value)}
-											onblur={() => commitRes("min")}
-											onkeydown={(e) => e.key === "Enter" && (e.target as HTMLElement).blur()}
-											placeholder="1080p"
-										/>
-										<span class="text-muted-foreground">At most</span>
-										<Input
-											list="resolution-common"
-											class="h-8 w-28"
-											value={resMaxText}
-											oninput={(e) => (resMaxText = (e.target as HTMLInputElement).value)}
-											onblur={() => commitRes("max")}
-											onkeydown={(e) => e.key === "Enter" && (e.target as HTMLElement).blur()}
-											placeholder="4k"
-										/>
+									<div class="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs">
+										<div class="flex flex-nowrap items-center gap-2">
+											<span class="text-muted-foreground">At least</span>
+											<Input
+												type="number"
+												min="1"
+												class="h-8 w-24"
+												value={resMinW}
+												oninput={(e) => (resMinW = (e.target as HTMLInputElement).value)}
+												onblur={() => commitRes("min")}
+												onkeydown={(e) => e.key === "Enter" && (e.target as HTMLElement).blur()}
+												placeholder="w"
+											/>
+											<span class="text-muted-foreground">×</span>
+											<Input
+												type="number"
+												min="1"
+												class="h-8 w-24"
+												value={resMinH}
+												oninput={(e) => (resMinH = (e.target as HTMLInputElement).value)}
+												onblur={() => commitRes("min")}
+												onkeydown={(e) => e.key === "Enter" && (e.target as HTMLElement).blur()}
+												placeholder="h"
+											/>
+										</div>
+										<div class="flex flex-nowrap items-center gap-2">
+											<span class="text-muted-foreground">At most</span>
+											<Input
+												type="number"
+												min="1"
+												class="h-8 w-24"
+												value={resMaxW}
+												oninput={(e) => (resMaxW = (e.target as HTMLInputElement).value)}
+												onblur={() => commitRes("max")}
+												onkeydown={(e) => e.key === "Enter" && (e.target as HTMLElement).blur()}
+												placeholder="w"
+											/>
+											<span class="text-muted-foreground">×</span>
+											<Input
+												type="number"
+												min="1"
+												class="h-8 w-24"
+												value={resMaxH}
+												oninput={(e) => (resMaxH = (e.target as HTMLInputElement).value)}
+												onblur={() => commitRes("max")}
+												onkeydown={(e) => e.key === "Enter" && (e.target as HTMLElement).blur()}
+												placeholder="h"
+											/>
+										</div>
 									</div>
-									<datalist id="resolution-common">
-										{#each Object.keys(resCommon) as k (k)}
-											<option value={k}></option>
-										{/each}
-									</datalist>
 								{:else if f.schema.kind === "byte_range"}
 									{@const s = sizeFor()}
 									<div class="flex items-center gap-2">

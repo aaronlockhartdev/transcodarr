@@ -117,7 +117,7 @@ export type SchemaOption = { value: string; label: string };
 export type UiSchema =
 	| { kind: "multi_select"; label?: string; values: SchemaOption[]; hint?: string }
 	| { kind: "single_select"; label?: string; values: SchemaOption[]; hint?: string; default?: string }
-	| { kind: "resolution_range"; label?: string; common: Record<string, [number, number]>; hint?: string }
+	| { kind: "resolution_range"; label?: string; hint?: string }
 	| { kind: "byte_range"; label?: string; unit?: string; hint?: string }
 	| { kind: "text"; label?: string; hint?: string; default?: string }
 	| { kind: "boolean"; label?: string; hint?: string; default?: boolean }
@@ -150,7 +150,6 @@ export type UiSchema =
 					hint?: string;
 					default?: unknown;
 					item?: unknown;
-					common?: Record<string, [number, number]>;
 				}
 			>;
 	  };
