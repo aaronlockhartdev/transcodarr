@@ -14,12 +14,17 @@
 	import Settings from "$routes/Settings.svelte";
 	import { parseRoute, usePath } from "$lib/router.svelte.js";
 	import { store } from "$lib/store.svelte.js";
+	import { startEvents, stopEvents } from "$lib/events.svelte.js";
 
 	const route = $derived(parseRoute(usePath()));
 
 	onMount(() => {
+		startEvents();
 		store.startPolling();
-		return () => store.stopPolling();
+		return () => {
+			stopEvents();
+			store.stopPolling();
+		};
 	});
 
 	// Surface (and dedupe) server errors as toasts.

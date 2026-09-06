@@ -1104,6 +1104,15 @@ fn finish(
         _ => "failed",
     };
     db.with(|c| db::set_file_status(c, job.file_id, file_status))?;
+    // The job outcome moved the file's status — tell live clients to
+    // refresh the library's file list (library stats derive from it).
+    // Emitted unconditionally: every terminal job is worth one
+    // coalesced per-library refresh, and skipping the diff would risk
+    // missing transitions that ran through an intermediate status.
+    events.emit(ServerEvent::FileChanged {
+        file_id: job.file_id,
+        library_id: job.library_id,
+    });
     events.emit(ServerEvent::JobChanged { job_id: job.id });
     Ok(())
 }

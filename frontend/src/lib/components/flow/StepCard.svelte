@@ -233,6 +233,24 @@
 		step.operation = { ...step.operation, [name]: sec };
 	}
 
+	// The Container section is the single container control. The video
+	// section also carries a container field in its schema (legacy wire
+	// form — old flows may only have the value there), so it is hidden
+	// from the UI. This shows the effective choice — top-level field,
+	// else the video-section value — and writes the top-level field,
+	// which wins in resolution.
+	const containerShown = $derived.by(() => {
+		const o = step.operation as unknown as Record<string, any>;
+		return (
+			(o["container"] as string | undefined) ??
+			(o["video"] as { container?: string } | undefined)?.container ??
+			"smart"
+		);
+	});
+	function setContainerTop(v: string) {
+		step.operation = { ...(step.operation as Record<string, unknown>), container: v };
+	}
+
 	// audio rules
 	type Rule = { match?: { codecs: string[]; languages: string[] }; action: unknown };
 	function rulesFor(): Rule[] {
@@ -503,7 +521,9 @@
 								{#if sec.schema.kind === "object"}
 									<div class="mt-2 grid gap-3 md:grid-cols-2">
 										{#each Object.entries(sec.schema.fields) as [field, f] (field)}
-											{#if name === "audio" && field === "rules"}
+											{#if name === "video" && field === "container"}
+												<!-- hidden: the standalone Container section is the one control -->
+											{:else if name === "audio" && field === "rules"}
 												<div class="md:col-span-2">
 													<p class="mb-1 text-xs font-medium">
 														{label(field, f as { label?: string })}
@@ -606,6 +626,16 @@
 											{/if}
 										{/each}
 									</div>
+								{:else if name === "container"}
+									<select
+										class="mt-2 h-8 w-56 rounded-lg border border-input bg-transparent px-2 text-sm"
+										value={containerShown}
+										onchange={(e) => setContainerTop((e.target as HTMLSelectElement).value)}
+									>
+										{#each ((sec.schema as { values?: { value: string; label: string }[] }).values ?? []) as v (v.value)}
+											<option value={v.value}>{v.label}</option>
+										{/each}
+									</select>
 								{:else}
 									<FlowField schema={sec.schema} bind:value={op[name]} devices={devices} class="mt-2 w-64" />
 								{/if}

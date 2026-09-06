@@ -1,10 +1,8 @@
 <script lang="ts">
-	import { onMount, onDestroy } from "svelte";
 	import { toast } from "svelte-sonner";
 	import ChevronLeftIcon from "@lucide/svelte/icons/chevron-left";
 	import RefreshIcon from "@lucide/svelte/icons/refresh-cw";
 	import * as Card from "$lib/components/ui/card";
-	import * as ScrollArea from "$lib/components/ui/scroll-area";
 	import * as Empty from "$lib/components/ui/empty";
 	import { Badge } from "$lib/components/ui/badge";
 	import { Button } from "$lib/components/ui/button";
@@ -12,6 +10,7 @@
 	import { api } from "$lib/api.js";
 	import { navigate } from "$lib/router.svelte.js";
 	import { store } from "$lib/store.svelte.js";
+	import { sse, subscribeJobLog } from "$lib/events.svelte.js";
 	import { basename, formatDuration, formatUnixSeconds } from "$lib/format.js";
 
 	let { id }: { id: number } = $props();
@@ -28,10 +27,15 @@
 
 	let log = $state<string | null>(null);
 	let loadingLog = $state(false);
+	let live = $state(false);
+	let logBox = $state<HTMLDivElement | null>(null);
+	let autoScroll = $state(true);
+
 	async function refreshLog() {
 		loadingLog = true;
 		try {
 			log = await api.jobLog(id);
+			if (logBox) logBox.scrollTop = logBox.scrollHeight;
 		} catch {
 			log = "(no log available)";
 		} finally {
@@ -40,15 +44,74 @@
 	}
 	void refreshLog();
 
-	let poll: ReturnType<typeof setInterval> | null = null;
-	onMount(() => {
-		poll = setInterval(() => {
-			void store.refreshJobs();
-			// Keep the live log fresh while the job is in flight.
-			if (job?.state === "running" || job?.state === "verifying") void refreshLog();
-		}, 3000);
+	const inFlight = $derived(job?.state === "running" || job?.state === "verifying");
+	const liveMode = $derived(!!inFlight && sse.connected);
+
+	function appendChunk(chunk: string) {
+		if (!chunk) return;
+		const cur = log ?? "";
+		// A chunk's first line may duplicate the last line already
+		// shown (a batch boundary can straddle a line).
+		const lastLine = cur.split("\n").pop() ?? "";
+		const firstLine = chunk.split("\n")[0] ?? "";
+		const out =
+			lastLine && firstLine && lastLine === firstLine ? chunk.slice(firstLine.length + 1) : chunk;
+		log = cur + out;
+		if (autoScroll && logBox) logBox.scrollTop = logBox.scrollHeight;
+	}
+
+	// While the job is in flight and the stream is up, append
+	// `job_log` chunks live; on exit, a one-shot fetch takes the
+	// authoritative archived tail.
+	let liveKey = "";
+	$effect(() => {
+		const key = `${id}:${inFlight ? 1 : 0}:${sse.connected ? 1 : 0}`;
+		if (key === liveKey) return;
+		liveKey = key;
+		if (live && !liveMode) void refreshLog();
+		live = liveMode;
+		if (live) {
+			void api
+				.jobLog(id)
+				.then((t) => {
+					log = t;
+					if (logBox) logBox.scrollTop = logBox.scrollHeight;
+				})
+				.catch(() => {
+					log ??= "";
+				});
+			return subscribeJobLog(id, appendChunk);
+		}
 	});
-	onDestroy(() => poll && clearInterval(poll));
+
+	// This page owns one job: keep its row current independently of
+	// the list nudges, so any field (state, exit_kind, times) converges
+	// within one interval even if a nudge was lost. On the transition
+	// to a terminal state, take the final authoritative log.
+	let lastState: string | null = null;
+	$effect(() => {
+		const st = job?.state ?? null;
+		if (st !== lastState) {
+			lastState = st;
+			if (st === "completed" || st === "failed") void refreshLog();
+		}
+	});
+	// In-flight only: while a job is running this page keeps its row
+	// fresh with a light per-job fetch (the list nudges cover the
+	// terminal transition; this covers everything in between).
+	$effect(() => {
+		if (!job || job.state === "completed" || job.state === "failed") return;
+		const t = setInterval(() => {
+			void api
+				.getJob(id)
+				.then((fresh) => {
+					const i = store.jobs.findIndex((j) => j.id === id);
+					if (i >= 0) store.jobs[i] = fresh;
+				})
+				.catch(() => {});
+		}, 3000);
+		return () => clearInterval(t);
+	});
 
 	const plan = $derived.by(() => {
 		if (!job) return null;
@@ -88,7 +151,7 @@
 		{#if device}
 			<Badge variant="outline">{device.name}</Badge>
 		{/if}
-		{#if job.exit_kind}
+		{#if (job.state === "completed" || job.state === "failed") && job.exit_kind}
 			<Badge variant="secondary" class="font-mono">{job.exit_kind}</Badge>
 		{/if}
 	</div>
@@ -141,19 +204,30 @@
 			</Card.Header>
 			<Card.Content>
 				<div class="flex items-center justify-between gap-2">
-					<p class="text-xs text-muted-foreground">
-						{job.log_path ?? "no log file recorded"}
-					</p>
+					{#if live}
+						<Badge variant="secondary" class="gap-1.5">
+							<span class="size-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
+							live
+						</Badge>
+					{:else if job.log_path}
+						<p class="text-xs text-muted-foreground">{job.log_path}</p>
+					{:else}
+						<p class="text-xs text-muted-foreground">no log yet</p>
+					{/if}
 					<Button variant="ghost" size="sm" onclick={refreshLog} disabled={loadingLog}>
 						<RefreshIcon data-icon="inline-start" class="size-3.5 {loadingLog ? 'animate-spin' : ''}" />
 						Refresh
 					</Button>
 				</div>
-				<ScrollArea.Root class="mt-2 h-64 rounded-md border">
-						<div class="h-full p-3">
-						<pre class="font-mono text-xs leading-5 whitespace-pre-wrap">{log ?? "loading…"}</pre>
-						</div>
-				</ScrollArea.Root>
+				<div
+					class="mt-2 h-64 overflow-y-auto rounded-md border p-3"
+					bind:this={logBox}
+					onscroll={() => {
+						if (logBox) autoScroll = logBox.scrollHeight - logBox.scrollTop - logBox.clientHeight < 24;
+					}}
+				>
+					<pre class="font-mono text-xs leading-5 whitespace-pre-wrap">{log ?? "loading…"}</pre>
+				</div>
 			</Card.Content>
 		</Card.Root>
 
@@ -163,11 +237,9 @@
 				<Card.Description>The FfmpegPlan this job executes (device resolved at dispatch time)</Card.Description>
 			</Card.Header>
 			<Card.Content>
-				<ScrollArea.Root class="max-h-80 rounded-md border">
-						<div class="h-full p-3">
-						<pre class="font-mono text-xs leading-5">{plan ?? "(no plan recorded)"}</pre>
-						</div>
-				</ScrollArea.Root>
+			<div class="max-h-80 overflow-y-auto rounded-md border p-3">
+				<pre class="font-mono text-xs leading-5">{plan ?? "(no plan recorded)"}</pre>
+			</div>
 			</Card.Content>
 		</Card.Root>
 	</div>

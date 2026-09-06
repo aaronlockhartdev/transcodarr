@@ -73,6 +73,23 @@ export interface JobRow {
 	quarantine_path: string | null;
 }
 
+/** One frame on the /api/events stream (tagged by `type`). */
+export interface ServerEvent {
+	type:
+		| "job_changed"
+		| "job_log"
+		| "file_changed"
+		| "library_changed"
+		| "flow_changed"
+		| "tick"
+		| "resync";
+	job_id?: number;
+	file_id?: number;
+	library_id?: number;
+	flow_id?: number;
+	chunk?: string;
+}
+
 export interface Health {
 	status: string;
 	flow_version: number;

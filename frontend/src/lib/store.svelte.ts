@@ -3,9 +3,14 @@
 // gentle — this is a LAN self-hosted tool, not a trading desk.
 
 import { api } from "./api.js";
+import { sse } from "./events.svelte.js";
 import type { Device, FileRow, FlowRecord, Health, JobRow, Library } from "./types.js";
 
 const POLL_MS = 5000;
+// A connected stream that goes silent for longer than this (two missed
+// 30 s ticks) is treated as dead — the poll fallback resumes even
+// though EventSource still reports itself open.
+const SSE_STALE_MS = 60_000;
 
 class Store {
 	libraries = $state<Library[]>([]);
@@ -88,6 +93,13 @@ class Store {
 		void this.refreshCore();
 		void this.refreshJobs();
 		this.timer = setInterval(() => {
+			// The SSE stream drives updates; the poll is the fallback.
+			// "Up" means connected AND actually receiving events — an
+			// open-but-silent stream (dropped without a close event, a
+			// wedged proxy) would otherwise disable the fallback
+			// forever and let rows go stale indefinitely.
+			const sseHealthy = sse.connected && Date.now() - sse.lastEventAt < SSE_STALE_MS;
+			if (sseHealthy) return;
 			void this.refreshCore();
 			void this.refreshJobs();
 		}, POLL_MS);

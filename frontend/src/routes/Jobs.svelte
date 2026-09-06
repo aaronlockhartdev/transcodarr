@@ -158,7 +158,13 @@
 									</Table.Cell>
 									<Table.Cell><StatusBadge status={j.state} /></Table.Cell>
 									<Table.Cell class="font-mono text-xs">{j.device_id ?? "—"}</Table.Cell>
-									<Table.Cell class="font-mono text-xs text-muted-foreground">{j.exit_kind ?? "—"}</Table.Cell>
+									<Table.Cell class="font-mono text-xs text-muted-foreground">
+										{#if (j.state === "completed" || j.state === "failed") && j.exit_kind}
+											{j.exit_kind}
+										{:else}
+											—
+										{/if}
+									</Table.Cell>
 									<Table.Cell class="whitespace-nowrap text-muted-foreground">
 										{formatUnixSeconds(j.started)}
 										{#if j.started == null}<span class="text-xs">({formatRelative(j.lease_expires)} lease)</span>{/if}
