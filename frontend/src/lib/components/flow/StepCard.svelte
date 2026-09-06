@@ -47,8 +47,9 @@
 	}
 
 	// ---- filters (condition = an ordered list of field constraints) ------
-	// Object.keys alone does not subscribe on a $state proxy — read each
-	// value so key add/remove re-runs this derived.
+	// The value reads below keep this derived subscribed to constraint
+	// changes; key add/remove re-runs it as well (Svelte 5's $state object
+	// proxy notifies on both).
 	const filterKeys = $derived.by(() => {
 		const c = step.condition;
 		const keys = Object.keys(c);
@@ -250,7 +251,10 @@
 		setRules(rulesFor().filter((_, j) => j !== i));
 	}
 	function ruleChip(i: number, v: string) {
-		const rules = rulesFor().map((r) => ({ ...r, match: { ...r.match } }));
+		const rules = rulesFor().map((r) => ({
+			...r,
+			match: { codecs: [...(r.match?.codecs ?? [])], languages: [...(r.match?.languages ?? [])] },
+		}));
 		const c = rules[i].match.codecs;
 		const at = c.indexOf(v);
 		if (at === -1) c.push(v);
@@ -311,7 +315,10 @@
 		writeRuleAction(i, a);
 	}
 	function setRuleLanguages(i: number, text: string) {
-		const rules = rulesFor().map((r) => ({ ...r, match: { ...r.match } }));
+		const rules = rulesFor().map((r) => ({
+			...r,
+			match: { codecs: [...(r.match?.codecs ?? [])], languages: [...(r.match?.languages ?? [])] },
+		}));
 		rules[i].match.languages = text
 			.split(",")
 			.map((s) => s.trim())
@@ -508,7 +515,7 @@
 																{#each ruleMatchCodecOpts as c (c.value)}
 																	<Button
 																		type="button"
-																		variant={rule.match.codecs.includes(c.value) ? "default" : "outline"}
+																		variant={(rule.match?.codecs ?? []).includes(c.value) ? "default" : "outline"}
 																		size="sm"
 																		class="h-auto px-2 py-0.5 text-xs"
 																		onclick={() => ruleChip(i, c.value)}
@@ -520,7 +527,7 @@
 															<Input
 																class="h-7 w-32"
 																placeholder="Languages (en, fr)"
-																value={rule.match.languages.join(", ")}
+																value={(rule.match?.languages ?? []).join(", ")}
 																oninput={(e) => setRuleLanguages(i, (e.target as HTMLInputElement).value)}
 															/>
 															<span class="text-xs text-muted-foreground">→</span>

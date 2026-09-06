@@ -189,7 +189,7 @@
 	<Input bind:value={textValue} oninput={() => setText(textValue)} class={className} placeholder={schema.hint ?? "auto"} />
 {:else if schema.kind === "boolean"}
 	<label class="flex items-center gap-2">
-		<Switch bind:checked={boolValue} onchange={() => setBool(!boolValue)} />
+		<Switch bind:checked={boolValue} onCheckedChange={setBool} />
 		<span class="text-sm">{schema.label ?? schema.hint ?? "Toggle"}</span>
 	</label>
 {:else if schema.kind === "multi_select"}

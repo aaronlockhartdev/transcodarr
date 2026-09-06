@@ -6,7 +6,7 @@
 	import { store } from "$lib/store.svelte.js";
 	import { navigate } from "$lib/router.svelte.js";
 	import { basename, formatDuration, formatRelative, formatUnixSeconds } from "$lib/format.js";
-	import type { JobRow } from "$lib/types.js";
+	import type { FileRow, JobRow } from "$lib/types.js";
 	import { sortBy } from "$lib/sort";
 	import SortableHead from "$lib/components/tables/sortable-head.svelte";
 	import { Input } from "$lib/components/ui/input";
@@ -76,7 +76,13 @@
 		return store.jobs.filter((j) => matches(value, j)).length;
 	}
 
-	function fileOf(j: JobRow) {
+	function fileOf(j: JobRow): FileRow | undefined {
+		// Fast path: the job's own library. The full walk below only runs
+		// when that library's files are not in the store yet.
+		if (j.library_id != null) {
+			const hit = store.filesByLibrary[j.library_id]?.find((f) => f.id === j.file_id);
+			if (hit) return hit;
+		}
 		for (const files of Object.values(store.filesByLibrary)) {
 			const hit = files.find((f) => f.id === j.file_id);
 			if (hit) return hit;

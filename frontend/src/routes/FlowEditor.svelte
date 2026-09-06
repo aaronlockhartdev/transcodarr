@@ -26,6 +26,7 @@
 	} | null>(null);
 	let flowName = $state("");
 	let busy = $state(false);
+	let loadError = $state<string | null>(null);
 
 	const steps = $derived(flow?.steps ?? []);
 	const noMatch = $derived<NoMatchPolicy | null>(flow?.no_match ?? null);
@@ -66,19 +67,25 @@
 		try {
 			// The editor only mutates; the stored JSON string is the
 			// source of truth for fields the UI does not edit.
-			const json = JSON.stringify(
-				{
-					flow_version: FLOW_VERSION,
-					steps: steps.map((s) => ({
-						...s,
-						condition: pruneCondition(s.condition as Record<string, unknown>) as typeof s.condition,
-					})),
-					no_match: noMatch,
-				},
-				null,
-				2,
-			);
+			//
+			// `no_match` is omitted entirely when unset: the core type is
+			// a plain struct (serde(default)), which accepts an absent key
+			// but rejects an explicit null.
+			const doc: Record<string, unknown> = {
+				flow_version: FLOW_VERSION,
+				steps: steps.map((s) => ({
+					...s,
+					condition: pruneCondition(s.condition as Record<string, unknown>) as typeof s.condition,
+				})),
+			};
+			if (noMatch) doc.no_match = noMatch;
+			const json = JSON.stringify(doc, null, 2);
 			await api.updateFlow(id, { name, flow_json: json });
+			// Refresh the dirty-check baseline with what was just stored,
+			// or the badge would stay lit against the pre-save snapshot.
+			if (flowRow) {
+				flowRow = { ...flowRow, name, flow_json: json, updated_at: Math.floor(Date.now() / 1000) };
+			}
 			await store.refreshCore();
 			toast.success("Saved — libraries using this flow are re-evaluating");
 		} catch (e) {
@@ -107,34 +114,50 @@
 		flow.steps = arr;
 	}
 
+	// Both sides of the dirty check are normalized the same way — no-op
+	// filter rows pruned, absent keys coerced — so visible-but-inert UI
+	// state never reads as "unsaved" against an equivalent stored document.
+	const normStep = (s: FlowStep) => ({
+		condition: pruneCondition((s.condition ?? {}) as Record<string, unknown>),
+		operation: s.operation ?? {},
+	});
 	const unsaved = $derived(
 		flow !== null &&
-			JSON.stringify({ steps, noMatch, name: flowName }) !==
+			JSON.stringify({
+				steps: steps.map(normStep),
+				no_match: noMatch ?? null,
+				name: flowName,
+			}) !==
 				JSON.stringify({
-					steps: flowRow?.flow_json ? JSON.parse(flowRow.flow_json).steps : undefined,
-					noMatch: flowRow?.flow_json ? (JSON.parse(flowRow.flow_json).no_match ?? null) : null,
+					steps: (flowRow?.flow_json ? (JSON.parse(flowRow.flow_json).steps as FlowStep[]) : []).map(normStep),
+					no_match:
+						(flowRow?.flow_json ? (JSON.parse(flowRow.flow_json).no_match as NoMatchPolicy | undefined) : undefined) ?? null,
 					name: flowRow?.name ?? "",
 				}),
 	);
 	const dirty = $derived(unsaved || flowName !== (flowRow?.name ?? ""));
 
 	onMount(async () => {
-		const [sc, record] = await Promise.all([api.schemaFlow(), id ? api.getFlow(id) : Promise.resolve(null)]);
-		schema = sc;
-		if (record) {
-			flowName = record.name;
-			const parsed = JSON.parse(record.flow_json) as {
-				steps: FlowStep[];
-				no_match?: NoMatchPolicy;
-			};
-			flow = parsed;
-			noMatchEscalate = parsed.no_match?.escalate ?? false;
-			flowRow = {
-				id: record.id,
-				name: record.name,
-				flow_json: record.flow_json,
-				updated_at: record.updated_at,
-			};
+		try {
+			const [sc, record] = await Promise.all([api.schemaFlow(), id ? api.getFlow(id) : Promise.resolve(null)]);
+			schema = sc;
+			if (record) {
+				flowName = record.name;
+				const parsed = JSON.parse(record.flow_json) as {
+					steps: FlowStep[];
+					no_match?: NoMatchPolicy;
+				};
+				flow = parsed;
+				noMatchEscalate = parsed.no_match?.escalate ?? false;
+				flowRow = {
+					id: record.id,
+					name: record.name,
+					flow_json: record.flow_json,
+					updated_at: record.updated_at,
+				};
+			}
+		} catch (e) {
+			loadError = e instanceof Error ? e.message : String(e);
 		}
 	});
 
@@ -142,9 +165,11 @@
 </script>
 
 {#if id}
-	{#if !flow}
+	{#if loadError}
+		<div class="py-12 text-center text-sm text-destructive">Couldn't load this flow: {loadError}</div>
+	{:else if !flow}
 		<div class="py-12 text-center text-sm text-muted-foreground">Loading…</div>
-	{:else}
+		{:else}
 		<div class="flex flex-col gap-4">
 			<div class="flex flex-wrap items-center gap-2">
 				<Button variant="ghost" size="sm" onclick={() => navigate("/flows")}>
@@ -190,7 +215,7 @@
 
 			<div class="rounded-lg border p-3">
 				<div class="flex items-center gap-2">
-					<Switch bind:checked={noMatchEscalate} onchange={() => setNoMatchEscalate(!noMatchEscalate)} />
+					<Switch checked={noMatchEscalate} onCheckedChange={setNoMatchEscalate} />
 					<span class="text-sm font-medium">Warn on unmatched files</span>
 				</div>
 				<p class="mt-1 text-xs text-muted-foreground">

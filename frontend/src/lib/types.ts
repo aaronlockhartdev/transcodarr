@@ -156,7 +156,9 @@ export interface FlowOperation {
 }
 
 export interface FlowStep {
-	/** Stable id for UI reordering; the server assigns it when absent. */
+	/** Optional stable id, preserved verbatim from the stored JSON. The
+	 *  current editor neither reads nor writes it — array order is the
+	 *  UI order; nothing assigns one. */
 	id?: string;
 	condition: FlowCondition;
 	operation: FlowOperation;

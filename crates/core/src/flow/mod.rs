@@ -51,7 +51,8 @@ pub struct NoMatchPolicy {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FlowStep {
-    /// Stable id for UI reordering; assigned by the server when absent.
+    /// Optional stable id, preserved verbatim (nothing assigns one; the UI
+    /// orders steps by array position, not this field).
     #[serde(default)]
     pub id: String,
     /// AND of per-field constraints; absent fields are "any".
