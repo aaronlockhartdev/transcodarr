@@ -70,7 +70,8 @@ fn init_schema(conn: &Connection) -> Result<()> {
             last_probed    INTEGER,
             last_evaluated INTEGER,
             input_size     INTEGER,
-            output_size    INTEGER
+            output_size    INTEGER,
+            applied_filters TEXT
         );
 
         CREATE TABLE IF NOT EXISTS jobs (
@@ -110,6 +111,7 @@ fn init_schema(conn: &Connection) -> Result<()> {
     .context("init schema")?;
     migrate_flows(conn)?;
     migrate_job_logs(conn)?;
+    migrate_applied_filters(conn)?;
     Ok(())
 }
 
@@ -815,6 +817,115 @@ fn migrate_job_logs(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// One-shot migration for databases created before filter graphs
+/// were recorded (DESIGN §10): adds `files.applied_filters`.
+/// No backfill — an empty ledger simply means "no filter has been
+/// applied yet", which is also the fresh-database state.
+fn migrate_applied_filters(conn: &Connection) -> Result<()> {
+    let has_column: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('files') WHERE name = 'applied_filters'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .map(|n| n > 0)
+        .context("inspect files schema")?;
+    if has_column {
+        return Ok(());
+    }
+    conn.execute("ALTER TABLE files ADD COLUMN applied_filters TEXT", [])
+        .context("add files.applied_filters")?;
+    Ok(())
+}
+
+/// The filter graphs a file's *current bytes* have already had
+/// applied (DESIGN §6.5): the sample hash the file had when the last
+/// filter pass completed, plus the graphs. `None` when no filter has
+/// ever been applied.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AppliedFilters {
+    /// `files.sample_hash` at the moment the graphs were applied.
+    pub hash: i64,
+    pub graphs: Vec<String>,
+}
+
+pub fn get_applied_filters(conn: &Connection, file_id: i64) -> Result<Option<AppliedFilters>> {
+    let json: Option<String> = conn
+        .query_row(
+            "SELECT applied_filters FROM files WHERE id = ?1",
+            [file_id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten();
+    match json {
+        Some(j) => serde_json::from_str(&j)
+            .map(Some)
+            .context("parse applied_filters"),
+        None => Ok(None),
+    }
+}
+
+/// Record that these filter graphs have been applied to a file whose
+/// bytes now carry sample hash `hash` (idempotent: existing graphs
+/// are kept, the newest hash wins).
+pub fn add_applied_filters(
+    conn: &Connection,
+    file_id: i64,
+    hash: i64,
+    graphs: &[String],
+) -> Result<()> {
+    if graphs.is_empty() {
+        return Ok(());
+    }
+    let mut entry = get_applied_filters(conn, file_id)?;
+    let entry = entry.get_or_insert_with(|| AppliedFilters {
+        hash,
+        graphs: Vec::new(),
+    });
+    entry.hash = hash;
+    for g in graphs {
+        if !entry.graphs.contains(g) {
+            entry.graphs.push(g.clone());
+        }
+    }
+    let json = serde_json::to_string(&entry).context("serialize applied_filters")?;
+    conn.execute(
+        "UPDATE files SET applied_filters = ?2 WHERE id = ?1",
+        params![file_id, json],
+    )
+    .context("record applied filters")?;
+    Ok(())
+}
+
+/// Replace (or clear) a file's applied-filter ledger. `None` clears
+/// it — used when the file's bytes changed without a filter job
+/// (the user replaced the file).
+pub fn set_applied_filters(
+    conn: &Connection,
+    file_id: i64,
+    entry: Option<&AppliedFilters>,
+) -> Result<()> {
+    match entry {
+        None => {
+            conn.execute(
+                "UPDATE files SET applied_filters = NULL WHERE id = ?1",
+                [file_id],
+            )
+            .context("clear applied filters")?;
+        }
+        Some(e) => {
+            let json = serde_json::to_string(e).context("serialize applied_filters")?;
+            conn.execute(
+                "UPDATE files SET applied_filters = ?2 WHERE id = ?1",
+                params![file_id, json],
+            )
+            .context("set applied filters")?;
+        }
+    }
+    Ok(())
+}
+
 pub fn set_job_log_path(conn: &Connection, id: i64, path: &str) -> Result<()> {
     conn.execute(
         "UPDATE jobs SET log_path = ?2 WHERE id = ?1",
@@ -1289,6 +1400,118 @@ mod tests {
             > 0;
         assert!(has2);
         drop(c2);
+        let _ = std::fs::remove_dir_all(&dir2);
+    }
+
+    #[test]
+    fn applied_filters_round_trip_and_column_migration() {
+        // Fresh databases already carry the column.
+        let (dir, conn) = temp_db("applied");
+        let has: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('files') WHERE name = 'applied_filters'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+            > 0;
+        assert!(has);
+
+        // Round trip: add is idempotent, get returns the ledger, set
+        // replaces, and an empty set clears to NULL.
+        let lid = insert_library(&conn, &lib_row()).unwrap();
+        let fid = upsert_file(
+            &conn,
+            &FileRow {
+                id: 0,
+                library_id: lid,
+                path: "/m/a.mkv".into(),
+                dev: 1,
+                inode: 2,
+                size: 3,
+                mtime: 4,
+                sample_hash: None,
+                facts_json: None,
+                status: "unscanned".into(),
+                last_probed: None,
+                last_evaluated: None,
+                input_size: None,
+                output_size: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(get_applied_filters(&conn, fid).unwrap(), None);
+        add_applied_filters(&conn, fid, 111, &["crop=1:1".into()]).unwrap();
+        add_applied_filters(&conn, fid, 222, &["volume=2".into(), "crop=1:1".into()]).unwrap();
+        let got = get_applied_filters(&conn, fid).unwrap().unwrap();
+        assert_eq!(got.hash, 222); // the newest application wins
+        assert_eq!(
+            got.graphs,
+            vec!["crop=1:1".to_string(), "volume=2".to_string()]
+        );
+        set_applied_filters(
+            &conn,
+            fid,
+            Some(&AppliedFilters {
+                hash: 333,
+                graphs: vec!["loudnorm=I=16".into()],
+            }),
+        )
+        .unwrap();
+        let got = get_applied_filters(&conn, fid).unwrap().unwrap();
+        assert_eq!(got.hash, 333);
+        assert_eq!(got.graphs, vec!["loudnorm=I=16".to_string()]);
+        set_applied_filters(&conn, fid, None).unwrap();
+        assert_eq!(get_applied_filters(&conn, fid).unwrap(), None);
+
+        // A pre-ledger database (files table without the column) gains
+        // it on open, with no data expectations.
+        let dir2 = std::env::temp_dir().join(format!(
+            "transcodarr-db-test-applied2-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir2);
+        std::fs::create_dir_all(&dir2).unwrap();
+        {
+            let c = rusqlite::Connection::open(dir2.join("transcodarr.db")).unwrap();
+            c.execute_batch(
+                "CREATE TABLE files (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    library_id INTEGER NOT NULL,
+                    path TEXT NOT NULL UNIQUE,
+                    dev INTEGER NOT NULL,
+                    inode INTEGER NOT NULL,
+                    size INTEGER NOT NULL DEFAULT 0,
+                    mtime INTEGER NOT NULL DEFAULT 0,
+                    sample_hash INTEGER,
+                    facts_json TEXT,
+                    status TEXT NOT NULL DEFAULT 'unscanned',
+                    last_probed INTEGER,
+                    last_evaluated INTEGER,
+                    input_size INTEGER,
+                    output_size INTEGER);
+                INSERT INTO files (library_id, path, dev, inode) VALUES (1, '/m/b.mkv', 1, 2);",
+            )
+            .unwrap();
+        }
+        let c2 = open(&dir2).unwrap();
+        let has2: bool = c2
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('files') WHERE name = 'applied_filters'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+            > 0;
+        assert!(has2);
+        // The pre-existing row reads as "no filters applied".
+        let gid: i64 = c2
+            .query_row("SELECT id FROM files WHERE path = '/m/b.mkv'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(get_applied_filters(&c2, gid).unwrap(), None);
+        let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&dir2);
     }
 }

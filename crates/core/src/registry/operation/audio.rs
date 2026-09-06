@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::facts::FileFacts;
-use crate::plan::AudioPlan;
+use crate::plan::{AudioPlan, FilterGraph};
 use crate::registry::operation::parse;
 use crate::registry::{OperationSection, SectionPlan};
 
@@ -24,7 +24,8 @@ pub use crate::plan::{AudioTargetCodec as AudioCodec, AudioTrackPlan};
 ///   "rules": [{
 ///     "match": { "codecs": ["dts", "dts_ma", "truehd"] },
 ///     "action": { "codec": "eac3", "sample_rate": 48000, "channels": 6 }
-///   }]
+///   }],
+///   "audio_filter": "volume=2"
 /// } }
 /// ```
 ///
@@ -157,6 +158,11 @@ pub struct AudioOp {
     pub default: AudioPolicy,
     #[serde(default)]
     pub rules: Vec<AudioRule>,
+    /// User filter graph, applied to every re-encoded track (DESIGN
+    /// §6.5). Inert (and omitted from the plan) when no track is
+    /// re-encoded — copied tracks are never filtered.
+    #[serde(default, skip_serializing_if = "FilterGraph::is_empty")]
+    pub audio_filter: FilterGraph,
 }
 
 /// The `audio` section entry.
@@ -217,7 +223,10 @@ fn plan_tracks(op: &AudioOp, facts: &FileFacts) -> Vec<AudioTrackPlan> {
                     AudioCodec::Ac3 => track.codec.eq_ignore_ascii_case("ac3"),
                     AudioCodec::Aac => track.codec.eq_ignore_ascii_case("aac"),
                 };
+                // A non-empty filter makes even a same-codec
+                // re-encode a real change (decode → filter → encode).
                 if same_codec
+                    && op.audio_filter.is_empty()
                     && sample_rate.is_none_or(|r| track.sample_rate == Some(r))
                     && channels.is_none_or(|c| track.channels == Some(c))
                 {
@@ -248,10 +257,24 @@ impl OperationSection for Audio {
     fn plan(&self, params: &Value, facts: &FileFacts) -> crate::error::Result<SectionPlan> {
         let op: AudioOp = parse(self.key(), params)?;
         let plans = plan_tracks(&op, facts);
-        if plans.iter().all(|p| matches!(p, AudioTrackPlan::Copy)) {
+        // The filter can only attach to re-encoded tracks; with none,
+        // it is inert and the section stays identity.
+        let filter = if op.audio_filter.is_empty()
+            || !plans
+                .iter()
+                .any(|p| matches!(p, AudioTrackPlan::Reencode { .. }))
+        {
+            None
+        } else {
+            Some(op.audio_filter.clone())
+        };
+        if filter.is_none() && plans.iter().all(|p| matches!(p, AudioTrackPlan::Copy)) {
             return Ok(SectionPlan::Identity);
         }
-        Ok(SectionPlan::Audio(AudioPlan { per_track: plans }))
+        Ok(SectionPlan::Audio(AudioPlan {
+            per_track: plans,
+            filter,
+        }))
     }
 
     fn ui_schema(&self) -> Value {
@@ -272,7 +295,8 @@ impl OperationSection for Audio {
                         "action": action_policy
                     },
                     "hint": "The first matching rule wins. Re-encode applies to all matching tracks."
-                }
+                },
+                "audio_filter": { "kind": "text", "label": "Audio filter", "hint": "An ffmpeg filter graph applied to every re-encoded track (e.g. volume=2,loudnorm). Tracks that are copied are never filtered." }
             }
         })
     }
@@ -385,7 +409,7 @@ mod tests {
                 &f,
             )
             .unwrap();
-        let AudioPlan { per_track } = match p {
+        let AudioPlan { per_track, .. } = match p {
             SectionPlan::Audio(p) => p,
             other => panic!("expected audio plan, got {other:?}"),
         };
@@ -414,7 +438,7 @@ mod tests {
         let p = a
             .plan(&json!({ "default": { "codec": "eac3" } }), &f)
             .unwrap();
-        let AudioPlan { per_track } = match p {
+        let AudioPlan { per_track, .. } = match p {
             SectionPlan::Audio(p) => p,
             other => panic!("expected audio plan, got {other:?}"),
         };
@@ -475,7 +499,7 @@ mod tests {
                 &f,
             )
             .unwrap();
-        let AudioPlan { per_track } = match p {
+        let AudioPlan { per_track, .. } = match p {
             SectionPlan::Audio(p) => p,
             other => panic!("expected audio plan, got {other:?}"),
         };
@@ -500,5 +524,85 @@ mod tests {
         ));
         let bad = serde_json::from_str::<AudioPolicy>("\"keep\"");
         assert!(bad.is_err());
+    }
+
+    #[test]
+    fn filter_attaches_to_reencoded_tracks_only() {
+        let a = Audio;
+        let f = facts(vec![track("eac3", false), track("dts", false)]);
+        let p = a
+            .plan(
+                &json!({
+                    "rules": [{ "match": { "codecs": ["dts"] }, "action": { "codec": "eac3" } }],
+                    "audio_filter": "volume=2"
+                }),
+                &f,
+            )
+            .unwrap();
+        let AudioPlan { per_track, filter } = match p {
+            SectionPlan::Audio(p) => p,
+            other => panic!("expected audio plan, got {other:?}"),
+        };
+        assert!(matches!(per_track[0], AudioTrackPlan::Copy));
+        assert!(matches!(per_track[1], AudioTrackPlan::Reencode { .. }));
+        assert_eq!(filter, Some(FilterGraph("volume=2".into())));
+    }
+
+    #[test]
+    fn filter_without_reencode_is_inert() {
+        let a = Audio;
+        // Everything copied: the graph has nothing to attach to and the
+        // section must stay identity (no spurious jobs).
+        let f = facts(vec![track("dts", false)]);
+        let p = a
+            .plan(
+                &json!({ "default": "copy", "audio_filter": "volume=2" }),
+                &f,
+            )
+            .unwrap();
+        assert!(matches!(p, SectionPlan::Identity));
+    }
+
+    #[test]
+    fn filter_blocks_same_codec_downgrade() {
+        let a = Audio;
+        // Same codec with auto rate/channels would normally downgrade
+        // to Copy; the filter keeps it a re-encode (decode → filter →
+        // encode at the source codec).
+        let f = facts(vec![AudioTrack {
+            codec: "eac3".into(),
+            channels: Some(6),
+            sample_rate: Some(48_000),
+            atmos: false,
+            ..Default::default()
+        }]);
+        let p = a
+            .plan(
+                &json!({ "default": { "codec": "eac3" }, "audio_filter": "volume=2" }),
+                &f,
+            )
+            .unwrap();
+        let AudioPlan { per_track, filter } = match p {
+            SectionPlan::Audio(p) => p,
+            other => panic!("expected audio plan, got {other:?}"),
+        };
+        assert!(matches!(
+            per_track[0],
+            AudioTrackPlan::Reencode {
+                codec: AudioCodec::Eac3,
+                sample_rate: Some(48_000),
+                channels: Some(6),
+                ..
+            }
+        ));
+        assert_eq!(filter, Some(FilterGraph("volume=2".into())));
+    }
+
+    #[test]
+    fn audio_plan_serde_tolerates_legacy_rows() {
+        // Pre-filter job rows have no `filter` key.
+        let p: AudioPlan =
+            serde_json::from_str(r#"{ "per_track": [ { "Copy": null } ] }"#).unwrap();
+        assert!(p.filter.is_none());
     }
 }

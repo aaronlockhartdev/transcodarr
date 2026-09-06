@@ -201,6 +201,19 @@ pub fn scan_library(
         }
 
         let hash = sample_hash(&path).unwrap_or(0);
+        // New bytes (changed sample hash): a ledger whose recorded
+        // hash equals the new one was written by a filter job that
+        // just ran (keep it); any other mismatch is an external
+        // change (the user replaced the file) — forget it.
+        if let Some(e) = &existing {
+            if e.sample_hash != Some(hash as i64) {
+                if let Ok(Some(l)) = db.with(|c| db::get_applied_filters(c, e.id)) {
+                    if l.hash != hash as i64 {
+                        let _ = db.with(|c| db::set_applied_filters(c, e.id, None));
+                    }
+                }
+            }
+        }
         let old_status = existing.as_ref().map(|e| e.status.clone());
         let mut row = db::FileRow {
             id: 0,
@@ -276,11 +289,29 @@ pub fn scan_library(
                 "compliant"
             }
             Ok(Evaluation::Plan(plan)) => {
+                // One-shot filter delta (DESIGN §6.5): a plan that
+                // exists only because of a filter graph, on a file
+                // that already carries exactly those graphs, is at
+                // its target state — don't re-queue it.
+                let graphs = plan.filter_graphs();
+                let filter_only = !graphs.is_empty()
+                    && evaluate::evaluate(registry, &flow.with_filters_cleared(), &facts)
+                        .is_ok_and(|e| matches!(e, Evaluation::Identity));
+                let need_job = if filter_only {
+                    let applied = db
+                        .with(|c| db::get_applied_filters(c, file_id))
+                        .unwrap_or_default()
+                        .map(|l| l.graphs)
+                        .unwrap_or_default();
+                    !graphs.iter().all(|g| applied.iter().any(|k| k == g))
+                } else {
+                    true
+                };
                 // Enqueue at most one live job per file. A direct
                 // query on the jobs table — correct for any history
                 // depth, unlike a fixed row window.
                 let has_live = db.with(|c| db::has_live_job(c, file_id))?;
-                if !has_live {
+                if need_job && !has_live {
                     // GPU preference is resolved at dispatch
                     // (run_loop); the job stays device-agnostic here
                     // so CPU can always take it.
@@ -305,7 +336,7 @@ pub fn scan_library(
                     events.emit(ServerEvent::JobChanged { job_id });
                     queued += 1;
                 }
-                "queued"
+                if need_job { "queued" } else { "compliant" }
             }
             Ok(Evaluation::NoMatch) => {
                 // Never silent (DESIGN §13.6). A queued job from an
@@ -386,7 +417,23 @@ fn reevaluate_cached(
         Ok(Evaluation::Identity) => (Some("compliant"), false, true),
         Ok(Evaluation::NoMatch) => (Some("unmatched"), false, true),
         Ok(Evaluation::Plan(plan)) => {
-            if db.with(|c| db::has_live_job(c, file.id)).unwrap_or(true) {
+            // One-shot filter delta (DESIGN §6.5): the file's bytes
+            // are unchanged here, so the applied-filter ledger is
+            // still meaningful — if it already carries exactly the
+            // graphs this plan would apply, the file is compliant.
+            let graphs = plan.filter_graphs();
+            let filter_only = !graphs.is_empty()
+                && evaluate::evaluate(registry, &flow.with_filters_cleared(), &facts)
+                    .is_ok_and(|e| matches!(e, Evaluation::Identity));
+            let already_filtered = filter_only
+                && db
+                    .with(|c| db::get_applied_filters(c, file.id))
+                    .unwrap_or_default()
+                    .map(|l| l.graphs.iter().any(|k| graphs.iter().all(|g| k == g)))
+                    .unwrap_or(false);
+            if already_filtered {
+                (Some("compliant"), false, true)
+            } else if db.with(|c| db::has_live_job(c, file.id)).unwrap_or(true) {
                 // A live job (possibly from an older flow) already
                 // covers this file — let it run.
                 (Some("queued"), false, false)
@@ -1028,9 +1075,21 @@ pub fn run_job(state: &AppState, job: &db::JobRow, device: &Device) -> Result<()
             return Err(e).context("parse library flow");
         }
     };
-    match evaluate::evaluate(registry, &flow, &new_facts) {
+    // Re-evaluate with the user's filter graphs cleared (DESIGN
+    // §6.5): filters are one-shot transformations that facts cannot
+    // express, so evaluating the raw flow would loop a filter-only
+    // plan forever.
+    match evaluate::evaluate(registry, &flow.with_filters_cleared(), &new_facts) {
         Ok(Evaluation::Identity) => {
             let _ = finish(db, job, "completed", None, None, data_dir, events);
+            // Record the filter graphs this job applied, so future
+            // scans recognize the file as already filtered.
+            let graphs = serde_json::from_str::<FfmpegPlan>(&job.plan_json)
+                .ok()
+                .map(|p| p.filter_graphs())
+                .unwrap_or_default();
+            let new_hash = sample_hash(&final_path).unwrap_or(0) as i64;
+            let _ = db.with(|c| db::add_applied_filters(c, job.file_id, new_hash, &graphs));
             let _ = db.with(|c| db::set_file_status(c, job.file_id, "completed"));
         }
         Ok(Evaluation::Plan(_)) => {

@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::device::{Device, hwaccel_for};
 
@@ -102,45 +102,103 @@ impl AudioTargetCodec {
     }
 }
 
+/// A user-supplied ffmpeg filter graph (`-vf`/`-af`, DESIGN §6.5) —
+/// the escape hatch for advanced per-stream operations (crop, pad,
+/// denoise, loudness, …) that are not individually modeled.
+///
+/// Wire form is a plain string, validated at parse time so a bad graph
+/// fails flow *save*, not the encode. A graph cannot add ffmpeg
+/// options: its content is parsed by ffmpeg's filter-graph parser,
+/// never the command-line parser, so the worst it can do is fail the
+/// encode (the job fails; the original file is untouched).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct FilterGraph(pub String);
+
+/// Maximum accepted graph length — well above any real use, well
+/// below any abuse.
+const FILTER_GRAPH_MAX: usize = 4096;
+
+impl FilterGraph {
+    /// No filter (the default for every section).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl Serialize for FilterGraph {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for FilterGraph {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let t = String::deserialize(d)?.trim().to_owned();
+        if t.len() > FILTER_GRAPH_MAX {
+            return Err(serde::de::Error::custom(format!(
+                "filter graph exceeds {FILTER_GRAPH_MAX} characters"
+            )));
+        }
+        if t.chars().any(|c| c.is_control()) {
+            return Err(serde::de::Error::custom(
+                "filter graph must not contain control characters",
+            ));
+        }
+        Ok(Self(t))
+    }
+}
+
 /// The video-domain decision for one file.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum VideoPlan {
     /// Stream-copy the existing video (the default for everything).
     Copy,
-    /// Re-encode with an explicit target.
-    Encode {
-        /// Target codec (drives encoder selection on the device).
-        codec: VideoTargetCodec,
-        /// Encoder to use; re-resolved from the device at dispatch
-        /// (a `h264_nvenc` on a GPU, `libx264` on CPU).
-        encoder: String,
-        /// Target profile (resolved from `auto` at planning time).
-        profile: String,
-        /// Target level, e.g. `"5.1"` (resolved from `auto`).
-        level: String,
-        /// Output video bitrate in bits/s (bitrate/fixed modes).
-        bitrate_bps: Option<u64>,
-        /// Peak limiter (1.15× bitrate).
-        maxrate_bps: Option<u64>,
-        /// VBV buffer (2× bitrate).
-        bufsize_bps: Option<u64>,
-        /// CRF (CRF mode only).
-        crf: Option<u32>,
-        /// Output pixel format (matches source bit depth).
-        pix_fmt: String,
-        /// `-vf` chain: downscale filter, HDR→SDR conversion, …
-        filters: Vec<String>,
-        /// Output resolution (never upscaled).
-        target_width: u32,
-        target_height: u32,
-    },
+    /// Re-encode with an explicit target (boxed: the payload is
+    /// large, `Copy` is not).
+    Encode(Box<VideoEncode>),
+}
+
+/// The re-encode payload of [`VideoPlan::Encode`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VideoEncode {
+    /// Target codec (drives encoder selection on the device).
+    pub codec: VideoTargetCodec,
+    /// Encoder to use; re-resolved from the device at dispatch
+    /// (a `h264_nvenc` on a GPU, `libx264` on CPU).
+    pub encoder: String,
+    /// Target profile (resolved from `auto` at planning time).
+    pub profile: String,
+    /// Target level, e.g. `"5.1"` (resolved from `auto`).
+    pub level: String,
+    /// Output video bitrate in bits/s (bitrate/fixed modes).
+    pub bitrate_bps: Option<u64>,
+    /// Peak limiter (1.15× bitrate).
+    pub maxrate_bps: Option<u64>,
+    /// VBV buffer (2× bitrate).
+    pub bufsize_bps: Option<u64>,
+    /// CRF (CRF mode only).
+    pub crf: Option<u32>,
+    /// Output pixel format (matches source bit depth).
+    pub pix_fmt: String,
+    /// `-vf` chain: downscale filter, HDR→SDR conversion, and
+    /// (last) the user's filter graph, if any.
+    pub filters: Vec<String>,
+    /// The user's filter graph (DESIGN §6.5), kept separately from
+    /// `filters` so the job lifecycle can record which graphs have
+    /// been applied to a file.
+    #[serde(default)]
+    pub filter: Option<FilterGraph>,
+    /// Output resolution (never upscaled).
+    pub target_width: u32,
+    pub target_height: u32,
 }
 
 impl VideoPlan {
     /// Whether this changes the video stream.
     #[must_use]
     pub fn changes_stream(&self) -> bool {
-        matches!(self, Self::Encode { .. })
+        matches!(self, Self::Encode(_))
     }
 }
 
@@ -176,6 +234,12 @@ pub struct AudioPlan {
     /// Per-track decisions, index-aligned with the source's audio
     /// tracks.
     pub per_track: Vec<AudioTrackPlan>,
+    /// The user's filter graph (DESIGN §6.5), applied to every
+    /// re-encoded track via `-filter:a:N`; `None` when empty or when
+    /// no track is re-encoded (the graph would have nothing to attach
+    /// to, and the section stays identity).
+    #[serde(default)]
+    pub filter: Option<FilterGraph>,
 }
 
 impl AudioPlan {
@@ -255,6 +319,22 @@ impl FfmpegPlan {
                 .as_ref()
                 .is_some_and(|s| s.changes_anything())
     }
+
+    /// The user filter graphs this plan applies (DESIGN §6.5), in
+    /// video-then-audio order. Empty when the plan carries none.
+    #[must_use]
+    pub fn filter_graphs(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Some(VideoPlan::Encode(e)) = &self.video {
+            out.extend(e.filter.iter().map(|f| f.0.clone()));
+        }
+        if let Some(a) = &self.audio {
+            if let Some(f) = &a.filter {
+                out.push(f.0.clone());
+            }
+        }
+        out
+    }
 }
 
 /// The ffmpeg invocation for a plan on a specific device
@@ -283,7 +363,8 @@ pub fn to_argv(plan: &FfmpegPlan, device: &Device, src: &Path, dst: &Path) -> Ve
 
     // `-hwaccel` is an *input* option: it must come BEFORE `-i`, and
     // only when a GPU device supplies the video encoder.
-    if let Some(VideoPlan::Encode { codec, .. }) = &plan.video {
+    if let Some(VideoPlan::Encode(enc)) = &plan.video {
+        let codec = &enc.codec;
         if device.kind == crate::device::DeviceKind::Gpu {
             if let Some(enc) = device.encoders.iter().find(|e| e.target == *codec) {
                 if let Some(h) = hwaccel_for(&enc.name).1 {
@@ -308,19 +389,20 @@ pub fn to_argv(plan: &FfmpegPlan, device: &Device, src: &Path, dst: &Path) -> Ve
             a.push("-c:v".into());
             a.push("copy".into());
         }
-        Some(VideoPlan::Encode {
-            codec,
-            encoder,
-            profile,
-            level,
-            bitrate_bps,
-            maxrate_bps,
-            bufsize_bps,
-            crf,
-            pix_fmt,
-            filters,
-            ..
-        }) => {
+        Some(VideoPlan::Encode(e)) => {
+            let VideoEncode {
+                codec,
+                encoder,
+                profile,
+                level,
+                bitrate_bps,
+                maxrate_bps,
+                bufsize_bps,
+                crf,
+                pix_fmt,
+                filters,
+                ..
+            } = &**e;
             a.push("-map".into());
             a.push("0:v:0".into());
             // Device encoder resolution.
@@ -368,10 +450,15 @@ pub fn to_argv(plan: &FfmpegPlan, device: &Device, src: &Path, dst: &Path) -> Ve
 
     // ── Audio (per-track) ─────────────────────────────────────────
     if let Some(audio) = &plan.audio {
+        // Output audio stream index (0-based, in `-map` order) — the
+        // per-stream filter specifier `-filter:a:N` counts output
+        // streams, not source tracks.
+        let mut out_idx = 0u32;
         for (track, decision) in audio.per_track.iter().enumerate() {
             match decision {
                 AudioTrackPlan::Drop => {}
                 AudioTrackPlan::Copy => {
+                    out_idx += 1;
                     a.push("-map".into());
                     a.push(format!("0:a:{track}"));
                     a.push("-c:a".into());
@@ -383,10 +470,15 @@ pub fn to_argv(plan: &FfmpegPlan, device: &Device, src: &Path, dst: &Path) -> Ve
                     channels,
                     bitrate_bps,
                 } => {
+                    out_idx += 1;
                     a.push("-map".into());
                     a.push(format!("0:a:{track}"));
                     a.push("-c:a".into());
                     a.push(codec.encoder().into());
+                    if let Some(f) = &audio.filter {
+                        a.push(format!("-filter:a:{out_idx}"));
+                        a.push(f.0.clone());
+                    }
                     if let Some(b) = bitrate_bps {
                         a.push("-b:a".into());
                         a.push(b.to_string());
@@ -462,7 +554,7 @@ mod tests {
     fn plan() -> FfmpegPlan {
         FfmpegPlan {
             container: "mp4".into(),
-            video: Some(VideoPlan::Encode {
+            video: Some(VideoPlan::Encode(Box::new(VideoEncode {
                 codec: VideoTargetCodec::H264,
                 encoder: "libx264".into(),
                 profile: "high".into(),
@@ -473,9 +565,10 @@ mod tests {
                 crf: None,
                 pix_fmt: "yuv420p".into(),
                 filters: vec!["scale=1920:1080:flags=lanczos".into()],
+                filter: None,
                 target_width: 1920,
                 target_height: 1080,
-            }),
+            }))),
             audio: Some(AudioPlan {
                 per_track: vec![
                     AudioTrackPlan::Copy,
@@ -487,6 +580,7 @@ mod tests {
                     },
                     AudioTrackPlan::Drop,
                 ],
+                filter: None,
             }),
             subtitles: Some(SubtitlePlan {
                 policy: SubtitlePolicy::KeepAll,

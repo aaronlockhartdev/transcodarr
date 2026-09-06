@@ -12,6 +12,7 @@ pub use condition::Condition;
 pub use operation::Operation;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// A library's format policy (DESIGN §2, §5).
 ///
@@ -42,6 +43,43 @@ pub struct NoMatchPolicy {
     /// Surface unmatched files as warnings in the UI.
     #[serde(default)]
     pub escalate: bool,
+}
+
+impl Flow {
+    /// A copy of this flow with every user filter graph cleared
+    /// (DESIGN §13.6 / §6.5).
+    ///
+    /// The post-job idempotency gate re-evaluates the *new* file:
+    /// filters are one-shot transformations that facts cannot reflect
+    /// (a filtered H.264 is still H.264), so without this they would
+    /// make every filtered job fail `non_idempotent` and every scan
+    /// re-queue the file forever.
+    #[must_use]
+    pub fn with_filters_cleared(&self) -> Self {
+        let mut copy = self.clone();
+        for step in &mut copy.steps {
+            clear_filters_in(&mut step.operation);
+        }
+        copy
+    }
+}
+
+/// Remove `video_filter`/`audio_filter` keys from the video/audio
+/// section parameters of one operation (both the bare form and the
+/// lenient `{ "video": { … } }` envelope).
+fn clear_filters_in(op: &mut Operation) {
+    for key in ["video", "audio"] {
+        if let Some(v) = op.sections.get_mut(key) {
+            if let Some(m) = v.as_object_mut() {
+                m.remove("video_filter");
+                m.remove("audio_filter");
+                if let Some(inner) = m.get_mut(key).and_then(Value::as_object_mut) {
+                    inner.remove("video_filter");
+                    inner.remove("audio_filter");
+                }
+            }
+        }
+    }
 }
 
 /// One step: `condition → operation` (DESIGN §2).
@@ -88,5 +126,43 @@ mod tests {
         assert_eq!(g.steps[0].name, None);
         let v = serde_json::to_value(&g).unwrap();
         assert!(v["steps"][0].get("name").is_none());
+    }
+
+    #[test]
+    fn with_filters_cleared_strips_graphs_from_all_sections() {
+        let doc = r#"{"flow_version":1,"steps":[
+            {"condition":{"container":{"in":["mkv"]}},
+             "operation":{"video":{"codec":"h264","video_filter":"crop=10:10"},"audio":{"default":"copy","audio_filter":"volume=2"}}},
+            {"condition":{},
+             "operation":{"video":{"video":{"codec":"hevc","video_filter":"denoise"}},"audio":{"default":"copy"}}}
+        ]}"#;
+        let f: Flow = serde_json::from_str(doc).unwrap();
+        let c = f.with_filters_cleared();
+        // Bare form.
+        let v1 = c.steps[0].operation.sections["video"].clone();
+        assert!(v1.get("video_filter").is_none());
+        let a1 = c.steps[0].operation.sections["audio"].clone();
+        assert!(a1.get("audio_filter").is_none());
+        // Lenient envelope form.
+        let v2 = c.steps[1].operation.sections["video"].clone();
+        assert!(v2["video"].get("video_filter").is_none());
+        // Everything else is untouched.
+        assert_eq!(v1["codec"], "h264");
+        assert_eq!(v2["video"]["codec"], "hevc");
+        assert_eq!(
+            c.steps[0]
+                .condition
+                .fields
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec!["container".to_string()]
+        );
+        // The original is not modified.
+        assert!(
+            f.steps[0].operation.sections["video"]
+                .get("video_filter")
+                .is_some()
+        );
     }
 }

@@ -38,7 +38,7 @@ pub fn resolve(
             // Video — judged by the planned (target) codec: an encode
             // to h264/hevc is MP4-safe even when the source codec isn't.
             let video_codec = match video.as_ref() {
-                Some(VideoPlan::Encode { codec, .. }) => Some(codec.name().to_ascii_lowercase()),
+                Some(VideoPlan::Encode(e)) => Some(e.codec.name().to_ascii_lowercase()),
                 _ => facts.video.as_ref().map(|v| v.codec.to_ascii_lowercase()),
             };
             if let Some(vc) = video_codec {
@@ -138,7 +138,7 @@ impl OperationSection for Container {
 mod tests {
     use super::*;
     use crate::facts::{AudioTrack, SubtitleTrack};
-    use crate::plan::{AudioTargetCodec, VideoTargetCodec};
+    use crate::plan::{AudioTargetCodec, VideoEncode, VideoTargetCodec};
 
     fn facts(container: &str, video: &str, audio: &[&str], subs: &[&str]) -> FileFacts {
         FileFacts {
@@ -201,6 +201,7 @@ mod tests {
                 channels: None,
                 bitrate_bps: None,
             }],
+            filter: None,
         });
         assert_eq!(resolve(ContainerChoice::Smart, &f, &None, &audio), "mp4");
     }
@@ -218,6 +219,7 @@ mod tests {
                 },
                 AudioTrackPlan::Drop,
             ],
+            filter: None,
         });
         assert_eq!(resolve(ContainerChoice::Smart, &f, &None, &audio), "mp4");
     }
@@ -227,7 +229,7 @@ mod tests {
         // vp9 source → h264 target: smart is MP4 even though the
         // source codec isn't MP4-safe.
         let f = facts("mkv", "vp9", &["aac"], &[]);
-        let video = Some(VideoPlan::Encode {
+        let video = Some(VideoPlan::Encode(Box::new(VideoEncode {
             codec: VideoTargetCodec::H264,
             encoder: "libx264".into(),
             profile: "high".into(),
@@ -238,9 +240,10 @@ mod tests {
             crf: None,
             pix_fmt: "yuv420p".into(),
             filters: vec![],
+            filter: None,
             target_width: 3840,
             target_height: 2160,
-        });
+        })));
         assert_eq!(resolve(ContainerChoice::Smart, &f, &video, &None), "mp4");
     }
 

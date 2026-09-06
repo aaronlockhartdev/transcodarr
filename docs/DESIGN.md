@@ -135,6 +135,7 @@ A step's operation is the **complete** plan for a matched file. Each section is 
 | Device | `software` or a specific detected GPU (populated from startup encoder probe; unavailable encoders shown disabled with a hint) |
 | Downscale to | optional target resolution (e.g. 1920×1080). **Never upscale.** |
 | HDR → SDR | explicit on/off flag (default off; destructive to look, never implicit) |
+| Filter graph | optional ffmpeg `-vf` expression the user types in (e.g. `crop=…`, `denoise`); empty = none — §6.5 |
 
 One ffmpeg invocation per job (decode → filter → encode → mux). The exact filter chain (e.g. the zscale/tonemap sequence for HDR→SDR) is an implementation detail. Two-pass encoding is parked.
 
@@ -167,6 +168,7 @@ ffmpeg -hwaccel cuda -i "In.Movie.2024.2160p.HEVC.mkv" \
 - Optional **per-track rules** matched by codec and/or language (e.g. "all DTS/TrueHD → EAC3 5.1").
 - **Atmos (EAC3-JOC) is copied unless an explicit rule re-encodes it** — never auto-downmixed.
 - Re-encoding, when invoked, applies to **all** matching tracks (deterministic target state, not "primary only").
+- **Filter graph**: optional ffmpeg `-af` expression (e.g. `loudnorm=…`) applied per retained track; empty = none — §6.5.
 
 ### 6.3 Subtitle section (absent ⇒ keep all, copy)
 
@@ -175,6 +177,12 @@ ffmpeg -hwaccel cuda -i "In.Movie.2024.2160p.HEVC.mkv" \
 ### 6.4 Container section (`smart` is a resolution input; an explicit choice is an action)
 
 `smart` (default) / `mp4` / `mkv`. `smart` resolves per §13.7 (MP4 if every planned stream is MP4-safe, else MKV). An explicit `mp4`/`mkv` that differs from the source container turns an otherwise-stream-identical step into a **pure remux** (all streams copied, container changed) — this is how "remux all MKV to MP4" is expressed without enumerating source codecs. A stream-identical step with `smart` **never** remuxes on its own (otherwise enabling any video section would silently remux every MKV in the library). The editor exposes **this section only** as the container control; the `container` field inside the video section remains a parseable wire form for older flows (hidden in the editor, the top-level choice wins in resolution).
+
+### 6.5 Filter graphs (user expressions; one-shot semantics)
+
+A filter graph is an ffmpeg `-vf`/`-af` expression the user types into the video or audio section — e.g. `crop=1920:800:0:0`, `denoise`, `loudnorm=I=-16:TP=-1.5`, `volume=2`. Empty means no filter. The planner places the expression at a fixed position (video filters before the generated scale/HDR chain, so user intent comes first; audio filters after the codec decision) and **validates it twice**: at flow-save (parse check) and at job start (executed against the installed ffmpeg — a failing job with a clear message beats a silent no-op).
+
+Filter graphs are **one-shot transformations**: the output's new facts do not record that a filter was applied (a cropped H.264 is still H.264). So the post-job idempotency gate (§3.3) re-evaluates the flow *with the filter graphs cleared*, and each file records which graphs it has already had applied (`files.applied_filters`). A rescan re-queues a filter plan only when the flow's graphs differ from the recorded ones, and a changed sample hash (new bytes) clears the ledger.
 
 ---
 
@@ -248,7 +256,7 @@ Devices & per-device caps · system ceiling · default scan schedule · retentio
 |---|---|
 | `flows` | id, name (unique), flow_json (versioned), created_at, updated_at — **first-class and library-independent; any number of libraries can use one** |
 | `libraries` | id, name, path, lifecycle_mode, flow_id (→ flows, nullable — NULL = no flow), auto_queue, retention_days, auto_delete, scan_schedule, watchable |
-| `files` | id, library_id, path, dev, inode, size, mtime, sample_hash, facts_json, status (`compliant / needs_work / unmatched / queued / running / failed / quarantined`), last_probed, last_evaluated, input_size, output_size |
+| `files` | id, library_id, path, dev, inode, size, mtime, sample_hash, facts_json, status (`compliant / needs_work / unmatched / queued / running / failed / quarantined`), last_probed, last_evaluated, input_size, output_size, **applied_filters** (JSON list of filter graphs already applied to this file's current bytes — §6.5) |
 | `jobs` | id, file_id, library_id, flow_version, plan_json, state, device_id, claimed_by, lease_expires, started, ended, exit_kind, log_path (the on-disk ffmpeg stderr file, retained for `tail -f`), **log_zstd** (the canonical copy — zstd-compressed on job end, served decompressed by the log endpoint; pre-migration rows fall back to the file), quarantine_path — **retained: this table *is* the per-file job history** |
 | `devices` | id, kind (`cpu / gpu`), name, encoders_json, max_concurrent |
 | `settings` | key, value |
@@ -293,3 +301,4 @@ Made during the design session; each is a deliberate default, not a constraint:
 11. **Legacy wire forms are accepted at parse time and upgraded in place** (no flow-migration endpoint in v1): a device object without `kind` (`{"id": "…"}`) ⇒ GPU; `profile`/`level: null` ⇒ auto; the audio policy string `"re-encode"` ⇒ re-encode to the default target, source rate/channels kept.
 12. **Live updates ride one SSE stream per client, not WebSockets** (§9.0) — the event flow is strictly one-way (client actions are ordinary POSTs); SSE is proxy-friendly, auto-reconnects, and resumes logs via `Last-Event-ID`.
 13. **Flows are first-class, library-independent objects** (a `flows` table; `libraries.flow_id` is nullable). Editing a flow re-evaluates every library that references it; deleting a flow unassigns its libraries (files settle to unmatched) rather than cascading.
+14. **Filter graphs are one-shot, not target-state** (§6.5): they run once per file and are recorded per file (`files.applied_filters`), so a file is re-queued only when the flow's graphs change or the file's bytes change. Editing a filter's parameters is a new graph → one more pass.

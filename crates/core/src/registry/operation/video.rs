@@ -4,7 +4,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Value, json};
 
 use crate::facts::{FileFacts, Hdr, VideoFacts};
-use crate::plan::VideoPlan;
+use crate::plan::{FilterGraph, VideoEncode, VideoPlan};
 use crate::registry::operation::parse;
 use crate::registry::{OperationSection, SectionPlan};
 
@@ -27,7 +27,8 @@ pub use crate::plan::VideoTargetCodec as VideoCodec;
 ///   "bitrate": { "mode": "source_capped" },
 ///   "device": "auto",
 ///   "downscale_to": [1920, 1080],
-///   "hdr_to_sdr": false
+///   "hdr_to_sdr": false,
+///   "video_filter": "crop=1920:800:0:0"
 /// } }
 /// ```
 /// 1080p reference pixel count for bitrate-ceiling scaling.
@@ -227,6 +228,11 @@ pub struct VideoOp {
     /// never implicit (DESIGN §6.1).
     #[serde(default)]
     pub hdr_to_sdr: bool,
+    /// User filter graph applied to the video stream (DESIGN §6.5).
+    /// A non-empty graph always re-encodes (filters cannot be applied
+    /// to a stream being copied).
+    #[serde(default, skip_serializing_if = "FilterGraph::is_empty")]
+    pub video_filter: FilterGraph,
 }
 
 /// Default profile per codec + bit depth.
@@ -291,6 +297,11 @@ fn norm_level(level: &str) -> u64 {
 /// always re-encode.
 #[must_use]
 pub fn is_identity(op: &VideoOp, v: &VideoFacts) -> bool {
+    // A non-empty filter graph is always a change (it forces an
+    // encode; there is no such thing as a filtered copy).
+    if !op.video_filter.is_empty() {
+        return false;
+    }
     // Codec must already be the target.
     if !v.codec.eq_ignore_ascii_case(op.codec.name()) {
         return false;
@@ -369,6 +380,11 @@ fn build_filters(v: &VideoFacts, op: &VideoOp, target_w: u32, target_h: u32) -> 
         filters.push("tonemap=tonemap=bt.2390:desat=0".to_string());
         filters.push(format!("zscale=t=bt709:m=bt709:r=tv,format={out_fmt}"));
     }
+    // The user's graph comes last: after downscale and HDR conversion
+    // (DESIGN §6.5).
+    if !op.video_filter.is_empty() {
+        filters.push(op.video_filter.0.clone());
+    }
     filters
 }
 
@@ -418,7 +434,7 @@ fn build_plan(op: &VideoOp, v: &VideoFacts) -> VideoPlan {
     }
     .to_string();
 
-    VideoPlan::Encode {
+    VideoPlan::Encode(Box::new(VideoEncode {
         codec: op.codec,
         encoder: op.codec.cpu_encoder().to_string(),
         profile,
@@ -429,9 +445,14 @@ fn build_plan(op: &VideoOp, v: &VideoFacts) -> VideoPlan {
         crf,
         pix_fmt,
         filters: build_filters(v, op, target_w, target_h),
+        filter: if op.video_filter.is_empty() {
+            None
+        } else {
+            Some(op.video_filter.clone())
+        },
         target_width: target_w,
         target_height: target_h,
-    }
+    }))
 }
 
 impl OperationSection for Video {
@@ -499,7 +520,8 @@ impl OperationSection for Video {
                     "label": "Downscale to",
                     "hint": "Never upscales. Sources at or above the target keep their resolution."
                 },
-                "hdr_to_sdr": { "kind": "boolean", "label": "Convert HDR to SDR", "default": false, "hint": "Changes the look of the image. Only enabled when you ask." }
+                "hdr_to_sdr": { "kind": "boolean", "label": "Convert HDR to SDR", "default": false, "hint": "Changes the look of the image. Only enabled when you ask." },
+                "video_filter": { "kind": "text", "label": "Video filter", "hint": "An ffmpeg filter graph for the video stream (e.g. crop=1920:800:0:0,denoise). Applied after downscale and HDR conversion; a non-empty filter re-encodes the video." }
             }
         })
     }
@@ -581,10 +603,10 @@ mod tests {
         let f = facts(Some(video("hevc", 1920, 1080, Some(6_000_000))));
         let p = s.plan(&json!({ "codec": "h264" }), &f).unwrap();
         assert!(!matches!(p, SectionPlan::Identity));
-        let VideoPlan::Encode { codec, .. } = enc(p) else {
+        let VideoPlan::Encode(e) = enc(p) else {
             panic!("expected Encode")
         };
-        assert_eq!(codec, VideoCodec::H264);
+        assert_eq!(e.codec, VideoCodec::H264);
     }
 
     #[test]
@@ -597,24 +619,15 @@ mod tests {
             "downscale_to": [1920, 1080],
             "bitrate": { "mode": "source_capped" }
         });
-        let VideoPlan::Encode {
-            target_width,
-            target_height,
-            filters,
-            bitrate_bps,
-            maxrate_bps,
-            bufsize_bps,
-            ..
-        } = enc(s.plan(&j, &f).unwrap())
-        else {
+        let VideoPlan::Encode(e) = enc(s.plan(&j, &f).unwrap()) else {
             panic!("expected Encode")
         };
-        assert_eq!((target_width, target_height), (1920, 1080));
-        assert!(filters.iter().any(|f| f.starts_with("scale=1920:1080")));
+        assert_eq!((e.target_width, e.target_height), (1920, 1080));
+        assert!(e.filters.iter().any(|f| f.starts_with("scale=1920:1080")));
         // source-capped: ceiling at 1080p = 12 Mb/s → below the 80 Mb/s source.
-        assert_eq!(bitrate_bps, Some(12_000_000));
-        assert_eq!(maxrate_bps, Some(13_800_000));
-        assert_eq!(bufsize_bps, Some(24_000_000));
+        assert_eq!(e.bitrate_bps, Some(12_000_000));
+        assert_eq!(e.maxrate_bps, Some(13_800_000));
+        assert_eq!(e.bufsize_bps, Some(24_000_000));
     }
 
     #[test]
@@ -622,20 +635,13 @@ mod tests {
         let s = Video;
         let f = facts(Some(video("h264", 1280, 720, Some(5_000_000))));
         let j = json!({ "codec": "h264", "downscale_to": [1920, 1080], "bitrate": { "mode": "crf", "value": 20 } });
-        let VideoPlan::Encode {
-            target_width,
-            target_height,
-            bitrate_bps,
-            crf,
-            ..
-        } = enc(s.plan(&j, &f).unwrap())
-        else {
+        let VideoPlan::Encode(e) = enc(s.plan(&j, &f).unwrap()) else {
             panic!("expected Encode")
         };
         // 720p source < 1080p target → stays 720p (CRF still re-encodes).
-        assert_eq!((target_width, target_height), (1280, 720));
-        assert_eq!(crf, Some(20));
-        assert!(bitrate_bps.is_none());
+        assert_eq!((e.target_width, e.target_height), (1280, 720));
+        assert_eq!(e.crf, Some(20));
+        assert!(e.bitrate_bps.is_none());
     }
 
     #[test]
@@ -645,19 +651,19 @@ mod tests {
         v.hdr = Hdr::Hdr10;
         let f = facts(Some(v));
         let j = json!({ "codec": "h264", "hdr_to_sdr": true });
-        let VideoPlan::Encode { filters, .. } = enc(s.plan(&j, &f).unwrap()) else {
+        let VideoPlan::Encode(e) = enc(s.plan(&j, &f).unwrap()) else {
             panic!("expected Encode")
         };
-        assert!(filters.iter().any(|f| f.contains("tonemap")));
+        assert!(e.filters.iter().any(|f| f.contains("tonemap")));
 
         // SDR source → no-op, no filters.
         let f = facts(Some(video("h264", 1920, 1080, Some(8_000_000))));
         let j = json!({ "codec": "h264", "hdr_to_sdr": true, "profile": "high", "level": "4.2" });
-        let VideoPlan::Encode { filters, .. } = enc(s.plan(&j, &f).unwrap()) else {
+        let VideoPlan::Encode(e) = enc(s.plan(&j, &f).unwrap()) else {
             panic!("expected Encode")
         };
         assert!(
-            !filters.iter().any(|f| f.contains("tonemap")),
+            !e.filters.iter().any(|f| f.contains("tonemap")),
             "HDR→SDR must be a no-op on an SDR source"
         );
     }
@@ -749,5 +755,65 @@ mod tests {
         assert!(DeviceChoice::deserialize(&json!({ "kind": "gpu" })).is_err());
         assert!(DeviceChoice::deserialize(&json!({ "kind": "nvidia", "id": "x" })).is_err());
     }
+    #[test]
+    fn filter_graph_validation() {
+        // Trimmed, accepted.
+        let g: FilterGraph = serde_json::from_str("\"  denoise  \"").unwrap();
+        assert_eq!(g.0, "denoise");
+        assert!(!g.is_empty());
+        // Empty / absent is the default (no filter).
+        let g: FilterGraph = serde_json::from_str("\"\"").unwrap();
+        assert!(g.is_empty());
+        assert_eq!(
+            serde_json::to_string(&FilterGraph::default()).unwrap(),
+            "\"\""
+        );
+        // Control characters are rejected (a graph must stay one line
+        // of argv, one token of filter grammar).
+        assert!(serde_json::from_str::<FilterGraph>("\"a\nb\"").is_err());
+        // Length is bounded.
+        let long = "\"a\"".repeat(4097);
+        assert!(serde_json::from_str::<FilterGraph>(&long).is_err());
+    }
+
+    #[test]
+    fn filter_forces_encode_and_composes_after_scale() {
+        let s = Video;
+        // Same codec, well under the cap — identity without a filter.
+        let f = facts(Some(video("h264", 1920, 1080, Some(8_000_000))));
+        assert!(matches!(
+            s.plan(&json!({ "codec": "h264", "video_filter": "" }), &f)
+                .unwrap(),
+            SectionPlan::Identity
+        ));
+        // A non-empty filter is a change, even when the codec matches.
+        let p = s
+            .plan(&json!({ "codec": "h264", "video_filter": "denoise" }), &f)
+            .unwrap();
+        let VideoPlan::Encode(e) = enc(p) else {
+            panic!("expected Encode")
+        };
+        assert_eq!(e.filters, vec!["denoise".to_string()]);
+        assert_eq!(e.filter, Some(FilterGraph("denoise".into())));
+
+        // The user graph composes LAST: after a real downscale.
+        let f = facts(Some(video("hevc", 3840, 2160, Some(80_000_000))));
+        let j = json!({
+            "codec": "h264",
+            "downscale_to": [1920, 1080],
+            "video_filter": "crop=1920:800:0:0"
+        });
+        let VideoPlan::Encode(e) = enc(s.plan(&j, &f).unwrap()) else {
+            panic!("expected Encode")
+        };
+        assert_eq!(
+            e.filters,
+            vec![
+                "scale=1920:1080:flags=lanczos".to_string(),
+                "crop=1920:800:0:0".to_string()
+            ]
+        );
+    }
+
     // (module closes)
 }

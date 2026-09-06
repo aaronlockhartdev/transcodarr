@@ -380,16 +380,11 @@ mod tests {
         let Evaluation::Plan(p) = &e else {
             panic!("expected plan: {e:?}");
         };
-        let Some(VideoPlan::Encode {
-            codec,
-            target_width,
-            ..
-        }) = p.video.as_ref()
-        else {
+        let Some(VideoPlan::Encode(e)) = p.video.as_ref() else {
             panic!("expected encode: {p:?}");
         };
-        assert_eq!(*codec, crate::plan::VideoTargetCodec::H264);
-        assert_eq!(*target_width, 1280);
+        assert_eq!(e.codec, crate::plan::VideoTargetCodec::H264);
+        assert_eq!(e.target_width, 1280);
     }
 
     #[test]

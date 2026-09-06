@@ -113,11 +113,11 @@ pub fn verify_output(
                 return Ok(false);
             }
         }
-        Some(VideoPlan::Encode { codec, .. }) => {
+        Some(VideoPlan::Encode(e)) => {
             let Some(out_v) = &output.video else {
                 return Ok(false);
             };
-            if !out_v.codec.eq_ignore_ascii_case(codec.name()) {
+            if !out_v.codec.eq_ignore_ascii_case(e.codec.name()) {
                 return Ok(false);
             }
         }
@@ -129,7 +129,7 @@ pub fn verify_output(
 mod tests {
     use super::*;
     use crate::facts::{AudioTrack, VideoFacts};
-    use crate::plan::{AudioPlan, AudioTargetCodec, AudioTrackPlan, VideoTargetCodec};
+    use crate::plan::{AudioPlan, AudioTargetCodec, AudioTrackPlan, VideoEncode, VideoTargetCodec};
 
     fn input_facts() -> FileFacts {
         FileFacts {
@@ -162,7 +162,7 @@ mod tests {
     fn plan() -> FfmpegPlan {
         FfmpegPlan {
             container: "mp4".into(),
-            video: Some(VideoPlan::Encode {
+            video: Some(VideoPlan::Encode(Box::new(VideoEncode {
                 codec: VideoTargetCodec::H264,
                 encoder: "libx264".into(),
                 profile: "high".into(),
@@ -173,11 +173,13 @@ mod tests {
                 crf: None,
                 pix_fmt: "yuv420p".into(),
                 filters: vec![],
+                filter: None,
                 target_width: 1920,
                 target_height: 1080,
-            }),
+            }))),
             audio: Some(AudioPlan {
                 per_track: vec![AudioTrackPlan::Copy, AudioTrackPlan::Drop],
+                filter: None,
             }),
             subtitles: None,
             remux: true,
@@ -300,6 +302,7 @@ mod tests {
                 },
                 AudioTrackPlan::Drop,
             ],
+            filter: None,
         });
         let mut out = output_facts();
         out.audio[0].codec = "eac3".into(); // wrong: still eac3
