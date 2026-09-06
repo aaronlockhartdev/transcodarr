@@ -41,8 +41,16 @@ impl ConditionField for VideoCodec {
     fn ui_schema(&self) -> Value {
         json!({
             "kind": "multi_select",
-            "values": ["h264", "hevc", "av1", "vp9", "mpeg2video", "mpeg4"],
-            "hint": "Files match when their video codec is in the list. Leave empty for any.",
+            "label": "Video codec",
+            "values": [
+                { "value": "h264", "label": "H.264" },
+                { "value": "hevc", "label": "HEVC" },
+                { "value": "av1", "label": "AV1" },
+                { "value": "vp9", "label": "VP9" },
+                { "value": "mpeg2video", "label": "MPEG-2" },
+                { "value": "mpeg4", "label": "MPEG-4" }
+            ],
+            "hint": "The file must use one of these video codecs. Leave empty for any."
         })
     }
 }

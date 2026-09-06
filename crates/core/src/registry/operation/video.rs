@@ -458,42 +458,48 @@ impl OperationSection for Video {
     fn ui_schema(&self) -> Value {
         json!({
             "kind": "object",
+            "label": "Video",
             "fields": {
                 "container": {
                     "kind": "single_select",
+                    "label": "Container",
                     "values": [
-                        { "value": "smart", "label": "Smart (MP4 if safe, else MKV)" },
+                        { "value": "smart", "label": "Auto (MP4 when safe, else MKV)" },
                         { "value": "mp4", "label": "MP4" },
                         { "value": "mkv", "label": "MKV" }
                     ],
-                    "default": "smart"
+                    "default": "smart",
+                    "hint": "Auto picks MP4 when the output is MP4-safe, otherwise MKV."
                 },
                 "codec": {
                     "kind": "single_select",
+                    "label": "Video codec",
                     "values": [
                         { "value": "h264", "label": "H.264" },
-                        { "value": "hevc", "label": "HEVC (H.265)" }
+                        { "value": "hevc", "label": "HEVC" }
                     ],
                     "default": "h264",
-                    "hint": "AV1 is parked (design §12)."
+                    "hint": "AV1 is not available yet."
                 },
-                "profile": { "kind": "text", "default": "auto", "hint": "auto = codec default for the source bit depth" },
-                "level": { "kind": "text", "default": "auto", "hint": "auto = codec default for the target resolution" },
+                "profile": { "kind": "text", "label": "Profile", "default": "auto", "hint": "Leave as auto for the codec default at the source bit depth." },
+                "level": { "kind": "text", "label": "Level", "default": "auto", "hint": "Leave as auto for the codec default at the target resolution." },
                 "bitrate": {
-                    "kind": "bitrate_mode", "values": [{ "value": "source_capped", "label": "Source capped" }, { "value": "fixed", "label": "Fixed (bps)" }, { "value": "crf", "label": "CRF" }],
+                    "kind": "bitrate_mode", "label": "Bitrate", "values": [{ "value": "source_capped", "label": "Source-capped" }, { "value": "fixed", "label": "Fixed bitrate" }, { "value": "crf", "label": "CRF" }],
                     "default": "source_capped",
-                    "hint": "source_capped: ≤ source bitrate, ceiling scaled by target resolution"
+                    "hint": "Source-capped: at or below the source bitrate, scaled to the target resolution."
                 },
                 "device": {
                     "kind": "device_select",
+                    "label": "Device",
                     "default": "auto",
-                    "hint": "Devices are populated from the startup encoder probe; unavailable encoders are disabled."
+                    "hint": "Chosen from the encoders available on this machine."
                 },
                 "downscale_to": {
                     "kind": "resolution",
-                    "hint": "Never upscales: sources at or above the target keep their resolution."
+                    "label": "Downscale to",
+                    "hint": "Never upscales. Sources at or above the target keep their resolution."
                 },
-                "hdr_to_sdr": { "kind": "boolean", "default": false, "hint": "Destructive to look — never implicit." }
+                "hdr_to_sdr": { "kind": "boolean", "label": "Convert HDR to SDR", "default": false, "hint": "Changes the look of the image. Only enabled when you ask." }
             }
         })
     }

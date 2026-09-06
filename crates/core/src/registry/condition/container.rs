@@ -40,8 +40,16 @@ impl ConditionField for Container {
     fn ui_schema(&self) -> Value {
         json!({
             "kind": "multi_select",
-            "values": ["mkv", "mp4", "mov", "m2ts", "webm", "avi"],
-            "hint": "Files match when their container is in the list. Leave empty for any.",
+            "label": "Container",
+            "values": [
+                { "value": "mkv", "label": "MKV" },
+                { "value": "mp4", "label": "MP4" },
+                { "value": "mov", "label": "MOV" },
+                { "value": "m2ts", "label": "MPEG-TS" },
+                { "value": "webm", "label": "WebM" },
+                { "value": "avi", "label": "AVI" }
+            ],
+            "hint": "The file must be in one of these containers. Leave empty for any."
         })
     }
 }

@@ -45,8 +45,15 @@ impl ConditionField for PixelFormat {
     fn ui_schema(&self) -> Value {
         json!({
             "kind": "multi_select",
-            "values": ["yuv420p", "yuv420p10le", "yuv422p10le", "yuv444p10le", "yuvj420p"],
-            "hint": "…10le variants are 10-bit (drives HEVC Main10 and friends).",
+            "label": "Pixel format",
+            "values": [
+                { "value": "yuv420p", "label": "8-bit 4:2:0" },
+                { "value": "yuv420p10le", "label": "10-bit 4:2:0" },
+                { "value": "yuv422p10le", "label": "10-bit 4:2:2" },
+                { "value": "yuv444p10le", "label": "10-bit 4:4:4" },
+                { "value": "yuvj420p", "label": "8-bit 4:2:0 (JPEG)" }
+            ],
+            "hint": "The file's video must use one of these pixel formats. Leave empty for any."
         })
     }
 }

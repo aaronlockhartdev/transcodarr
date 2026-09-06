@@ -41,10 +41,12 @@ impl ConditionField for AudioCodec {
     }
 
     fn ui_schema(&self) -> Value {
+        let values = codec_value_pairs();
         json!({
             "kind": "multi_select",
-            "values": AUDIO_CODECS,
-            "hint": "Matches if ANY track has a listed codec. Leave empty for any.",
+            "label": "Audio codec",
+            "values": values,
+            "hint": "The file matches when any audio track uses one of these codecs. Leave empty for any."
         })
     }
 }
@@ -54,6 +56,32 @@ impl ConditionField for AudioCodec {
 pub const AUDIO_CODECS: [&str; 10] = [
     "eac3", "eac3_joc", "ac3", "dts", "dts_ma", "truehd", "aac", "flac", "mp3", "opus",
 ];
+
+/// Display names for [`AUDIO_CODECS`] (same order; the schema renders
+/// these, the wire format keeps the raw codec names).
+pub const AUDIO_CODEC_LABELS: [&str; 10] = [
+    "E-AC-3",
+    "E-AC-3 (Atmos)",
+    "AC-3",
+    "DTS",
+    "DTS-HD MA",
+    "TrueHD",
+    "AAC",
+    "FLAC",
+    "MP3",
+    "Opus",
+];
+
+/// Zip the codec vocabulary with its display names into schema pairs.
+#[must_use]
+pub fn codec_value_pairs() -> Vec<Value> {
+    AUDIO_CODECS
+        .iter()
+        .zip(AUDIO_CODEC_LABELS.iter())
+        .map(|(value, label)| json!({ "value": value, "label": label }))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

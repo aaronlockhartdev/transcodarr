@@ -44,8 +44,15 @@ impl ConditionField for HdrField {
     fn ui_schema(&self) -> Value {
         json!({
             "kind": "multi_select",
-            "values": ["none", "hdr10", "hdr10_plus", "dolby_vision", "hlg"],
-            "hint": "`none` means SDR. Leave empty for any.",
+            "label": "HDR",
+            "values": [
+                { "value": "none", "label": "SDR" },
+                { "value": "hdr10", "label": "HDR10" },
+                { "value": "hdr10_plus", "label": "HDR10+" },
+                { "value": "dolby_vision", "label": "Dolby Vision" },
+                { "value": "hlg", "label": "HLG" }
+            ],
+            "hint": "The file must use one of these HDR formats. Leave empty for any."
         })
     }
 }

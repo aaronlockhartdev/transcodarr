@@ -122,12 +122,14 @@ impl OperationSection for Container {
     fn ui_schema(&self) -> Value {
         json!({
             "kind": "single_select",
+            "label": "Container",
             "values": [
-                { "value": "smart", "label": "Smart — MP4 if MP4-safe, else MKV" },
+                { "value": "smart", "label": "Auto (MP4 when safe, else MKV)" },
                 { "value": "mp4", "label": "MP4" },
                 { "value": "mkv", "label": "MKV" }
             ],
-            "default": "smart"
+            "default": "smart",
+            "hint": "Forces this container. Auto only picks between MP4 and MKV."
         })
     }
 }

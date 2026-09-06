@@ -11,6 +11,10 @@ use crate::registry::condition::parse;
 /// A bound `[w, h]` means "at least / at most `w*h` pixels" (inclusive),
 /// so aspect ratio is irrelevant — `≥ 4K` catches 3840×2160 and anything
 /// larger. Files without video never match a non-"any" constraint.
+///
+/// The schema advertises `common` resolutions as type-ahead suggestions;
+/// the UI accepts free text ("1080p", "4k", "1920×1080") and stores the
+/// pixel bound, so no fixed option list is required.
 pub struct Resolution;
 
 #[derive(Debug, Default, Deserialize)]
@@ -62,13 +66,14 @@ impl ConditionField for Resolution {
     fn ui_schema(&self) -> Value {
         json!({
             "kind": "resolution_range",
+            "label": "Resolution",
             "common": {
                 "720p": [1280, 720],
                 "1080p": [1920, 1080],
                 "1440p": [2560, 1440],
                 "4k": [3840, 2160]
             },
-            "hint": "Bounds are inclusive pixel counts; leave empty for any.",
+            "hint": "Type a resolution (e.g. 1080p, 4k) or width × height. Bounds are inclusive pixel counts; leave empty for any."
         })
     }
 }

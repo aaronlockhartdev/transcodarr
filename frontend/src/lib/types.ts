@@ -89,26 +89,52 @@ export interface SchemaField {
 	schema: UiSchema;
 }
 
+/** A schema option: the wire value plus the display name (the UI renders
+ *  labels; the server parses values). */
+export type SchemaOption = { value: string; label: string };
+
 /** The ui_schema vocabulary emitted by the core registry (exhaustive — the
- *  discriminated `kind` drives FlowField; no catch-all arm, so narrowing works). */
+ *  discriminated `kind` drives FlowField; no catch-all arm, so narrowing works).
+ *  Every kind may carry a `label` (the display name for the field or
+ *  section); the UI falls back to title-casing the schema key. */
 export type UiSchema =
-	| { kind: "multi_select"; values: string[]; hint?: string }
-	| { kind: "single_select"; values: { value: string; label: string }[]; hint?: string; default?: string }
-	| { kind: "resolution_range"; common: Record<string, [number, number]>; hint?: string }
-	| { kind: "byte_range"; unit?: string; hint?: string }
-	| { kind: "text"; hint?: string; default?: string }
-	| { kind: "boolean"; hint?: string; default?: boolean }
-	| { kind: "bitrate_mode"; values?: { value: string; label: string }[]; hint?: string; default?: string }
-	| { kind: "device_select"; hint?: string; default?: string }
-	| { kind: "audio_policy"; values?: { value: string; label: string }[]; reencode?: { codec: { kind: "single_select"; default?: string; values: { value: string; label: string }[] }; sample_rate?: { kind: "text"; hint?: string }; channels?: { kind: "text"; hint?: string } }; hint?: string; default?: string }
-	| { kind: "resolution"; hint?: string }
-	| { kind: "list"; item: Record<string, unknown>; hint?: string }
+	| { kind: "multi_select"; label?: string; values: SchemaOption[]; hint?: string }
+	| { kind: "single_select"; label?: string; values: SchemaOption[]; hint?: string; default?: string }
+	| { kind: "resolution_range"; label?: string; common: Record<string, [number, number]>; hint?: string }
+	| { kind: "byte_range"; label?: string; unit?: string; hint?: string }
+	| { kind: "text"; label?: string; hint?: string; default?: string }
+	| { kind: "boolean"; label?: string; hint?: string; default?: boolean }
+	| { kind: "bitrate_mode"; label?: string; values?: SchemaOption[]; hint?: string; default?: string }
+	| { kind: "device_select"; label?: string; hint?: string; default?: string }
+	| {
+			kind: "audio_policy";
+			label?: string;
+			values?: SchemaOption[];
+			reencode?: {
+				codec: { kind: "single_select"; label?: string; default?: string; values: SchemaOption[] };
+				sample_rate?: { kind: "text"; label?: string; hint?: string };
+				channels?: { kind: "text"; label?: string; hint?: string };
+			};
+			hint?: string;
+			default?: string;
+	  }
+	| { kind: "resolution"; label?: string; hint?: string }
+	| { kind: "list"; label?: string; item: Record<string, unknown>; hint?: string }
 	| {
 			kind: "object";
+			label?: string;
 			hint?: string;
 			fields: Record<
 				string,
-				{ kind: string; values?: string[] | { value: string; label: string }[]; hint?: string; default?: unknown; item?: unknown; common?: Record<string, [number, number]> }
+				{
+					kind: string;
+					label?: string;
+					values?: SchemaOption[];
+					hint?: string;
+					default?: unknown;
+					item?: unknown;
+					common?: Record<string, [number, number]>;
+				}
 			>;
 	  };
 
@@ -130,16 +156,19 @@ export interface FlowOperation {
 }
 
 export interface FlowStep {
-	id: string;
+	/** Stable id for UI reordering; the server assigns it when absent. */
+	id?: string;
 	condition: FlowCondition;
 	operation: FlowOperation;
 }
+
+export type NoMatchPolicy = { escalate?: boolean };
 
 export interface Flow {
 	flow_version: number;
 	name?: string;
 	steps: FlowStep[];
-	no_match?: { escalate?: boolean };
+	no_match?: NoMatchPolicy;
 }
 
 // ── flows table row (first-class, library-independent) ───────────

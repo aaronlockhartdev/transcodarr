@@ -18,6 +18,10 @@
 	import { store } from "$lib/store.svelte.js";
 	import { basename, formatBytes, formatUnixSeconds, parseFacts } from "$lib/format.js";
 	import type { FileRow } from "$lib/types.js";
+	import { cn } from "$lib/utils";
+	import { sortBy } from "$lib/sort";
+	import SortableHead from "$lib/components/tables/sortable-head.svelte";
+	import { Input } from "$lib/components/ui/input";
 
 	let { id }: { id: number } = $props();
 
@@ -88,6 +92,59 @@
 		if (f.input_size != null && f.output_size != null) return f.output_size - f.input_size;
 		return null;
 	}
+
+	// ---- table filter & sort ---------------------------------------------
+	const STATUS_GROUPS: Record<string, string[]> = {
+		files: ["compliant", "completed", "queued", "running", "verifying", "scanning", "failed", "quarantined", "unmatched", "unscanned"],
+		compliant: ["compliant", "completed"],
+		queued: ["queued"],
+		active: ["running", "verifying", "scanning"],
+		failed: ["failed", "quarantined"],
+		unmatched: ["unmatched"],
+	};
+	let query = $state("");
+	let statusFilter = $state<string | null>(null);
+	let sortKey = $state<"name" | "size" | "delta" | "checked" | null>(null);
+	let sortDir = $state<"asc" | "desc">("asc");
+	function toggleSort(k: typeof sortKey) {
+		if (k === null) return;
+		if (sortKey === k) sortDir = sortDir === "asc" ? "desc" : "asc";
+		else {
+			sortKey = k;
+			sortDir = "asc";
+		}
+	}
+	const shown = $derived.by(() => {
+		const q = query.trim().toLowerCase();
+		const group = statusFilter ? STATUS_GROUPS[statusFilter] : null;
+		let list = files.filter(
+			(f) =>
+				(q === "" || f.path.toLowerCase().includes(q)) &&
+				(group === null || group.includes(f.status)),
+		);
+		if (sortKey === null) return list;
+		list = sortBy(
+			list,
+			(f) =>
+				sortKey === "name"
+					? basename(f.path).toLowerCase()
+					: sortKey === "size"
+						? f.size
+						: sortKey === "delta"
+							? deltaOf(f) ?? 0
+							: f.last_probed ?? 0,
+			sortDir,
+		);
+		return list;
+	});
+	const badgeDefs = $derived([
+		{ key: "files", label: "files", count: summary.total, variant: "secondary" as const, dimmed: false },
+		{ key: "compliant", label: "compliant", count: summary.compliant, variant: "secondary" as const, dimmed: false },
+		{ key: "queued", label: "queued", count: summary.queued, variant: "outline" as const, dimmed: false },
+		{ key: "active", label: "active", count: summary.active, variant: "default" as const, dimmed: false },
+		{ key: "failed", label: "failed", count: summary.failed, variant: "destructive" as const, dimmed: summary.failed === 0 },
+		{ key: "unmatched", label: "unmatched", count: summary.unmatched, variant: "outline" as const, dimmed: summary.unmatched === 0 },
+	]);
 </script>
 
 {#if !lib}
@@ -130,21 +187,30 @@
 					<span>none</span>
 				{/if}
 			</p>
-			<div class="mt-2 flex flex-wrap items-center gap-2 text-sm">
-				<Badge variant="secondary">{summary.total} files</Badge>
-				<Badge variant="secondary">{summary.compliant} compliant</Badge>
-				<Badge variant="outline">{summary.queued} queued</Badge>
-				<Badge>{summary.active} active</Badge>
-				<Badge variant="destructive" class={summary.failed > 0 ? "" : "opacity-40"}>{summary.failed} failed</Badge>
-				<Badge variant="outline" class={summary.unmatched > 0 ? "" : "opacity-40"}>{summary.unmatched} unmatched</Badge>
+			<div class="mt-2 flex flex-wrap items-center gap-1.5 text-sm">
+				{#each badgeDefs as b (b.key)}
+					<button
+						class={cn(
+							"rounded-full",
+							statusFilter === b.key ? "ring-2 ring-ring" : "hover:opacity-80",
+						)}
+						onclick={() => (statusFilter = statusFilter === b.key ? null : b.key)}
+						title={b.key === "files" ? "Show all files" : `Show only ${b.label} files`}
+					>
+						<Badge variant={b.variant} class={b.dimmed ? "opacity-40" : ""}>{b.count} {b.label}</Badge>
+					</button>
+				{/each}
 			</div>
 		</div>
-		<div class="flex shrink-0 gap-2">
-			<Button variant="outline" onclick={() => (editOpen = true)}>Edit library</Button>
-			<Button onclick={scanNow} disabled={scanning}>
-				<ScanIcon class="size-4" data-icon="inline-start" />
-				{scanning ? "Scanning…" : "Scan now"}
-			</Button>
+		<div class="flex shrink-0 flex-col items-end gap-2">
+			<div class="flex gap-2">
+				<Button variant="outline" onclick={() => (editOpen = true)}>Edit library</Button>
+				<Button onclick={scanNow} disabled={scanning}>
+					<ScanIcon class="size-4" data-icon="inline-start" />
+					{scanning ? "Scanning…" : "Scan now"}
+				</Button>
+			</div>
+			<Input class="h-9 w-64" placeholder="Search files…" bind:value={query} />
 		</div>
 	</div>
 
@@ -153,19 +219,27 @@
 			<Table.Root>
 				<Table.Header>
 					<Table.Row>
-						<Table.Head>File</Table.Head>
+						<SortableHead active={sortKey === "name"} dir={sortDir} onToggle={() => toggleSort("name")}>
+							File
+						</SortableHead>
 						<Table.Head>Resolution</Table.Head>
 						<Table.Head>Video</Table.Head>
 						<Table.Head>Audio</Table.Head>
 						<Table.Head>Status</Table.Head>
-						<Table.Head class="text-right">Size</Table.Head>
-						<Table.Head class="text-right">Δ after transcode</Table.Head>
-						<Table.Head>Last checked</Table.Head>
+						<SortableHead class="text-right" active={sortKey === "size"} dir={sortDir} onToggle={() => toggleSort("size")}>
+							Size
+						</SortableHead>
+						<SortableHead class="text-right" active={sortKey === "delta"} dir={sortDir} onToggle={() => toggleSort("delta")}>
+							Δ after transcode
+						</SortableHead>
+						<SortableHead active={sortKey === "checked"} dir={sortDir} onToggle={() => toggleSort("checked")}>
+							Last checked
+						</SortableHead>
 						<Table.Head class="w-10" />
 					</Table.Row>
 				</Table.Header>
 				<Table.Body>
-					{#each files as f (f.id)}
+					{#each shown as f (f.id)}
 						{@const facts = parseFacts(f.facts_json)}
 						{@const delta = deltaOf(f)}
 						<Table.Row>
@@ -203,7 +277,7 @@
 					{:else}
 						<Table.Row>
 							<Table.Cell class="py-10 text-center text-muted-foreground" colspan={9}>
-								No files yet — run a scan.
+								{files.length === 0 ? "No files yet — run a scan." : "No files match."}
 							</Table.Cell>
 						</Table.Row>
 					{/each}

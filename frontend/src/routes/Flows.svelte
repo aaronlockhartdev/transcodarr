@@ -15,6 +15,23 @@
 	import { store } from "$lib/store.svelte.js";
 	import { formatUnixSeconds } from "$lib/format.js";
 	import type { FlowRecord } from "$lib/types.js";
+	import { sortBy } from "$lib/sort";
+	import SortableHead from "$lib/components/tables/sortable-head.svelte";
+
+	let sortKey = $state<"name" | "updated" | null>(null);
+	let sortDir = $state<"asc" | "desc">("asc");
+	function toggleSort(k: "name" | "updated") {
+		if (sortKey === k) sortDir = sortDir === "asc" ? "desc" : "asc";
+		else {
+			sortKey = k;
+			sortDir = "asc";
+		}
+	}
+	const sortedFlows = $derived.by(() =>
+		sortKey === null
+			? store.flows
+			: sortBy(store.flows, (f) => (sortKey === "name" ? f.name : f.updated_at), sortDir),
+	);
 
 	let createOpen = $state(false);
 	let creating = $state(false);
@@ -88,14 +105,23 @@
 			<Table.Root>
 				<Table.Header>
 					<Table.Row>
-						<Table.Head>Name</Table.Head>
+						<SortableHead active={sortKey === "name"} dir={sortDir} onToggle={() => toggleSort("name")}>
+							Name
+						</SortableHead>
 						<Table.Head class="text-right">Libraries</Table.Head>
-						<Table.Head class="text-right">Updated</Table.Head>
+						<SortableHead
+							class="text-right"
+							active={sortKey === "updated"}
+							dir={sortDir}
+							onToggle={() => toggleSort("updated")}
+						>
+							Updated
+						</SortableHead>
 						<Table.Head class="w-10" />
 					</Table.Row>
 				</Table.Header>
 				<Table.Body>
-					{#each store.flows as f (f.id)}
+					{#each sortedFlows as f (f.id)}
 						<Table.Row class="cursor-pointer" onclick={() => navigate(`/flows/${f.id}`)}>
 							<Table.Cell class="font-medium">{f.name}</Table.Cell>
 							<Table.Cell class="text-right tabular-nums">{f.library_count}</Table.Cell>

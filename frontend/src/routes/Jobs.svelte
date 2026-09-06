@@ -7,6 +7,9 @@
 	import { navigate } from "$lib/router.svelte.js";
 	import { basename, formatDuration, formatRelative, formatUnixSeconds } from "$lib/format.js";
 	import type { JobRow } from "$lib/types.js";
+	import { sortBy } from "$lib/sort";
+	import SortableHead from "$lib/components/tables/sortable-head.svelte";
+	import { Input } from "$lib/components/ui/input";
 
 	const TABS = [
 		{ value: "all", label: "All" },
@@ -33,7 +36,37 @@
 		}
 	}
 
-	const visible = $derived(store.jobs.filter((j) => matches(tab, j)).slice(0, 200));
+	let query = $state("");
+	let sortKey = $state<"started" | "duration" | null>(null);
+	let sortDir = $state<"asc" | "desc">("asc");
+	function toggleSort(k: typeof sortKey) {
+		if (k === null) return;
+		if (sortKey === k) sortDir = sortDir === "asc" ? "desc" : "asc";
+		else {
+			sortKey = k;
+			sortDir = "desc"; // newest/longest first is the useful default
+		}
+	}
+	const visible = $derived.by(() => {
+		const q = query.trim().toLowerCase();
+		let list = store.jobs
+			.filter((j) => matches(tab, j))
+			.filter((j) => q === "" || fileOf(j)?.path.toLowerCase().includes(q));
+		if (sortKey === null) {
+			// Default order: newest first.
+			list = [...list].sort((a, b) => (b.started ?? 0) - (a.started ?? 0));
+			return list.slice(0, 200);
+		}
+		list = sortBy(
+			list,
+			(j) =>
+				sortKey === "started"
+					? j.started ?? 0
+					: durSecs(j) ?? -1,
+			sortDir,
+		);
+		return list.slice(0, 200);
+	});
 
 	const activeCount = $derived(
 		store.jobs.filter((j) => j.state === "running" || j.state === "verifying").length,
@@ -50,12 +83,16 @@
 		}
 		return undefined;
 	}
-	function durationOf(j: JobRow): string | null {
+	function durSecs(j: JobRow): number | null {
 		if (j.started != null && (j.ended != null || j.state === "running" || j.state === "verifying")) {
 			const end = j.ended ?? Math.floor(Date.now() / 1000);
-			return formatDuration(end - j.started);
+			return end - j.started;
 		}
 		return null;
+	}
+	function durationOf(j: JobRow): string | null {
+		const s = durSecs(j);
+		return s == null ? null : formatDuration(s);
 	}
 </script>
 
@@ -68,6 +105,7 @@
 				: ""}
 		</p>
 	</div>
+	<Input class="h-9 w-56" placeholder="Search by file…" bind:value={query} />
 </div>
 
 <Card.Root class="mt-6">
@@ -93,8 +131,12 @@
 								<Table.Head>State</Table.Head>
 								<Table.Head>Device</Table.Head>
 								<Table.Head>Exit</Table.Head>
-								<Table.Head>Started</Table.Head>
-								<Table.Head class="text-right">Duration</Table.Head>
+								<SortableHead active={sortKey === "started"} dir={sortDir} onToggle={() => toggleSort("started")}>
+									Started
+								</SortableHead>
+								<SortableHead class="text-right" active={sortKey === "duration"} dir={sortDir} onToggle={() => toggleSort("duration")}>
+									Duration
+								</SortableHead>
 							</Table.Row>
 						</Table.Header>
 						<Table.Body>

@@ -1,194 +1,208 @@
 <script lang="ts">
+	/**
+	 * Flow editor: a flow's steps (condition + operation), rendered entirely
+	 * from the flow schema (core §5) so adding a condition field, operation
+	 * section, or verification check is a Rust-only change.
+	 */
 	import { onMount } from "svelte";
 	import { toast } from "svelte-sonner";
-	import ChevronLeftIcon from "@lucide/svelte/icons/chevron-left";
-	import * as Card from "$lib/components/ui/card";
-	import { Badge } from "$lib/components/ui/badge";
 	import { Button } from "$lib/components/ui/button";
+	import { Badge } from "$lib/components/ui/badge";
+	import { Switch } from "$lib/components/ui/switch";
 	import StepCard from "$lib/components/flow/StepCard.svelte";
-	import { api, ApiError } from "$lib/api.js";
+	import { api } from "$lib/api";
+	import { store } from "$lib/store.svelte";
 	import { navigate } from "$lib/router.svelte.js";
-	import { store } from "$lib/store.svelte.js";
-	import type { Flow, FlowSchema } from "$lib/types.js";
+	import { formatUnixSeconds } from "$lib/format";
+	import type { Device, FlowSchema, FlowStep, NoMatchPolicy } from "$lib/types.js";
 
 	let { id }: { id: number } = $props();
 
-	// The flows row behind this editor (live from the store — library count, name).
-	const flowRow = $derived(store.flows.find((f) => f.id === id) ?? null);
-
 	let schema = $state<FlowSchema | null>(null);
-	let flow = $state<Flow | null>(null);
-	let loaded = $state(false);
-	let loadError = $state<string | null>(null);
-	let unsaved = $state(false);
-	let saving = $state(false);
+	let flowRow = $state<{ id: number; name: string; flow_json: string; updated_at: number } | null>(null);
+	let flow = $state<{
+		steps: FlowStep[];
+		no_match?: NoMatchPolicy;
+	} | null>(null);
 	let flowName = $state("");
+	let busy = $state(false);
 
-	// The header name is live-editable; a name change counts as an edit too.
-	const dirty = $derived(unsaved || flowName !== (flowRow?.name ?? ""));
+	const steps = $derived(flow?.steps ?? []);
+	const noMatch = $derived<NoMatchPolicy | null>(flow?.no_match ?? null);
+	let noMatchEscalate = $state(false);
+	function setNoMatchEscalate(v: boolean) {
+		if (!flow) return;
+		flow.no_match = { escalate: v };
+		noMatchEscalate = v;
+	}
 
-	onMount(async () => {
-		try {
-			const [schemaRes, record] = await Promise.all([api.schemaFlow(), api.getFlow(id)]);
-			schema = schemaRes;
-			flow = JSON.parse(record.flow_json) as Flow;
-			flowName = record.name;
-			loaded = true;
-		} catch (e) {
-			loadError = e instanceof ApiError ? e.message : e instanceof Error ? e.message : String(e);
+	// The flow version constant — the only value ever written.
+	const FLOW_VERSION = 1;
+
+	// A visible-but-unset filter (empty list / no bounds) is a no-op — prune
+	// it before sending so saved flows stay minimal.
+	function pruneCondition(c: Record<string, unknown>): Record<string, unknown> {
+		const out: Record<string, unknown> = {};
+		for (const [k, raw] of Object.entries(c)) {
+			if (raw === null || typeof raw !== "object") continue;
+			const v = raw as Record<string, unknown>;
+			const list = v["in"] ?? v["any_of"];
+			if (Array.isArray(list) && list.length === 0) continue;
+			if ((k === "resolution" || k === "file_size") && !("min" in v) && !("max" in v)) continue;
+			if (Object.keys(v).length === 0) continue;
+			out[k] = v;
 		}
-	});
-
-	// Every mutation marks the form dirty; save() is the only write path.
-	function touch<T>(fn: (f: Flow) => T): T {
-		unsaved = true;
-		return fn(flow!);
-	}
-
-	function addStep() {
-		touch((f) => {
-			f.steps = f.steps ?? [];
-			f.steps.push({
-				id: `step_${Date.now()}_${f.steps.length}`,
-				condition: {},
-				operation: {},
-			});
-		});
-	}
-
-	function removeStep(idToRemove: string) {
-		touch((f) => {
-			f.steps = (f.steps ?? []).filter((s) => s.id !== idToRemove);
-		});
-	}
-
-	function moveStep(idToMove: string, dir: -1 | 1) {
-		touch((f) => {
-			const steps = f.steps ?? [];
-			const i = steps.findIndex((s) => s.id === idToMove);
-			const j = i + dir;
-			if (i < 0 || j < 0 || j >= steps.length) return;
-			const [s] = steps.splice(i, 1);
-			steps.splice(j, 0, s);
-		});
-	}
-
-	function setNoMatchEscalate(escalate: boolean) {
-		touch((f) => {
-			f.no_match = { escalate };
-		});
+		return out;
 	}
 
 	async function save() {
-		if (!flow || !flowRow) return;
+		if (!schema || !flow) return;
 		const name = flowName.trim();
-		if (name === "") {
-			toast.error("Flow name is required");
+		if (!name) {
+			toast.warning("Flow name is required");
 			return;
 		}
-		saving = true;
+		busy = true;
 		try {
-			const json = JSON.stringify(flow);
+			// The editor only mutates; the stored JSON string is the
+			// source of truth for fields the UI does not edit.
+			const json = JSON.stringify(
+				{
+					flow_version: FLOW_VERSION,
+					steps: steps.map((s) => ({
+						...s,
+						condition: pruneCondition(s.condition as Record<string, unknown>) as typeof s.condition,
+					})),
+					no_match: noMatch,
+				},
+				null,
+				2,
+			);
 			await api.updateFlow(id, { name, flow_json: json });
-			// Re-parse what the server stored (it validates and re-evaluates the
-			// using libraries on save) and refresh the store so the sidebar
-			// library counts pick up the new evaluations.
-			flow = JSON.parse(json) as Flow;
-			unsaved = false;
 			await store.refreshCore();
 			toast.success("Saved — libraries using this flow are re-evaluating");
 		} catch (e) {
-			toast.error(e instanceof ApiError ? e.message : e instanceof Error ? e.message : String(e));
+			toast.error(`Failed to save flow: ${e instanceof Error ? e.message : e}`);
 		} finally {
-			saving = false;
+			busy = false;
 		}
 	}
+
+	function addStep() {
+		if (!flow) return;
+		flow.steps = [...flow.steps, { condition: {}, operation: {} }];
+	}
+
+	function removeStep(i: number) {
+		if (!flow) return;
+		flow.steps = flow.steps.filter((_, j) => j !== i);
+	}
+
+	function moveStep(i: number, dir: -1 | 1) {
+		if (!flow) return;
+		const j = i + dir;
+		if (j < 0 || j >= flow.steps.length) return;
+		const arr = [...flow.steps];
+		[arr[i], arr[j]] = [arr[j], arr[i]];
+		flow.steps = arr;
+	}
+
+	const unsaved = $derived(
+		flow !== null &&
+			JSON.stringify({ steps, noMatch, name: flowName }) !==
+				JSON.stringify({
+					steps: flowRow?.flow_json ? JSON.parse(flowRow.flow_json).steps : undefined,
+					noMatch: flowRow?.flow_json ? (JSON.parse(flowRow.flow_json).no_match ?? null) : null,
+					name: flowRow?.name ?? "",
+				}),
+	);
+	const dirty = $derived(unsaved || flowName !== (flowRow?.name ?? ""));
+
+	onMount(async () => {
+		const [sc, record] = await Promise.all([api.schemaFlow(), id ? api.getFlow(id) : Promise.resolve(null)]);
+		schema = sc;
+		if (record) {
+			flowName = record.name;
+			const parsed = JSON.parse(record.flow_json) as {
+				steps: FlowStep[];
+				no_match?: NoMatchPolicy;
+			};
+			flow = parsed;
+			noMatchEscalate = parsed.no_match?.escalate ?? false;
+			flowRow = {
+				id: record.id,
+				name: record.name,
+				flow_json: record.flow_json,
+				updated_at: record.updated_at,
+			};
+		}
+	});
+
+	const usingCount = $derived(store.flows.find((f) => f.id === id)?.library_count ?? 0);
 </script>
 
-{#if !loaded}
-	{#if loadError}
-		<div class="py-16 text-center text-sm text-destructive">
-			{loadError}
-		</div>
+{#if id}
+	{#if !flow}
+		<div class="py-12 text-center text-sm text-muted-foreground">Loading…</div>
 	{:else}
-		<div class="py-16 text-center text-sm text-muted-foreground">Loading flow…</div>
-	{/if}
-{:else if schema && flow}
-	<button
-		class="mb-2 flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
-		onclick={() => navigate("/flows")}
-	>
-		<ChevronLeftIcon class="size-4" data-icon="inline-start" />
-		Flows
-	</button>
-
-	<div class="flex flex-wrap items-center gap-3">
-		<input
-			class="h-9 w-56 rounded-md border border-input bg-transparent px-3 text-xl font-semibold tracking-tight outline-none focus-visible:ring-1 focus-visible:ring-ring"
-			placeholder="Flow name"
-			bind:value={flowName}
-		/>
-		<Badge variant="secondary" class="font-mono">v{flow.flow_version}</Badge>
-		{#if flowRow && flowRow.library_count > 0}
-			<Badge variant="secondary">{flowRow.library_count} libraries</Badge>
-		{/if}
-		{#if dirty}
-			<Badge variant="outline" class="border-amber-500 text-amber-600 dark:border-amber-400 dark:text-amber-300">
-				unsaved changes
-			</Badge>
-		{/if}
-		<span class="flex-1"></span>
-		<Button onclick={save} disabled={saving || !dirty}>
-			{saving ? "Saving…" : "Save"}
-		</Button>
-	</div>
-	<p class="text-sm text-muted-foreground">
-		Steps are evaluated top to bottom; the first match decides. Saving re-evaluates every library that
-		uses this flow.
-	</p>
-
-	<Card.Root class="mt-4">
-		<Card.Header>
-			<Card.Title>Steps</Card.Title>
-			<Card.Description>Order matters — first matching step wins.</Card.Description>
-		</Card.Header>
-		<Card.Content>
-			{#each flow.steps ?? [] as step, i (step.id)}
-				<StepCard
-					{step}
-					index={i}
-					total={(flow.steps ?? []).length}
-					{schema}
-					devices={schema.devices}
-					onRemove={() => removeStep(step.id)}
-					onMoveUp={() => moveStep(step.id, -1)}
-					onMoveDown={() => moveStep(step.id, 1)}
+		<div class="flex flex-col gap-4">
+			<div class="flex flex-wrap items-center gap-2">
+				<Button variant="ghost" size="sm" onclick={() => navigate("/flows")}>
+					← Flows
+				</Button>
+				<input
+					class="h-9 w-64 rounded-md border border-input bg-transparent px-2 text-sm"
+					value={flowName}
+					placeholder="Flow name"
+					oninput={(e) => (flowName = (e.target as HTMLInputElement).value)}
 				/>
-			{:else}
-				<div class="rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground">
-					No steps yet — this flow matches nothing.
-				</div>
-			{/each}
+				{#if dirty}<Badge class="bg-amber-500/20 text-amber-600 dark:text-amber-400">Unsaved changes</Badge>{/if}
+				{#if usingCount > 0}
+					<Badge variant="secondary" title="Libraries that use this flow">{usingCount} {usingCount === 1 ? "library" : "libraries"}</Badge>
+				{/if}
+				<Button class="ml-auto" disabled={!dirty || busy} onclick={save}>{busy ? "Saving…" : "Save"}</Button>
+			</div>
+			<p class="text-xs text-muted-foreground">
+				Re-encodes files that match its steps. Leave a section off and that part of the file is untouched.
+			</p>
 
-			<div class="mt-4 flex items-center justify-between gap-4 border-t pt-4">
-				<div class="flex flex-col gap-0.5">
-					<span class="text-sm font-medium">No matching step</span>
-					<span class="text-sm text-muted-foreground">Queue a failed job so the file is visible instead of silently compliant</span>
-				</div>
-				<Button
-					variant={flow.no_match?.escalate ? "default" : "outline"}
-					size="sm"
-					onclick={() => (flow ? setNoMatchEscalate(!(flow.no_match?.escalate)) : undefined)}
-				>
-					{flow.no_match?.escalate ? "Escalating" : "Not escalating"}
+			<div class="flex flex-col gap-3">
+				{#each steps as step, i (i)}
+					<StepCard
+						step={step}
+						index={i}
+						total={steps.length}
+						schema={schema!}
+						devices={store.devices as Device[]}
+						onRemove={() => removeStep(i)}
+						onMoveUp={() => moveStep(i, -1)}
+						onMoveDown={() => moveStep(i, 1)}
+					/>
+				{:else}
+					<div class="rounded-lg border border-dashed p-8 text-center text-sm text-muted-foreground">
+						No steps yet — a file must match a step's filters to be transcoded.
+					</div>
+				{/each}
+				<Button variant="outline" size="sm" class="self-start" onclick={addStep}>
+					+ Add step
 				</Button>
 			</div>
 
-			<Button class="mt-4" variant="outline" onclick={addStep}>
-				Add step
-			</Button>
-		</Card.Content>
-	</Card.Root>
+			<div class="rounded-lg border p-3">
+				<div class="flex items-center gap-2">
+					<Switch bind:checked={noMatchEscalate} onchange={() => setNoMatchEscalate(!noMatchEscalate)} />
+					<span class="text-sm font-medium">Warn on unmatched files</span>
+				</div>
+				<p class="mt-1 text-xs text-muted-foreground">
+					Files that match no step are left as they are; this flag surfaces them as warnings instead.
+				</p>
+			</div>
+
+			{#if flowRow}
+				<p class="text-xs text-muted-foreground">Last saved {formatUnixSeconds(flowRow.updated_at)}</p>
+			{/if}
+		</div>
+	{/if}
 {:else}
-	<div class="py-16 text-center text-sm text-muted-foreground">Flow schema unavailable.</div>
+	<div class="py-12 text-center text-sm text-muted-foreground">No flow selected.</div>
 {/if}

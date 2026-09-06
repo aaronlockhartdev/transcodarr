@@ -190,19 +190,19 @@
 {:else if schema.kind === "boolean"}
 	<label class="flex items-center gap-2">
 		<Switch bind:checked={boolValue} onchange={() => setBool(!boolValue)} />
-		<span class="text-sm">{schema.hint ?? "toggle"}</span>
+		<span class="text-sm">{schema.label ?? schema.hint ?? "Toggle"}</span>
 	</label>
 {:else if schema.kind === "multi_select"}
 	<div class="flex flex-wrap gap-1.5">
-		{#each schema.values as v (v)}
+		{#each schema.values as v (v.value)}
 			<Button
 				type="button"
-				variant={listValue.includes(v) ? "default" : "outline"}
+				variant={listValue.includes(v.value) ? "default" : "outline"}
 				size="sm"
 				class="h-auto px-2 py-1 text-xs"
-				onclick={() => toggle(v)}
+				onclick={() => toggle(v.value)}
 			>
-				{v}
+				{v.label}
 			</Button>
 		{/each}
 	</div>

@@ -56,16 +56,18 @@ impl OperationSection for Subtitles {
     fn ui_schema(&self) -> Value {
         json!({
             "kind": "object",
+            "label": "Subtitles",
             "fields": {
                 "policy": {
                     "kind": "single_select",
+                    "label": "Policy",
                     "values": [
-                        { "value": "keep_all", "label": "Keep all (copy)" },
-                        { "value": "keep_forced", "label": "Keep forced-only" },
+                        { "value": "keep_all", "label": "Keep all" },
+                        { "value": "keep_forced", "label": "Keep forced only" },
                         { "value": "drop", "label": "Drop" }
                     ],
                     "default": "keep_all",
-                    "hint": "Copy only — burn-in is parked (design §12)."
+                    "hint": "Subtitles are copied, never re-encoded."
                 }
             }
         })

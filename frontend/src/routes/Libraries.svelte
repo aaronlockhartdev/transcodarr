@@ -15,6 +15,9 @@
 	import { store } from "$lib/store.svelte.js";
 	import { formatBytes } from "$lib/format.js";
 	import type { Library } from "$lib/types.js";
+	import { sortBy } from "$lib/sort";
+	import SortableHead from "$lib/components/tables/sortable-head.svelte";
+	import { Input } from "$lib/components/ui/input";
 
 	let createOpen = $state(false);
 	let editing = $state<Library | null>(null);
@@ -34,6 +37,40 @@
 			bytes: files.reduce((n, f) => n + f.size, 0),
 		};
 	}
+
+	let query = $state("");
+	let sortKey = $state<"name" | "files" | "compliant" | "failed" | "size" | null>(null);
+	let sortDir = $state<"asc" | "desc">("asc");
+	function toggleSort(k: typeof sortKey) {
+		if (k === null) return;
+		if (sortKey === k) sortDir = sortDir === "asc" ? "desc" : "asc";
+		else {
+			sortKey = k;
+			sortDir = "asc";
+		}
+	}
+	const rows = $derived.by(() => {
+		const q = query.trim().toLowerCase();
+		const libs = store.libraries.filter(
+			(l) => q === "" || l.name.toLowerCase().includes(q) || l.path.toLowerCase().includes(q),
+		);
+		const withSum = libs.map((lib) => ({ lib, s: summary(lib) }));
+		if (sortKey === null) return withSum;
+		return sortBy(
+			withSum,
+			(r) =>
+				sortKey === "name"
+					? r.lib.name
+					: sortKey === "files"
+						? r.s.total
+						: sortKey === "compliant"
+							? r.s.compliant
+							: sortKey === "failed"
+								? r.s.failed
+								: r.s.bytes,
+			sortDir,
+		);
+	});
 
 	async function confirmDelete() {
 		if (!deleting) return;
@@ -56,7 +93,10 @@
 		<h1 class="text-2xl font-semibold tracking-tight">Libraries</h1>
 		<p class="text-muted-foreground">Media collections under management.</p>
 	</div>
-	<Button onclick={() => (createOpen = true)}>New library</Button>
+	<div class="flex items-center gap-2">
+		<Input class="h-9 w-52" placeholder="Search libraries…" bind:value={query} />
+		<Button onclick={() => (createOpen = true)}>New library</Button>
+	</div>
 </div>
 
 {#if store.libraries.length === 0}
@@ -76,20 +116,29 @@
 			<Table.Root>
 				<Table.Header>
 					<Table.Row>
-						<Table.Head>Library</Table.Head>
+						<SortableHead active={sortKey === "name"} dir={sortDir} onToggle={() => toggleSort("name")}>
+							Library
+						</SortableHead>
 						<Table.Head>Path</Table.Head>
 						<Table.Head>Flow</Table.Head>
 						<Table.Head>Mode</Table.Head>
-						<Table.Head class="text-right">Files</Table.Head>
-						<Table.Head class="text-right">Compliant</Table.Head>
-						<Table.Head class="text-right">Failed</Table.Head>
-						<Table.Head class="text-right">Size</Table.Head>
+						<SortableHead class="text-right" active={sortKey === "files"} dir={sortDir} onToggle={() => toggleSort("files")}>
+							Files
+						</SortableHead>
+						<SortableHead class="text-right" active={sortKey === "compliant"} dir={sortDir} onToggle={() => toggleSort("compliant")}>
+							Compliant
+						</SortableHead>
+						<SortableHead class="text-right" active={sortKey === "failed"} dir={sortDir} onToggle={() => toggleSort("failed")}>
+							Failed
+						</SortableHead>
+						<SortableHead class="text-right" active={sortKey === "size"} dir={sortDir} onToggle={() => toggleSort("size")}>
+							Size
+						</SortableHead>
 						<Table.Head class="w-10" />
 					</Table.Row>
 				</Table.Header>
 				<Table.Body>
-					{#each store.libraries as lib (lib.id)}
-						{@const s = summary(lib)}
+					{#each rows as { lib, s } (lib.id)}
 						<Table.Row class="cursor-pointer" onclick={() => navigate(`/libraries/${lib.id}`)}>
 							<Table.Cell class="font-medium">
 								{lib.name}
@@ -143,6 +192,10 @@
 									</DropdownMenu.Content>
 								</DropdownMenu.Root>
 							</Table.Cell>
+						</Table.Row>
+					{:else}
+						<Table.Row>
+							<Table.Cell colspan={9} class="text-center text-muted-foreground">No libraries match.</Table.Cell>
 						</Table.Row>
 					{/each}
 				</Table.Body>

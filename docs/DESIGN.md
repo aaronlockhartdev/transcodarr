@@ -227,14 +227,14 @@ All derived from existing tables; no new subsystem.
 
 ### 9.3 Flow editor
 
-- Ordered **step cards**: condition card (pickers rendered from the flow schema) → operation card (video/audio/subtitle sections, §6).
+- Ordered, **collapsible step cards**, each with two zones: **Filters** — an addable/removable list of rows (field picker + value control), all AND-ed; an unset row means "any", and no-op rows are pruned on save — and **Transcode** — one bordered box per operation section (video/audio/container/subtitles, §6), each independently on/off. Field and option names are rendered from schema labels (capitalized, friendly — e.g. "H.264", "Dolby Vision"); resolution bounds are typed (common names like "1080p" or "width × height" autocomplete from the schema's common set) rather than picked from presets.
 - **Impact preview (the killer feature)**: on every edit, `evaluate()` re-runs over the using libraries' cached facts and shows, before saving: *"this edit changes the fate of N files: 12 will transcode, 3 will lose audio tracks, 4,180 untouched; 2 files become unmatched."*
 - **No raw JSON escape hatch in v1** — every field is a schema-driven picker (§5); the schema is the only surface, which keeps every save structurally valid for a shared object.
 - The NoMatch behavior (unmatched status / warning escalation) is visible and configurable from this screen.
 
 ### 9.4 Jobs
 
-Running (live progress via poll, device, kill; **live log streaming is planned with the §9.0 SSE work** — v1's viewer polls the log endpoint) · completed · failed (full log from storage, quarantine link, retry) · quarantined. Queue-level pause/resume; per-device cap gauges.
+Running (live progress via poll, device, kill; **live log streaming is planned with the §9.0 SSE work** — v1's viewer polls the log endpoint) · completed · failed (full log from storage, quarantine link, retry) · quarantined. Queue-level pause/resume; per-device cap gauges. Job, file, and library tables are sortable on their useful columns and filterable (search box; the library page's status badges double as filters).
 
 ### 9.5 Settings
 

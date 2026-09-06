@@ -255,17 +255,23 @@ impl OperationSection for Audio {
     }
 
     fn ui_schema(&self) -> Value {
+        let mut default_policy = audio_policy_schema();
+        default_policy["label"] = json!("Default policy");
+        let mut action_policy = audio_policy_schema();
+        action_policy["label"] = json!("Action");
         json!({
             "kind": "object",
+            "label": "Audio",
             "fields": {
-                "default": audio_policy_schema(),
+                "default": default_policy,
                 "rules": {
                     "kind": "list",
+                    "label": "Rules",
                     "item": {
-                        "match": { "codecs": { "kind": "multi_select", "values": crate::registry::condition::audio_codec::AUDIO_CODECS }, "languages": { "kind": "multi_select" } },
-                        "action": audio_policy_schema()
+                        "match": { "codecs": { "kind": "multi_select", "label": "Codecs", "values": crate::registry::condition::audio_codec::codec_value_pairs() }, "languages": { "kind": "multi_select", "label": "Languages" } },
+                        "action": action_policy
                     },
-                    "hint": "First matching rule wins. Re-encode applies to ALL matching tracks."
+                    "hint": "The first matching rule wins. Re-encode applies to all matching tracks."
                 }
             }
         })
@@ -294,8 +300,8 @@ pub fn audio_policy_schema() -> Value {
                     { "value": "aac", "label": "AAC" }
                 ]
             },
-            "sample_rate": { "kind": "text", "hint": "Hertz, e.g. 48000. Leave empty to keep the source rate." },
-            "channels": { "kind": "text", "hint": "Leave empty to keep the source channel count." }
+            "sample_rate": { "kind": "text", "label": "Sample rate (Hz)", "hint": "Leave empty to keep the source rate." },
+            "channels": { "kind": "text", "label": "Channels", "hint": "Leave empty to keep the source channel count." }
         }
     })
 }

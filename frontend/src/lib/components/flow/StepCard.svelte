@@ -1,18 +1,21 @@
 <script lang="ts">
 	/**
-	 * One flow step: condition (all fields from the schema) + operation
-	 * sections (video / audio / subtitles / container). Absent section =
-	 * identity; present section = the editor's values.
+	 * One flow step: a collapsible card with two zones — Filters (the file
+	 * must match all of them; add/remove freely) and Transcode (the
+	 * operation sections to apply). Everything is rendered from the flow
+	 * schema (core §5); absent section = identity.
 	 */
 	import { Button } from "$lib/components/ui/button";
 	import { Input } from "$lib/components/ui/input";
 	import SyncSwitch from "./SyncSwitch.svelte";
 	import ChevronUpIcon from "@lucide/svelte/icons/chevron-up";
 	import ChevronDownIcon from "@lucide/svelte/icons/chevron-down";
+	import ChevronRightIcon from "@lucide/svelte/icons/chevron-right";
+	import PlusIcon from "@lucide/svelte/icons/plus";
 	import TrashIcon from "@lucide/svelte/icons/trash-2";
 	import Undo2Icon from "@lucide/svelte/icons/undo-2";
 	import FlowField from "./FlowField.svelte";
-	import type { Device, FlowStep, FlowSchema, UiSchema } from "$lib/types.js";
+	import type { Device, FlowStep, FlowSchema, SchemaOption, UiSchema } from "$lib/types.js";
 
 	let {
 		step,
@@ -34,9 +37,63 @@
 		onMoveDown: () => void;
 	} = $props();
 
-	// ---- condition helpers -------------------------------------------------
-	// Constraint key per multi_select field (serialization contract, core §5):
-	// audio_codec matches ANY track, all other fields are exact-membership.
+	let open = $state(true);
+
+	// Display label for a schema field/section: the schema's own label when
+	// present, else a title-cased key ("file_size" → "File size").
+	function label(key: string, s?: { label?: string } | null): string {
+		if (s?.label) return s.label;
+		return key.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+	}
+
+	// ---- filters (condition = an ordered list of field constraints) ------
+	// Object.keys alone does not subscribe on a $state proxy — read each
+	// value so key add/remove re-runs this derived.
+	const filterKeys = $derived.by(() => {
+		const c = step.condition;
+		const keys = Object.keys(c);
+		for (const k of keys) void (c as Record<string, unknown>)[k];
+		return keys;
+	});
+
+	// The "any" constraint for a freshly added filter row: an empty list
+	// (in/any_of) or {} both mean "any" on the server, and keeping the key
+	// keeps the row visible while the user fills it in. save() prunes
+	// no-op constraints before sending.
+	function anyConstraint(field: string): Record<string, unknown> {
+		const kind = (schema.condition_fields[field]?.schema as { kind?: string } | undefined)?.kind;
+		return field === "audio_codec" ? { any_of: [] } : kind === "multi_select" ? { in: [] } : {};
+	}
+
+	function addFilter() {
+		const c = { ...step.condition };
+		for (const k of Object.keys(schema.condition_fields)) {
+			if (c[k] === undefined) {
+				c[k] = anyConstraint(k);
+				step.condition = c;
+				return;
+			}
+		}
+	}
+
+	function setFilterField(oldKey: string, newKey: string) {
+		if (oldKey === newKey) return;
+		const c: Record<string, unknown> = {};
+		for (const [k, v] of Object.entries(step.condition)) {
+			if (k !== oldKey) c[k] = v;
+		}
+		c[newKey] = anyConstraint(newKey); // the swapped-in row moves last
+		step.condition = c;
+	}
+
+	function removeFilter(field: string) {
+		const c = { ...step.condition };
+		delete c[field];
+		step.condition = c;
+	}
+
+	// multi_select constraints: audio_codec matches ANY track (any_of), all
+	// other fields are exact-membership (in).
 	function constraintKey(field: string): "in" | "any_of" {
 		return field === "audio_codec" ? "any_of" : "in";
 	}
@@ -47,11 +104,7 @@
 		return Array.isArray(c[key]) ? (c[key] as string[]) : [];
 	}
 	function setList(field: string, list: string[]) {
-		const key = constraintKey(field);
-		const next = { ...step.condition };
-		if (list.length === 0) delete next[field];
-		else next[field] = { [key]: list };
-		step.condition = next;
+		step.condition = { ...step.condition, [field]: { [constraintKey(field)]: list } };
 	}
 	function toggleChip(field: string, v: string) {
 		const list = [...listFor(field)];
@@ -61,20 +114,58 @@
 		setList(field, list);
 	}
 
-	// resolution_range: {min?: [w,h], max?: [w,h]}
+	// resolution_range: {min?: [w,h], max?: [w,h]} — free text in (a common
+	// name like "1080p" or "width×height"), pixel bounds out.
 	type ResRange = { min?: [number, number]; max?: [number, number] };
 	function resFor(): ResRange {
 		return (step.condition["resolution"] as ResRange) ?? {};
 	}
-	function setRes(which: "min" | "max", w: number, h: number) {
+	function setRes(which: "min" | "max", wh?: [number, number]) {
 		const r: ResRange = { ...resFor() };
-		if (w > 0 && h > 0) r[which] = [w, h];
+		if (wh) r[which] = wh;
 		else delete r[which];
-		if (!r.min && !r.max) delete step.condition["resolution"];
-		else step.condition = { ...step.condition, resolution: r };
+		step.condition = { ...step.condition, resolution: r };
+	}
+	const resCommon = $derived.by(() => {
+		const f = schema.condition_fields["resolution"] as
+			| { schema?: { common?: Record<string, [number, number]> } }
+			| undefined;
+		return f?.schema?.common ?? {};
+	});
+	function parseRes(text: string): [number, number] | null {
+		const t = text.trim().toLowerCase();
+		if (t === "") return null;
+		if (resCommon[t]) return resCommon[t];
+		const m = t.match(/^(\d{2,5})\s*[x×]\s*(\d{2,5})$/);
+		return m ? [Number(m[1]), Number(m[2])] : null;
+	}
+	function resDisplay(which: "min" | "max"): string {
+		const wh = resFor()[which];
+		if (!wh) return "";
+		for (const [k, pair] of Object.entries(resCommon)) {
+			if (pair[0] === wh[0] && pair[1] === wh[1]) return k;
+		}
+		return `${wh[0]}×${wh[1]}`;
+	}
+	let resMinText = $state("");
+	let resMaxText = $state("");
+	$effect(() => {
+		// Resync the edit buffers from the constraint (commit → canonical
+		// display normalizes what was typed).
+		resMinText = resDisplay("min");
+		resMaxText = resDisplay("max");
+	});
+	function commitRes(which: "min" | "max") {
+		const text = which === "min" ? resMinText : resMaxText;
+		if (text.trim() === "") {
+			setRes(which); // cleared → unbounded
+			return;
+		}
+		// An invalid edit keeps the previous bound.
+		setRes(which, parseRes(text) ?? resFor()[which]);
 	}
 
-	// byte_range: {min?, max?} in bytes
+	// byte_range: {min?, max?} in bytes, edited in megabytes.
 	type ByteRange = { min?: number; max?: number };
 	function sizeFor(): ByteRange {
 		return (step.condition["file_size"] as ByteRange) ?? {};
@@ -84,13 +175,12 @@
 		const bytes = Math.round(Number(mb) * 1_000_000);
 		if (mb && bytes > 0) s[which] = bytes;
 		else delete s[which];
-		if (!s.min && !s.max) delete step.condition["file_size"];
-		else step.condition = { ...step.condition, file_size: s };
+		step.condition = { ...step.condition, file_size: s };
 	}
 
-	// ---- operation helpers --------------------------------------------------
-	// NOTE: `name in step.operation` is NOT a tracked read on the $state proxy
-	// (only property gets subscribe), so use an explicit get here.
+	// ---- operation sections ----------------------------------------------
+	// NOTE: `name in step.operation` is NOT a tracked read on the $state
+	// proxy (only property gets subscribe), so use explicit gets here.
 	function sectionEnabled(name: string): boolean {
 		return (step.operation as Record<string, unknown>)[name] !== undefined;
 	}
@@ -111,7 +201,6 @@
 		const o = step.operation as unknown as Record<string, any>;
 		return o;
 	});
-
 	function sectionValue(name: string): Record<string, unknown> {
 		const v = step.operation[name];
 		return (v as Record<string, unknown>) ?? {};
@@ -174,7 +263,9 @@
 	// The audio section's `default` field carries the policy schema (kind:
 	// audio_policy) shared by the rule-action select.
 	const policyOpts = $derived.by(() => {
-		const f = (schema.operation_sections["audio"]?.schema as { fields?: Record<string, { values?: { value: string; label: string }[] }> })?.fields?.["default"];
+		const f = (schema.operation_sections["audio"]?.schema as {
+			fields?: Record<string, { values?: SchemaOption[] }>;
+		})?.fields?.["default"];
 		return f?.values ?? [];
 	});
 	function policySelectValue(action: unknown): string {
@@ -184,7 +275,9 @@
 		return typeof action === "string" ? action : "copy";
 	}
 	function reencodeActionDefault(): Record<string, unknown> {
-		const f = (schema.operation_sections["audio"]?.schema as { fields?: Record<string, { reencode?: { codec?: { values?: { value: string }[] } } }> })?.fields?.["default"];
+		const f = (schema.operation_sections["audio"]?.schema as {
+			fields?: Record<string, { reencode?: { codec?: { values?: { value: string }[] } } }>;
+		})?.fields?.["default"];
 		return { codec: f?.reencode?.codec?.values?.[0]?.value ?? "eac3" };
 	}
 	function ruleActionObj(i: number): Record<string, unknown> {
@@ -228,31 +321,43 @@
 
 	// The audio section's policy fragment supplies the re-encode codec list.
 	const reencodeCodecOpts = $derived.by(() => {
-		const f = (schema.operation_sections["audio"]?.schema as { fields?: Record<string, { reencode?: { codec?: { values?: { value: string; label: string }[] } } }> })?.fields?.["default"];
+		const f = (schema.operation_sections["audio"]?.schema as {
+			fields?: Record<string, { reencode?: { codec?: { values?: SchemaOption[] } } }>;
+		})?.fields?.["default"];
 		return f?.reencode?.codec?.values ?? [];
 	});
 	// Rule match-codec vocabulary from the audio section's rule item schema.
 	const ruleMatchCodecOpts = $derived.by(() => {
-		const f = (schema.operation_sections["audio"]?.schema as { fields?: Record<string, { item?: { match?: { codecs?: { values?: string[] } } } }> })?.fields?.["rules"];
-		return f?.item?.match?.codecs?.values ?? [];
+		const f = (schema.operation_sections["audio"]?.schema as {
+			fields?: Record<string, { item?: { match?: { codecs?: SchemaOption[] } } }>;
+		})?.fields?.["rules"];
+		return f?.item?.match?.codecs ?? [];
 	});
-	
-	const noCondition = $derived.by(() => {
-		// Object.keys alone does not subscribe on a $state proxy — read each
-		// value so key add/remove re-runs this derived.
-		const c = step.condition;
-		const keys = Object.keys(c);
-		for (const k of keys) void (c as Record<string, unknown>)[k];
-		return keys.length === 0;
+
+	// ---- header summary (visible collapsed) ------------------------------
+	const enabledSectionNames = $derived.by(() => {
+		const o = step.operation as Record<string, unknown>;
+		const names = Object.keys(o);
+		for (const n of names) void o[n];
+		return names.filter((n) => o[n] !== undefined);
+	});
+	const summary = $derived.by(() => {
+		const filters = filterKeys.length;
+		const left = filters === 0 ? "matches every file" : filters === 1 ? "1 filter" : `${filters} filters`;
+		const right = enabledSectionNames.length === 0 ? "no changes" : enabledSectionNames
+			.map((n) => label(n, (schema.operation_sections[n]?.schema as { label?: string } | undefined) ?? null))
+			.join(", ");
+		return `${left} · ${right}`;
 	});
 </script>
 
-<div class="flex flex-col gap-3 rounded-lg border p-4">
-	<div class="flex items-center gap-2">
-		<span class="rounded-md bg-muted px-2 py-0.5 font-mono text-xs">step {index + 1}</span>
-		<span class="text-sm text-muted-foreground">
-			{noCondition ? "matches every file" : "matches when all set fields apply"}
-		</span>
+<div class="rounded-lg border">
+	<div class="flex items-center gap-2 p-3">
+		<Button variant="ghost" size="sm" onclick={() => (open = !open)} title={open ? "Collapse step" : "Expand step"}>
+			{#if open}<ChevronDownIcon class="size-4" />{:else}<ChevronRightIcon class="size-4" />{/if}
+		</Button>
+		<span class="text-sm font-medium">Step {index + 1}</span>
+		<span class="hidden truncate text-xs text-muted-foreground sm:inline">{summary}</span>
 		<div class="ml-auto flex gap-1">
 			<Button variant="ghost" size="sm" onclick={onMoveUp} disabled={index === 0} title="Move up">
 				<ChevronUpIcon class="size-4" />
@@ -266,121 +371,165 @@
 		</div>
 	</div>
 
-	<div class="grid gap-3 md:grid-cols-2">
-		{#each Object.entries(schema.condition_fields) as [field, f] (field)}
-			{#if f.schema.kind === "multi_select"}
-				<div>
-					<p class="mb-1 text-xs font-medium">{field}</p>
-					<div class="flex flex-wrap gap-1">
-						{#each f.schema.values as v (v)}
-							<Button
-								type="button"
-								variant={listFor(field).includes(v) ? "default" : "outline"}
-								size="sm"
-								class="h-auto px-1.5 py-0.5 font-mono text-[11px]"
-								onclick={() => toggleChip(field, v)}
+	{#if open}
+		<div class="flex flex-col gap-4 border-t p-3">
+			<!-- Filters: the file must match all of them -->
+			<section class="rounded-md border bg-muted/40 p-3">
+				<div class="flex flex-col gap-0.5">
+					<h3 class="text-sm font-medium">Filters</h3>
+					<p class="text-xs text-muted-foreground">The file must match all of these</p>
+				</div>
+				<div class="mt-3 flex flex-col gap-2">
+					{#each filterKeys as field (field)}
+						{@const f = schema.condition_fields[field]}
+						<div class="flex flex-wrap items-center gap-2">
+							<select
+								class="h-8 w-36 rounded-lg border border-input bg-transparent px-2 text-sm"
+								value={field}
+								onchange={(e) => setFilterField(field, (e.target as HTMLSelectElement).value)}
 							>
-								{v}
+								{#each Object.entries(schema.condition_fields) as [k, cf] (k)}
+									<option value={k}>{label(k, cf.schema as { label?: string })}</option>
+								{/each}
+							</select>
+							<div class="min-w-0 flex-1">
+								{#if f.schema.kind === "multi_select"}
+									<div class="flex flex-wrap gap-1">
+										{#each f.schema.values as v (v.value)}
+											<Button
+												type="button"
+												variant={listFor(field).includes(v.value) ? "default" : "outline"}
+												size="sm"
+												class="h-auto px-2 py-0.5 text-xs"
+												onclick={() => toggleChip(field, v.value)}
+											>
+												{v.label}
+											</Button>
+										{/each}
+									</div>
+								{:else if f.schema.kind === "resolution_range"}
+									<div class="flex flex-wrap items-center gap-2 text-xs">
+										<span class="text-muted-foreground">At least</span>
+										<Input
+											list="resolution-common"
+											class="h-8 w-28"
+											value={resMinText}
+											oninput={(e) => (resMinText = (e.target as HTMLInputElement).value)}
+											onblur={() => commitRes("min")}
+											onkeydown={(e) => e.key === "Enter" && (e.target as HTMLElement).blur()}
+											placeholder="1080p"
+										/>
+										<span class="text-muted-foreground">At most</span>
+										<Input
+											list="resolution-common"
+											class="h-8 w-28"
+											value={resMaxText}
+											oninput={(e) => (resMaxText = (e.target as HTMLInputElement).value)}
+											onblur={() => commitRes("max")}
+											onkeydown={(e) => e.key === "Enter" && (e.target as HTMLElement).blur()}
+											placeholder="4k"
+										/>
+									</div>
+									<datalist id="resolution-common">
+										{#each Object.keys(resCommon) as k (k)}
+											<option value={k}></option>
+										{/each}
+									</datalist>
+								{:else if f.schema.kind === "byte_range"}
+									{@const s = sizeFor()}
+									<div class="flex items-center gap-2">
+										<Input
+											type="number"
+											min="0"
+											class="h-8 w-24"
+											value={s.min ? String(Math.round(s.min / 1_000_000)) : ""}
+											oninput={(e) => setSize("min", (e.target as HTMLInputElement).value)}
+											placeholder="Min MB"
+										/>
+										<span class="text-muted-foreground">→</span>
+										<Input
+											type="number"
+											min="0"
+											class="h-8 w-24"
+											value={s.max ? String(Math.round(s.max / 1_000_000)) : ""}
+											oninput={(e) => setSize("max", (e.target as HTMLInputElement).value)}
+											placeholder="Max MB"
+										/>
+										<span class="text-xs text-muted-foreground">MB</span>
+									</div>
+								{:else}
+									<FlowField schema={f.schema} bind:value={step.condition[field]} devices={devices} />
+								{/if}
+							</div>
+							<Button variant="ghost" size="sm" title="Remove filter" onclick={() => removeFilter(field)}>
+								<TrashIcon class="size-3.5" />
 							</Button>
-						{/each}
-					</div>
-					<p class="mt-1 text-[11px] text-muted-foreground">{f.schema.hint ?? f.description}</p>
-				</div>
-			{:else if f.schema.kind === "resolution_range"}
-				{@const r = resFor()}
-				<div>
-					<p class="mb-1 text-xs font-medium">resolution</p>
-					<div class="flex flex-wrap items-center gap-1">
-						{#each Object.entries(f.schema.common) as [label, wh] (label)}
-							<Button
-								type="button"
-								variant={r.min?.[0] === wh[0] && r.min?.[1] === wh[1] ? "default" : "outline"}
-								size="sm"
-								class="h-auto px-1.5 py-0.5 text-[11px]"
-								onclick={() => setRes("min", wh[0], wh[1])}
-							>
-								≥{label}
-							</Button>
-							<Button
-								type="button"
-								variant={r.max?.[0] === wh[0] && r.max?.[1] === wh[1] ? "default" : "outline"}
-								size="sm"
-								class="h-auto px-1.5 py-0.5 text-[11px]"
-								onclick={() => setRes("max", wh[0], wh[1])}
-							>
-								≤{label}
-							</Button>
-						{/each}
-					</div>
-					<div class="mt-1 flex items-center gap-1 text-[11px] text-muted-foreground">
-						min <Input type="number" class="h-6 w-16 px-1 text-[11px]" value={r.min?.[0] ? String(r.min[0]) : ""} oninput={(e) => setRes("min", Number((e.target as HTMLInputElement).value), Number(r.min?.[1] ?? 0))} placeholder="w" /> ×
-						<Input type="number" class="h-6 w-16 px-1 text-[11px]" value={r.min?.[1] ? String(r.min[1]) : ""} oninput={(e) => setRes("min", Number(r.min?.[0] ?? 0), Number((e.target as HTMLInputElement).value))} placeholder="h" />
-						max <Input type="number" class="h-6 w-16 px-1 text-[11px]" value={r.max?.[0] ? String(r.max[0]) : ""} oninput={(e) => setRes("max", Number((e.target as HTMLInputElement).value), Number(r.max?.[1] ?? 0))} placeholder="w" /> ×
-						<Input type="number" class="h-6 w-16 px-1 text-[11px]" value={r.max?.[1] ? String(r.max[1]) : ""} oninput={(e) => setRes("max", Number(r.max?.[0] ?? 0), Number((e.target as HTMLInputElement).value))} placeholder="h" />
-					</div>
-				</div>
-			{:else if f.schema.kind === "byte_range"}
-				{@const s = sizeFor()}
-				<div>
-					<p class="mb-1 text-xs font-medium">file size (MB)</p>
-					<div class="flex items-center gap-1">
-						<Input type="number" min="0" class="h-8 w-24" value={s.min ? String(Math.round(s.min / 1_000_000)) : ""} oninput={(e) => setSize("min", (e.target as HTMLInputElement).value)} placeholder="min" />
-						<span class="text-muted-foreground">→</span>
-						<Input type="number" min="0" class="h-8 w-24" value={s.max ? String(Math.round(s.max / 1_000_000)) : ""} oninput={(e) => setSize("max", (e.target as HTMLInputElement).value)} placeholder="max" />
-					</div>
-				</div>
-			{:else}
-				<div>
-					<p class="mb-1 text-xs font-medium">{field}</p>
-					<FlowField schema={f.schema} bind:value={step.condition[field]} devices={devices} />
-				</div>
-			{/if}
-		{/each}
-	</div>
-
-	<div class="border-t pt-3">
-		<p class="mb-2 text-xs font-medium text-muted-foreground">Operation</p>
-		<div class="flex flex-col gap-3">
-			{#each Object.entries(schema.operation_sections) as [name, sec] (name)}
-				{#if sec.schema.kind === "object"}
-					{@const enabled = sectionEnabled(name)}
-					<div class="flex flex-col gap-2 rounded-md border p-2">
-						<div class="flex items-center gap-2">
-						<SyncSwitch enabled={enabled} onSet={(on) => setSection(name, on)} />
-							<span class="text-sm font-medium">{name}</span>
-							{#if sec.schema.hint}
-								<span class="text-[11px] text-muted-foreground">{sec.schema.hint}</span>
-							{/if}
 						</div>
-						{#if enabled}
-							<div class="grid gap-3 md:grid-cols-2">
-								{#each Object.entries(sec.schema.fields) as [field, f] (field)}
-									{#if name === "audio" && field === "rules"}
-										<div class="md:col-span-2">
-											<p class="mb-1 text-xs font-medium">Rules <span class="text-muted-foreground">(first match wins; re-encode applies to all matching tracks)</span></p>
-											
-											{#each rulesFor() as rule, i (i)}
-												<div class="mb-2 flex flex-wrap items-center gap-2 rounded border p-2">
-													<div class="flex flex-wrap gap-1">
-												{#each ruleMatchCodecOpts as c (c)}
-															<Button
-																type="button"
-																variant={rule.match.codecs.includes(c) ? "default" : "outline"}
-																size="sm"
-																class="h-auto px-1.5 py-0.5 font-mono text-[11px]"
-																onclick={() => ruleChip(i, c)}
-															>
-																{c}
-															</Button>
-														{/each}
-													</div>
-													<Input class="h-7 w-32" placeholder="langs (en,fr)" value={rule.match.languages.join(", ")} oninput={(e) => setRuleLanguages(i, (e.target as HTMLInputElement).value)} />
+					{:else}
+						<p class="text-xs text-muted-foreground">No filters — this step matches every file.</p>
+					{/each}
+					<Button variant="outline" size="sm" onclick={addFilter}>
+						<PlusIcon class="size-3.5" />
+						Add filter
+					</Button>
+				</div>
+			</section>
+
+			<!-- Transcode: operation sections; off = pass through -->
+			<section class="rounded-md border p-3">
+				<div class="flex flex-col gap-0.5">
+					<h3 class="text-sm font-medium">Transcode</h3>
+					<p class="text-xs text-muted-foreground">Sections you leave off leave the file unchanged</p>
+				</div>
+				<div class="mt-3 flex flex-col gap-3">
+					{#each Object.entries(schema.operation_sections) as [name, sec] (name)}
+						{@const enabled = sectionEnabled(name)}
+						<div class="rounded-md border p-2.5">
+							<div class="flex flex-wrap items-center gap-2">
+								<SyncSwitch enabled={enabled} onSet={(on) => setSection(name, on)} />
+								<span class="text-sm font-medium">{label(name, sec.schema)}</span>
+								{#if sec.schema.hint}
+									<span class="text-xs text-muted-foreground">{sec.schema.hint}</span>
+								{/if}
+							</div>
+							{#if enabled}
+								{#if sec.schema.kind === "object"}
+									<div class="mt-2 grid gap-3 md:grid-cols-2">
+										{#each Object.entries(sec.schema.fields) as [field, f] (field)}
+											{#if name === "audio" && field === "rules"}
+												<div class="md:col-span-2">
+													<p class="mb-1 text-xs font-medium">
+														{label(field, f as { label?: string })}
+														{#if f.hint}<span class="font-normal text-muted-foreground"> — {f.hint}</span>{/if}
+													</p>
+													{#each rulesFor() as rule, i (i)}
+														<div class="mb-2 flex flex-wrap items-center gap-2 rounded border p-2">
+															<div class="flex flex-wrap gap-1">
+																{#each ruleMatchCodecOpts as c (c.value)}
+																	<Button
+																		type="button"
+																		variant={rule.match.codecs.includes(c.value) ? "default" : "outline"}
+																		size="sm"
+																		class="h-auto px-2 py-0.5 text-xs"
+																		onclick={() => ruleChip(i, c.value)}
+																	>
+																		{c.label}
+																	</Button>
+																{/each}
+															</div>
+															<Input
+																class="h-7 w-32"
+																placeholder="Languages (en, fr)"
+																value={rule.match.languages.join(", ")}
+																oninput={(e) => setRuleLanguages(i, (e.target as HTMLInputElement).value)}
+															/>
 															<span class="text-xs text-muted-foreground">→</span>
 															{#if typeof rule.action === "string"}
 																<select
 																	class="h-7 w-28 rounded-lg border border-input bg-transparent px-2 text-xs"
 																	value={policySelectValue(rule.action)}
-																	// "re_encode" writes the object form (the wire shape for re-encode is an object, not a string).
+																	// "re_encode" writes the object form (the wire
+																	// shape for re-encode is an object, not a string).
 																	onchange={(e) => {
 																		const v = (e.target as HTMLSelectElement).value;
 																		setRuleAction(i, v === "re_encode" ? reencodeActionDefault() : v);
@@ -401,52 +550,63 @@
 																			<option value={v.value}>{v.label}</option>
 																		{/each}
 																	</select>
-																	<Input class="h-7 w-16" placeholder="rate" title="Sample rate (Hz); empty keeps the source rate" value={(rule.action as { sample_rate?: number }).sample_rate ?? ""} oninput={(e) => setRuleReencodeRate(i, (e.target as HTMLInputElement).value)} />
-																	<Input class="h-7 w-14" placeholder="ch" title="Channel count; empty keeps the source" value={(rule.action as { channels?: number }).channels ?? ""} oninput={(e) => setRuleReencodeChannels(i, (e.target as HTMLInputElement).value)} />
-																	<Button variant="ghost" size="sm" title="Reset this action to Copy" onclick={() => setRuleAction(i, "copy")}>
+																	<Input
+																		class="h-7 w-16"
+																		placeholder="Rate"
+																		title="Sample rate (Hz); empty keeps the source rate"
+																		value={(rule.action as { sample_rate?: number }).sample_rate ?? ""}
+																		oninput={(e) => setRuleReencodeRate(i, (e.target as HTMLInputElement).value)}
+																	/>
+																	<Input
+																		class="h-7 w-14"
+																		placeholder="Ch"
+																		title="Channel count; empty keeps the source"
+																		value={(rule.action as { channels?: number }).channels ?? ""}
+																		oninput={(e) => setRuleReencodeChannels(i, (e.target as HTMLInputElement).value)}
+																	/>
+																	<Button
+																		variant="ghost"
+																		size="sm"
+																		title="Reset this action to Copy"
+																		onclick={() => setRuleAction(i, "copy")}
+																	>
 																		<Undo2Icon class="size-3.5" />
 																	</Button>
 																</div>
 															{/if}
-													<Button variant="ghost" size="sm" onclick={() => removeRule(i)}>
-														<TrashIcon class="size-3.5" />
+															<Button variant="ghost" size="sm" title="Remove rule" onclick={() => removeRule(i)}>
+																<TrashIcon class="size-3.5" />
+															</Button>
+														</div>
+													{/each}
+													<Button variant="outline" size="sm" onclick={addRule}>
+														<PlusIcon class="size-3.5" />
+														Add rule
 													</Button>
 												</div>
-											{/each}
-											<Button variant="outline" size="sm" onclick={addRule}>Add rule</Button>
-										</div>
-									{:else}
-										<div>
-											<p class="mb-1 text-xs font-medium">{field}
-												{#if f.hint}<span class="font-normal text-muted-foreground"> — {f.hint}</span>{/if}
-											</p>
-											<FlowField
-												schema={f as UiSchema}
-												bind:value={op[name][field]}
-												devices={devices}
-											/>
-										</div>
-									{/if}
-								{/each}
-							</div>
-						{/if}
-					</div>
-				{:else}
-					{@const enabled = sectionEnabled(name)}
-					<div class="flex items-center gap-2">
-					<SyncSwitch enabled={enabled} onSet={(on) => setSection(name, on)} />
-						<span class="text-sm font-medium">{name}</span>
-						{#if enabled}
-							<FlowField
-								schema={sec.schema}
-								bind:value={op[name]}
-								devices={devices}
-								class="w-56"
-							/>
-						{/if}
-					</div>
-				{/if}
-			{/each}
+											{:else}
+												<div>
+													<p class="mb-1 text-xs font-medium">
+														{label(field, f as { label?: string })}
+														{#if f.hint}<span class="font-normal text-muted-foreground"> — {f.hint}</span>{/if}
+													</p>
+													<FlowField
+														schema={f as UiSchema}
+														bind:value={op[name][field]}
+														devices={devices}
+													/>
+												</div>
+											{/if}
+										{/each}
+									</div>
+								{:else}
+									<FlowField schema={sec.schema} bind:value={op[name]} devices={devices} class="mt-2 w-64" />
+								{/if}
+							{/if}
+						</div>
+					{/each}
+				</div>
+			</section>
 		</div>
-	</div>
+	{/if}
 </div>

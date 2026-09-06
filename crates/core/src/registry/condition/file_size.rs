@@ -49,8 +49,9 @@ impl ConditionField for FileSize {
     fn ui_schema(&self) -> Value {
         json!({
             "kind": "byte_range",
+            "label": "File size",
             "unit": "bytes",
-            "hint": "Inclusive byte bounds. Leave empty for any.",
+            "hint": "Inclusive size bounds, in megabytes. Leave empty for any."
         })
     }
 }
