@@ -25,7 +25,7 @@ Non-goals for v1 (see §11–12): distributed workers, \*arr API integration, au
 |---|---|
 | **Library** | A directory tree the user adds. References a **flow** (a first-class shared object — see below), and carries: lifecycle mode (in-place or output tree), auto-queue toggle, scan schedule. |
 | **File facts** | Cached probe result for one file: container, video codec/profile/level/pixel format/resolution/frame rate, HDR format, audio tracks (codec, language, channel layout, Atmos flag), subtitle tracks (type, language, forced), size, duration, bitrate. |
-| **Flow** | A format policy: an ordered list of **steps**. A step = **condition** → **operation**. **First match wins.** Flows are **first-class, library-independent objects**: any number of libraries can reference the same flow, and editing one re-evaluates all of them. |
+| **Flow** | A format policy: an ordered list of **steps**. A step = **condition** → **operation** and may carry a user-assigned **display name** (unnamed steps show as "Step N"). **First match wins.** Flows are **first-class, library-independent objects**: any number of libraries can reference the same flow, and editing one re-evaluates all of them. |
 | **Compliant** | The flow evaluates to **identity** for the file's facts: the matched operation (or no match at all) would change nothing — every stream copied, nothing dropped, container already correct. |
 | **Job** | One execution of an evaluated plan against one file: transcode → verify → swap → backup → retain. |
 
@@ -163,7 +163,7 @@ ffmpeg -hwaccel cuda -i "In.Movie.2024.2160p.HEVC.mkv" \
 
 ### 6.2 Audio section (absent ⇒ copy all tracks)
 
-- **Default policy** for unnamed tracks: `copy` (default) / `re-encode` (codec, sample rate, channel layout) / `drop`.
+- **Default policy** for unnamed tracks: `copy` (default) / `re-encode` (codec; optional sample rate and channel count — **auto keeps the source values**) / `drop`.
 - Optional **per-track rules** matched by codec and/or language (e.g. "all DTS/TrueHD → EAC3 5.1").
 - **Atmos (EAC3-JOC) is copied unless an explicit rule re-encodes it** — never auto-downmixed.
 - Re-encoding, when invoked, applies to **all** matching tracks (deterministic target state, not "primary only").
@@ -227,7 +227,7 @@ All derived from existing tables; no new subsystem.
 
 ### 9.3 Flow editor
 
-- Ordered, **collapsible step cards**, each with two zones: **Filters** — an addable/removable list of rows (field picker + value control), all AND-ed; an unset row means "any", and no-op rows are pruned on save — and **Transcode** — one bordered box per operation section (video/audio/container/subtitles, §6), each independently on/off. Field and option names are rendered from schema labels (capitalized, friendly — e.g. "H.264", "Dolby Vision"); resolution bounds are typed (common names like "1080p" or "width × height" autocomplete from the schema's common set) rather than picked from presets.
+- Ordered, **collapsible step cards**, each with two zones: **Filters** — an addable/removable list of rows (field picker + value control), all AND-ed; an unset row means "any", and no-op rows are pruned on save — and **Transcode** — one bordered box per operation section (video/audio/container/subtitles, §6), each independently on/off. Field and option names are rendered from schema labels (capitalized, friendly — e.g. "H.264", "Dolby Vision"); resolution bounds are typed as integer width × height pixel inputs (no presets), each bound an unbreakable group that may wrap onto its own line. Steps are renamable (display name only — array order defines precedence), and a filter kind appears at most once per step: picking an already-present kind is rejected without changing the step.
 - **Impact preview (the killer feature)**: on every edit, `evaluate()` re-runs over the using libraries' cached facts and shows, before saving: *"this edit changes the fate of N files: 12 will transcode, 3 will lose audio tracks, 4,180 untouched; 2 files become unmatched."*
 - **No raw JSON escape hatch in v1** — every field is a schema-driven picker (§5); the schema is the only surface, which keeps every save structurally valid for a shared object.
 - The NoMatch behavior (unmatched status / warning escalation) is visible and configurable from this screen.

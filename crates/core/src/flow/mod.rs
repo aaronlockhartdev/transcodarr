@@ -55,6 +55,10 @@ pub struct FlowStep {
     /// orders steps by array position, not this field).
     #[serde(default)]
     pub id: String,
+    /// Optional user-assigned display name (UI only, like `id` — preserved
+    /// verbatim). Unnamed steps render as "Step N" by array position.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// AND of per-field constraints; absent fields are "any".
     ///
     /// An empty condition matches **every** file — a catch-all step.
@@ -63,4 +67,26 @@ pub struct FlowStep {
     /// The complete transformation. Absent sections are identity.
     #[serde(default)]
     pub operation: Operation,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn step_name_is_optional_and_preserved() {
+        let f: Flow = serde_json::from_str(
+            r#"{"flow_version":1,"steps":[{"condition":{},"operation":{},"name":"4K to 1080p"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(f.steps[0].name.as_deref(), Some("4K to 1080p"));
+
+        // An unnamed step round-trips without a `name` key at all.
+        let g: Flow =
+            serde_json::from_str(r#"{"flow_version":1,"steps":[{"condition":{},"operation":{}}]}"#)
+                .unwrap();
+        assert_eq!(g.steps[0].name, None);
+        let v = serde_json::to_value(&g).unwrap();
+        assert!(v["steps"][0].get("name").is_none());
+    }
 }

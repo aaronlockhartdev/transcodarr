@@ -177,6 +177,7 @@ mod tests {
                 .into_iter()
                 .map(|(c, o)| FlowStep {
                     id: "s".into(),
+                    name: None,
                     condition: Condition { fields: c },
                     operation: serde_json::from_value(o).unwrap(),
                 })

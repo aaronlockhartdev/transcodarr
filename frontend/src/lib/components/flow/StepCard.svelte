@@ -13,7 +13,7 @@
 	import ChevronRightIcon from "@lucide/svelte/icons/chevron-right";
 	import PlusIcon from "@lucide/svelte/icons/plus";
 	import TrashIcon from "@lucide/svelte/icons/trash-2";
-	import Undo2Icon from "@lucide/svelte/icons/undo-2";
+	import { toast } from "svelte-sonner";
 	import FlowField from "./FlowField.svelte";
 	import type { Device, FlowStep, FlowSchema, SchemaOption, UiSchema } from "$lib/types.js";
 
@@ -75,10 +75,17 @@
 				return;
 			}
 		}
+		toast("Every filter type is already on this step");
 	}
 
 	function setFilterField(oldKey: string, newKey: string) {
 		if (oldKey === newKey) return;
+		// A filter of this kind already on the step: reject the swap (no
+		// state change, so nothing is marked unsaved).
+		if ((step.condition as Record<string, unknown>)[newKey] !== undefined) {
+			toast(`A ${label(newKey, schema.condition_fields[newKey]?.schema as { label?: string })} filter is already on this step`);
+			return;
+		}
 		const c: Record<string, unknown> = {};
 		for (const [k, v] of Object.entries(step.condition)) {
 			if (k !== oldKey) c[k] = v;
@@ -306,11 +313,6 @@
 		}
 		setRuleAction(i, a);
 	}
-	function setRuleReencodeCodec(i: number, codec: string) {
-		const a = ruleActionObj(i);
-		a.codec = codec;
-		writeRuleAction(i, a);
-	}
 	function setRuleReencodeRate(i: number, text: string) {
 		const a = ruleActionObj(i);
 		const n = Number.parseInt(text, 10);
@@ -372,7 +374,14 @@
 		<Button variant="ghost" size="sm" onclick={() => (open = !open)} title={open ? "Collapse step" : "Expand step"}>
 			{#if open}<ChevronDownIcon class="size-4" />{:else}<ChevronRightIcon class="size-4" />{/if}
 		</Button>
-		<span class="text-sm font-medium">Step {index + 1}</span>
+		<input
+		class="h-7 w-44 min-w-0 rounded-md border border-transparent bg-transparent px-1.5 text-sm font-medium outline-none hover:border-input focus-visible:border-input focus-visible:ring-3 focus-visible:ring-ring/50"
+		placeholder={`Step ${index + 1}`}
+		value={step.name ?? ""}
+		title="Rename this step"
+		oninput={(e) => (step.name = (e.target as HTMLInputElement).value)}
+		onkeydown={(e) => e.key === "Enter" && (e.target as HTMLElement).blur()}
+		/>
 		<span class="hidden truncate text-xs text-muted-foreground sm:inline">{summary}</span>
 		<div class="ml-auto flex gap-1">
 			<Button variant="ghost" size="sm" onclick={onMoveUp} disabled={index === 0} title="Move up">
@@ -405,7 +414,8 @@
 								onchange={(e) => setFilterField(field, (e.target as HTMLSelectElement).value)}
 							>
 								{#each Object.entries(schema.condition_fields) as [k, cf] (k)}
-									<option value={k}>{label(k, cf.schema as { label?: string })}</option>
+									<!-- a kind another row already uses can't be picked twice -->
+									<option value={k} disabled={k !== field && (step.condition as Record<string, unknown>)[k] !== undefined}>{label(k, cf.schema as { label?: string })}</option>
 								{/each}
 							</select>
 							<div class="min-w-0 flex-1">
@@ -435,7 +445,7 @@
 												oninput={(e) => (resMinW = (e.target as HTMLInputElement).value)}
 												onblur={() => commitRes("min")}
 												onkeydown={(e) => e.key === "Enter" && (e.target as HTMLElement).blur()}
-												placeholder="w"
+												placeholder="width"
 											/>
 											<span class="text-muted-foreground">×</span>
 											<Input
@@ -446,7 +456,7 @@
 												oninput={(e) => (resMinH = (e.target as HTMLInputElement).value)}
 												onblur={() => commitRes("min")}
 												onkeydown={(e) => e.key === "Enter" && (e.target as HTMLElement).blur()}
-												placeholder="h"
+												placeholder="height"
 											/>
 										</div>
 										<div class="flex flex-nowrap items-center gap-2">
@@ -459,7 +469,7 @@
 												oninput={(e) => (resMaxW = (e.target as HTMLInputElement).value)}
 												onblur={() => commitRes("max")}
 												onkeydown={(e) => e.key === "Enter" && (e.target as HTMLElement).blur()}
-												placeholder="w"
+												placeholder="width"
 											/>
 											<span class="text-muted-foreground">×</span>
 											<Input
@@ -470,7 +480,7 @@
 												oninput={(e) => (resMaxH = (e.target as HTMLInputElement).value)}
 												onblur={() => commitRes("max")}
 												onkeydown={(e) => e.key === "Enter" && (e.target as HTMLElement).blur()}
-												placeholder="h"
+												placeholder="height"
 											/>
 										</div>
 									</div>
@@ -483,7 +493,7 @@
 											class="h-8 w-24"
 											value={s.min ? String(Math.round(s.min / 1_000_000)) : ""}
 											oninput={(e) => setSize("min", (e.target as HTMLInputElement).value)}
-											placeholder="Min MB"
+											placeholder="min"
 										/>
 										<span class="text-muted-foreground">→</span>
 										<Input
@@ -492,7 +502,7 @@
 											class="h-8 w-24"
 											value={s.max ? String(Math.round(s.max / 1_000_000)) : ""}
 											oninput={(e) => setSize("max", (e.target as HTMLInputElement).value)}
-											placeholder="Max MB"
+											placeholder="max"
 										/>
 										<span class="text-xs text-muted-foreground">MB</span>
 									</div>
@@ -565,55 +575,43 @@
 																oninput={(e) => setRuleLanguages(i, (e.target as HTMLInputElement).value)}
 															/>
 															<span class="text-xs text-muted-foreground">→</span>
-															{#if typeof rule.action === "string"}
 																<select
-																	class="h-7 w-28 rounded-lg border border-input bg-transparent px-2 text-xs"
-																	value={policySelectValue(rule.action)}
-																	// "re_encode" writes the object form (the wire
-																	// shape for re-encode is an object, not a string).
-																	onchange={(e) => {
-																		const v = (e.target as HTMLSelectElement).value;
-																		setRuleAction(i, v === "re_encode" ? reencodeActionDefault() : v);
-																	}}
+																class="h-7 w-32 rounded-lg border border-input bg-transparent px-2 text-xs"
+																value={typeof rule.action === "string" ? policySelectValue(rule.action) : (rule.action as { codec?: string }).codec ?? reencodeCodecOpts[0]?.value ?? ""}
+																// Copy/Drop/Re-encode are always options; a re-encode action adds
+																// its codec choices to the same control (picking one keeps rate/channels).
+																onchange={(e) => {
+																const v = (e.target as HTMLSelectElement).value;
+																if (policyOpts.some((o) => o.value === v)) setRuleAction(i, v === "re_encode" ? reencodeActionDefault() : v);
+																else setRuleAction(i, { ...ruleActionObj(i), codec: v });
+																}}
 																>
-																	{#each policyOpts as v (v.value)}
-																		<option value={v.value}>{v.label}</option>
-																	{/each}
+																{#each policyOpts as v (v.value)}
+																<option value={v.value}>{v.label}</option>
+																{/each}
+																{#if typeof rule.action !== "string"}
+																{#each reencodeCodecOpts as v (v.value)}
+																<option value={v.value}>{v.label}</option>
+																{/each}
+																{/if}
 																</select>
-															{:else}
-																<div class="flex flex-wrap items-center gap-1">
-																	<select
-																		class="h-7 w-24 rounded-lg border border-input bg-transparent px-2 text-xs"
-																		value={(rule.action as { codec?: string }).codec ?? ""}
-																		onchange={(e) => setRuleReencodeCodec(i, (e.target as HTMLSelectElement).value)}
-																	>
-																		{#each reencodeCodecOpts as v (v.value)}
-																			<option value={v.value}>{v.label}</option>
-																		{/each}
-																	</select>
-																	<Input
-																		class="h-7 w-16"
-																		placeholder="Rate"
-																		title="Sample rate (Hz); empty keeps the source rate"
-																		value={(rule.action as { sample_rate?: number }).sample_rate ?? ""}
-																		oninput={(e) => setRuleReencodeRate(i, (e.target as HTMLInputElement).value)}
-																	/>
-																	<Input
-																		class="h-7 w-14"
-																		placeholder="Ch"
-																		title="Channel count; empty keeps the source"
-																		value={(rule.action as { channels?: number }).channels ?? ""}
-																		oninput={(e) => setRuleReencodeChannels(i, (e.target as HTMLInputElement).value)}
-																	/>
-																	<Button
-																		variant="ghost"
-																		size="sm"
-																		title="Reset this action to Copy"
-																		onclick={() => setRuleAction(i, "copy")}
-																	>
-																		<Undo2Icon class="size-3.5" />
-																	</Button>
-																</div>
+															{#if typeof rule.action !== "string"}
+															<div class="flex flex-wrap items-center gap-1">
+															<Input
+															class="h-7 w-16"
+															placeholder="rate"
+															title="Sample rate (Hz); auto keeps the source rate"
+															value={(rule.action as { sample_rate?: number }).sample_rate ?? ""}
+															oninput={(e) => setRuleReencodeRate(i, (e.target as HTMLInputElement).value)}
+															/>
+															<Input
+															class="h-7 w-16"
+															placeholder="auto"
+															title="Channel count; auto keeps the source count"
+															value={(rule.action as { channels?: number }).channels ?? ""}
+															oninput={(e) => setRuleReencodeChannels(i, (e.target as HTMLInputElement).value)}
+															/>
+															</div>
 															{/if}
 															<Button variant="ghost" size="sm" title="Remove rule" onclick={() => removeRule(i)}>
 																<TrashIcon class="size-3.5" />

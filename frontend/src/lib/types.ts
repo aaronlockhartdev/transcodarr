@@ -176,6 +176,8 @@ export interface FlowStep {
 	 *  current editor neither reads nor writes it — array order is the
 	 *  UI order; nothing assigns one. */
 	id?: string;
+	/** Optional user-assigned display name; unnamed steps show as "Step N". */
+	name?: string;
 	condition: FlowCondition;
 	operation: FlowOperation;
 }

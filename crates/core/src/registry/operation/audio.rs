@@ -225,7 +225,7 @@ fn plan_tracks(op: &AudioOp, facts: &FileFacts) -> Vec<AudioTrackPlan> {
                 } else {
                     out.push(AudioTrackPlan::Reencode {
                         codec,
-                        sample_rate,
+                        sample_rate: sample_rate.or(track.sample_rate),
                         channels: channels.or(track.channels),
                         bitrate_bps: Some(codec.default_bitrate_bps(channels.or(track.channels))),
                     });
@@ -300,8 +300,8 @@ pub fn audio_policy_schema() -> Value {
                     { "value": "aac", "label": "AAC" }
                 ]
             },
-            "sample_rate": { "kind": "text", "label": "Sample rate (Hz)", "hint": "Leave empty to keep the source rate." },
-            "channels": { "kind": "text", "label": "Channels", "hint": "Leave empty to keep the source channel count." }
+            "sample_rate": { "kind": "text", "label": "Sample rate (Hz)", "hint": "auto keeps the source rate." },
+            "channels": { "kind": "text", "label": "Channels", "hint": "auto keeps the source channel count." }
         }
     })
 }
@@ -399,6 +399,34 @@ mod tests {
             }
         ));
         assert!(matches!(per_track[2], AudioTrackPlan::Reencode { .. }));
+    }
+
+    #[test]
+    fn unspecified_rate_and_channels_keep_source() {
+        let a = Audio;
+        let f = facts(vec![AudioTrack {
+            codec: "dts".into(),
+            channels: Some(6),
+            sample_rate: Some(48_000),
+            atmos: false,
+            ..Default::default()
+        }]);
+        let p = a
+            .plan(&json!({ "default": { "codec": "eac3" } }), &f)
+            .unwrap();
+        let AudioPlan { per_track } = match p {
+            SectionPlan::Audio(p) => p,
+            other => panic!("expected audio plan, got {other:?}"),
+        };
+        assert!(matches!(
+            per_track[0],
+            AudioTrackPlan::Reencode {
+                codec: AudioCodec::Eac3,
+                sample_rate: Some(48_000),
+                channels: Some(6),
+                ..
+            }
+        ));
     }
 
     #[test]

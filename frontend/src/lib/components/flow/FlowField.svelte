@@ -10,7 +10,6 @@
 	import { Switch } from "$lib/components/ui/switch";
 	import { Input } from "$lib/components/ui/input";
 	import { Button } from "$lib/components/ui/button";
-	import Undo2Icon from "@lucide/svelte/icons/undo-2";
 	import { cn } from "$lib/utils.js";
 	import type { Device, UiSchema } from "$lib/types.js";
 
@@ -267,13 +266,9 @@
 						<option value={v.value}>{v.label}</option>
 					{/each}
 				</select>
-				<Input type="number" value={policy.sampleRate != null ? String(policy.sampleRate) : ""} title="Empty keeps the source rate" oninput={(e) => setPolicyRate((e.target as HTMLInputElement).value)} class="w-24" placeholder="rate" />
+				<Input type="number" value={policy.sampleRate != null ? String(policy.sampleRate) : ""} title="Sample rate (Hz); auto keeps the source rate" oninput={(e) => setPolicyRate((e.target as HTMLInputElement).value)} class="w-24" placeholder="rate" />
 				<span class="text-xs text-muted-foreground">Hz</span>
-				<Input type="number" min="1" value={policy.channels != null ? String(policy.channels) : ""} title="Empty keeps the source channel count" oninput={(e) => setPolicyChannels((e.target as HTMLInputElement).value)} class="w-16" placeholder="ch" />
-				<span class="text-xs text-muted-foreground">ch</span>
-				<Button variant="ghost" size="sm" title="Reset this policy to Copy" onclick={() => policyChanged("copy")}>
-					<Undo2Icon class="size-3.5" />
-				</Button>
+				<Input type="number" min="1" value={policy.channels != null ? String(policy.channels) : ""} title="Channel count; auto keeps the source count" oninput={(e) => setPolicyChannels((e.target as HTMLInputElement).value)} class="w-24" placeholder="auto" />
 			</div>
 		{/if}
 	</div>
@@ -282,7 +277,6 @@
 		<Input type="number" min="0" value={res.w ? String(res.w) : ""} oninput={(e) => setRes((e.target as HTMLInputElement).value, String(res.h))} class="w-24" placeholder="width" />
 		<span class="text-muted-foreground">×</span>
 		<Input type="number" min="0" value={res.h ? String(res.h) : ""} oninput={(e) => setRes(String(res.w), (e.target as HTMLInputElement).value)} class="w-24" placeholder="height" />
-		<span class="text-xs text-muted-foreground">{schema.hint ?? ""}</span>
 	</div>
 {:else}
 	<p class="text-xs text-muted-foreground">unsupported field kind: {schema.kind}</p>

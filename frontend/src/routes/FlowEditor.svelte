@@ -76,6 +76,8 @@
 				flow_version: FLOW_VERSION,
 				steps: steps.map((s) => ({
 					...s,
+					// Empty names are omitted from the stored document.
+					name: s.name?.trim() || undefined,
 					condition: pruneCondition(s.condition as Record<string, unknown>) as typeof s.condition,
 				})),
 			};
@@ -125,6 +127,7 @@
 	// filter rows pruned, absent keys coerced — so visible-but-inert UI
 	// state never reads as "unsaved" against an equivalent stored document.
 	const normStep = (s: FlowStep) => ({
+		name: s.name?.trim() || undefined,
 		condition: pruneCondition((s.condition ?? {}) as Record<string, unknown>),
 		operation: s.operation ?? {},
 	});
