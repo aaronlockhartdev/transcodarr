@@ -15,7 +15,7 @@ use clap::Parser;
 use tracing::{error, info, warn};
 
 use transcodarr_core::registry::Registry;
-use transcodarr_server::{api, db, dbhandle, devices, jobs, probe, verify};
+use transcodarr_server::{api, db, dbhandle, devices, events, jobs, probe, verify};
 
 #[derive(Parser)]
 #[command(
@@ -81,8 +81,8 @@ async fn run(cli: Cli, data_dir: std::path::PathBuf) -> Result<()> {
     //     so everything left over is reclaimable; re-run is safe
     //     (crashed encodes only ever leave a sibling temp file).
     let reclaimed = dbh.with(|c| db::reclaim_jobs(c, false))?;
-    if reclaimed > 0 {
-        info!("reclaimed {} job(s) orphaned by a previous run", reclaimed);
+    if !reclaimed.is_empty() {
+        info!("reclaimed {} job(s) orphaned by a previous run", reclaimed.len());
     }
 
     // 2. Registry: pure v1 entries + I/O-bound entries.
@@ -133,12 +133,27 @@ async fn run(cli: Cli, data_dir: std::path::PathBuf) -> Result<()> {
         data_dir,
         devices: detected,
         in_flight: Arc::new(AtomicUsize::new(0)),
+        events: events::bus(),
     };
 
     // 4. Job worker loop.
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let worker = tokio::spawn(jobs::run_loop(state.clone(), shutdown_rx));
     info!("job worker started");
+
+    // 4b. Live-update liveness: a periodic `tick` event so a client
+    //     can tell a quiet server from a dead connection (the SSE
+    //     keep-alive comment covers proxies; this one is for the
+    //     client's liveness flag).
+    let tick_bus = state.events.clone();
+    tokio::spawn(async move {
+        let mut iv = tokio::time::interval(std::time::Duration::from_secs(30));
+        iv.tick().await; // swallow the immediate first tick
+        loop {
+            iv.tick().await;
+            tick_bus.emit(events::ServerEvent::Tick);
+        }
+    });
 
     // 5. HTTP server.
     let app = api::router(state);

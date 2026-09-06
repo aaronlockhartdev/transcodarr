@@ -28,6 +28,7 @@ use transcodarr_core::registry::{FactExtractor, Registry};
 use crate::api::AppState;
 use crate::db;
 use crate::dbhandle::Db;
+use crate::events::{EventBus, ServerEvent};
 use crate::probe::FfprobeFactExtractor;
 use crate::verify::{decode_file, probe_to_facts};
 
@@ -124,6 +125,9 @@ fn file_dev_ino(path: &Path) -> Result<(i64, i64)> {
 /// re-evaluation path (flow edits) count in the total, too. A file
 /// that already has a live job (queued/running/verifying) is never
 /// re-queued — one job per file at a time.
+///
+/// Every state change made here is published on `events` so live
+/// clients update without waiting for a poll (DESIGN §9.0).
 pub fn scan_library(
     db: &Db,
     library_id: i64,
@@ -131,6 +135,7 @@ pub fn scan_library(
     probe: &FfprobeFactExtractor,
     _ffprobe: &str,
     reevaluate: bool,
+    events: &EventBus,
 ) -> Result<(u32, u32)> {
     let lib = db
         .with(|c| db::get_library(c, library_id))?
@@ -188,7 +193,15 @@ pub fn scan_library(
             }
             // Flow changed: re-evaluate every unchanged file with cached facts.
             if let Some(mut e) = existing {
-                if reevaluate_cached(db, &mut e, library_id, registry, &flow, &path)? {
+                if reevaluate_cached(
+                    db,
+                    &mut e,
+                    library_id,
+                    registry,
+                    &flow,
+                    &path,
+                    events,
+                )? {
                     queued += 1;
                 }
             }
@@ -196,6 +209,7 @@ pub fn scan_library(
         }
 
         let hash = sample_hash(&path).unwrap_or(0);
+        let old_status = existing.as_ref().map(|e| e.status.clone());
         let mut row = db::FileRow {
             id: 0,
             library_id,
@@ -215,7 +229,7 @@ pub fn scan_library(
         // `files.path` is globally UNIQUE (one library per file):
         // if another library already tracks this exact path, the
         // upsert hits the integrity check. Skip the file rather than
-        // aborting the whole scan (first-registered-library-wins).
+        // abort the whole scan (first-registered-library-wins).
         let file_id = match db.with(|c| db::upsert_file(c, &row)) {
             Ok(id) => id,
             Err(e) => {
@@ -261,7 +275,12 @@ pub fn scan_library(
                 // The file is now compliant — any job still queued (from
                 // an older facts snapshot) is stale: cancel it so it does
                 // not re-encode a file that needs nothing.
-                let _ = db.with(|c| db::cancel_queued_jobs(c, file_id, "superseded"));
+                let cancelled = db
+                    .with(|c| db::cancel_queued_jobs(c, file_id, "superseded"))
+                    .unwrap_or_default();
+                for jid in cancelled {
+                    events.emit(ServerEvent::JobChanged { job_id: jid });
+                }
                 "compliant"
             }
             Ok(Evaluation::Plan(plan)) => {
@@ -290,7 +309,8 @@ pub fn scan_library(
                         log_path: None,
                         quarantine_path: None,
                     };
-                    db.with(|c| db::insert_job(c, &job))?;
+                    let job_id = db.with(|c| db::insert_job(c, &job))?;
+                    events.emit(ServerEvent::JobChanged { job_id });
                     queued += 1;
                 }
                 "queued"
@@ -298,7 +318,12 @@ pub fn scan_library(
             Ok(Evaluation::NoMatch) => {
                 // Never silent (DESIGN §13.6). A queued job from an
                 // older snapshot no longer matches either — cancel it.
-                let _ = db.with(|c| db::cancel_queued_jobs(c, file_id, "superseded"));
+                let cancelled = db
+                    .with(|c| db::cancel_queued_jobs(c, file_id, "superseded"))
+                    .unwrap_or_default();
+                for jid in cancelled {
+                    events.emit(ServerEvent::JobChanged { job_id: jid });
+                }
                 "unmatched"
             }
             Err(e) => {
@@ -310,6 +335,14 @@ pub fn scan_library(
         row.last_evaluated = Some(now);
         // Persist facts + status + evaluation timestamp in one write.
         let _ = db.with(|c| db::upsert_file(c, &row));
+        // Tell live clients the row moved (a first insert always does;
+        // an existing row only when the status actually changed).
+        if old_status.as_deref() != Some(row.status.as_str()) {
+            events.emit(ServerEvent::FileChanged {
+                file_id,
+                library_id,
+            });
+        }
     }
     Ok((scanned, queued))
 }
@@ -328,7 +361,8 @@ pub fn scan_library(
 /// post-swap gate re-checks the new flow.
 ///
 /// Returns whether this call enqueued a new job (the scan summary
-/// counts it in `queued`).
+/// counts it in `queued`). State changes are published on `events`
+/// for live clients (DESIGN §9.0).
 fn reevaluate_cached(
     db: &Db,
     file: &mut db::FileRow,
@@ -336,6 +370,7 @@ fn reevaluate_cached(
     registry: &Registry,
     flow: &Flow,
     path: &Path,
+    events: &EventBus,
 ) -> Result<bool> {
     let Some(facts) = file
         .facts_json
@@ -347,6 +382,7 @@ fn reevaluate_cached(
         return Ok(false);
     };
     let now = unix_now();
+    let old_status = file.status.clone();
 
     // A running job can't be interrupted, and its displayed status is
     // authoritative until it ends.
@@ -381,11 +417,14 @@ fn reevaluate_cached(
                         log_path: None,
                         quarantine_path: None,
                     };
-                    db::insert_job(c, &job)?;
-                    Ok(())
+                    let job_id = db::insert_job(c, &job)?;
+                    Ok(job_id)
                 });
                 match enq {
-                    Ok(()) => (Some("queued"), true, false),
+                    Ok(job_id) => {
+                        events.emit(ServerEvent::JobChanged { job_id });
+                        (Some("queued"), true, false)
+                    }
                     Err(e) => {
                         tracing::warn!(path = %path.display(), %e, "failed to enqueue re-evaluation job");
                         (None, false, false)
@@ -402,8 +441,15 @@ fn reevaluate_cached(
     };
 
     if cancel {
-        if let Err(e) = db.with(|c| db::cancel_queued_jobs(c, file.id, "superseded")) {
-            tracing::warn!(path = %path.display(), %e, "could not cancel superseded queued job");
+        match db.with(|c| db::cancel_queued_jobs(c, file.id, "superseded")) {
+            Ok(cancelled) => {
+                for jid in cancelled {
+                    events.emit(ServerEvent::JobChanged { job_id: jid });
+                }
+            }
+            Err(e) => {
+                tracing::warn!(path = %path.display(), %e, "could not cancel superseded queued job");
+            }
         }
     }
 
@@ -424,7 +470,14 @@ fn reevaluate_cached(
             path = %path.display(),
             "re-evaluate: row moved or deleted since the scan snapshot; write skipped"
         ),
-        Ok(_) => {}
+        Ok(n) => {
+            if n > 0 && old_status != file.status {
+                events.emit(ServerEvent::FileChanged {
+                    file_id: file.id,
+                    library_id,
+                });
+            }
+        }
         Err(e) => {
             // A transient lock must not kill the whole rescan (the
             // main scan path tolerates it the same way).
@@ -511,6 +564,9 @@ fn lease_heartbeat(db: &Db, job_id: i64, stop: &Arc<(Condvar, Mutex<bool>)>) {
 ///
 /// On verify failure or encode failure the original is untouched;
 /// the failed output goes to the quarantine dir (DESIGN §13.6).
+///
+/// `events` receives a `JobChanged` nudge when the job reaches its
+/// terminal state (live clients then refetch the row).
 pub fn run_job(
     db: &Db,
     job: &db::JobRow,
@@ -519,6 +575,7 @@ pub fn run_job(
     probe: &FfprobeFactExtractor,
     data_dir: &Path,
     registry: &Registry,
+    events: &EventBus,
 ) -> Result<()> {
     // Every error path below calls `finish`: a job that leaves this
     // function without a terminal row would sit in "running" until
@@ -526,11 +583,11 @@ pub fn run_job(
     let file = match db.with(|c| db::get_file(c, job.file_id)) {
         Ok(Some(f)) => f,
         Ok(None) => {
-            let _ = finish(db, job, "failed", Some("file_missing"), None, data_dir);
+            let _ = finish(db, job, "failed", Some("file_missing"), None, data_dir, events);
             anyhow::bail!("file {} not found", job.file_id)
         }
         Err(e) => {
-            let _ = finish(db, job, "failed", Some("file_missing"), None, data_dir);
+            let _ = finish(db, job, "failed", Some("file_missing"), None, data_dir, events);
             return Err(e);
         }
     };
@@ -548,7 +605,7 @@ pub fn run_job(
     let plan: FfmpegPlan = match serde_json::from_str(&job.plan_json) {
         Ok(p) => p,
         Err(e) => {
-            let _ = finish(db, job, "failed", Some("plan_invalid"), None, data_dir);
+            let _ = finish(db, job, "failed", Some("plan_invalid"), None, data_dir, events);
             let _ = db.with(|c| db::set_file_status(c, job.file_id, "failed"));
             return Err(e).with_context(|| format!("job {} plan", job.id));
         }
@@ -583,7 +640,7 @@ pub fn run_job(
     // before the swap (tracked files are fully covered; the
     // residual race is noted there).
     if target_occupied(&final_path, &src) {
-        let _ = finish(db, job, "failed", Some("swap_failed"), None, data_dir);
+        let _ = finish(db, job, "failed", Some("swap_failed"), None, data_dir, events);
         let _ = db.with(|c| db::set_file_status(c, job.file_id, "failed"));
         anyhow::bail!(
             "target {} is occupied by a different file; not overwriting",
@@ -619,7 +676,7 @@ pub fn run_job(
     // stuck in `running`.
     let logs = data_dir.join("logs");
     if let Err(e) = std::fs::create_dir_all(&logs) {
-        let _ = finish(db, job, "failed", Some("encode_failed"), None, data_dir);
+        let _ = finish(db, job, "failed", Some("encode_failed"), None, data_dir, events);
         let _ = db.with(|c| db::set_file_status(c, job.file_id, "failed"));
         return Err(e).context("create log dir");
     }
@@ -631,7 +688,7 @@ pub fn run_job(
     let log_file = match File::create(&log_path) {
         Ok(f) => f,
         Err(e) => {
-            let _ = finish(db, job, "failed", Some("encode_failed"), None, data_dir);
+            let _ = finish(db, job, "failed", Some("encode_failed"), None, data_dir, events);
             let _ = db.with(|c| db::set_file_status(c, job.file_id, "failed"));
             return Err(e).with_context(|| format!("log {}", log_path.display()));
         }
@@ -647,7 +704,7 @@ pub fn run_job(
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            let _ = finish(db, job, "failed", Some("encode_failed"), None, data_dir);
+            let _ = finish(db, job, "failed", Some("encode_failed"), None, data_dir, events);
             let _ = db.with(|c| db::set_file_status(c, job.file_id, "failed"));
             anyhow::bail!("spawn ffmpeg {ffmpeg}: {e}");
         }
@@ -674,6 +731,7 @@ pub fn run_job(
                 Some("encode_failed"),
                 Some(&dst),
                 data_dir,
+                events,
             );
             let _ = db.with(|c| db::set_file_status(c, job.file_id, "failed"));
             anyhow::bail!("wait ffmpeg: {e}");
@@ -690,6 +748,7 @@ pub fn run_job(
         let _ = db.with(|c| db::finish_job(c, job.id, "failed", "encode_failed", unix_now(), None));
         let _ = db.with(|c| db::set_file_status(c, job.file_id, "failed"));
         let _ = std::fs::remove_file(&dst);
+        events.emit(ServerEvent::JobChanged { job_id: job.id });
         anyhow::bail!("ffmpeg exit {exit_code}: {tail}");
     }
 
@@ -706,6 +765,7 @@ pub fn run_job(
                 Some("verification_failed"),
                 Some(&dst),
                 data_dir,
+                events,
             );
             return Err(e).context("probe output");
         }
@@ -720,6 +780,7 @@ pub fn run_job(
                 Some("verification_failed"),
                 Some(&dst),
                 data_dir,
+                events,
             );
             return Err(anyhow::Error::from(e));
         }
@@ -732,6 +793,7 @@ pub fn run_job(
             Some("verification_failed"),
             Some(&dst),
             data_dir,
+            events,
         );
         anyhow::bail!("output metadata mismatch (output quarantined)");
     }
@@ -746,6 +808,7 @@ pub fn run_job(
             Some("decode_failed"),
             Some(&dst),
             data_dir,
+            events,
         );
         anyhow::bail!("output failed the decode check (output quarantined)");
     }
@@ -760,7 +823,7 @@ pub fn run_job(
         // Residual race: an UNTRACKED external file that appears in
         // the final check-to-rename gap can still be clobbered by the
         // rename; closing that fully needs a link-based protocol.
-        let _ = finish(db, job, "failed", Some("swap_failed"), Some(&dst), data_dir);
+        let _ = finish(db, job, "failed", Some("swap_failed"), Some(&dst), data_dir, events);
         let _ = db.with(|c| db::set_file_status(c, job.file_id, "failed"));
         anyhow::bail!(
             "target {} is occupied by a different file; not overwriting",
@@ -776,7 +839,7 @@ pub fn run_job(
         Ok(()) => {}
         Err(e) => {
             // The original is still in place; only the temp is lost.
-            let _ = finish(db, job, "failed", Some("swap_failed"), Some(&dst), data_dir);
+            let _ = finish(db, job, "failed", Some("swap_failed"), Some(&dst), data_dir, events);
             let _ = db.with(|c| db::set_file_status(c, job.file_id, "failed"));
             anyhow::bail!("quarantine original {}: {e}", src.display());
         }
@@ -797,7 +860,7 @@ pub fn run_job(
                 original_backup.display()
             );
         }
-        let _ = finish(db, job, "failed", Some("swap_failed"), Some(&dst), data_dir);
+        let _ = finish(db, job, "failed", Some("swap_failed"), Some(&dst), data_dir, events);
         anyhow::bail!("swap failed: {e}");
     }
 
@@ -829,6 +892,7 @@ pub fn run_job(
                 Some("verification_failed"),
                 None,
                 data_dir,
+                events,
             );
             let _ = db.with(|c| db::set_file_status(c, job.file_id, "failed"));
             return Err(e).context("probe new file");
@@ -844,6 +908,7 @@ pub fn run_job(
                 Some("verification_failed"),
                 None,
                 data_dir,
+                events,
             );
             let _ = db.with(|c| db::set_file_status(c, job.file_id, "failed"));
             anyhow::bail!("library {} not found", job.library_id)
@@ -856,6 +921,7 @@ pub fn run_job(
                 Some("verification_failed"),
                 None,
                 data_dir,
+                events,
             );
             let _ = db.with(|c| db::set_file_status(c, job.file_id, "failed"));
             return Err(e);
@@ -874,6 +940,7 @@ pub fn run_job(
                 Some("verification_failed"),
                 None,
                 data_dir,
+                events,
             );
             let _ = db.with(|c| db::set_file_status(c, job.file_id, "failed"));
             return Err(e).context("parse library flow");
@@ -881,16 +948,16 @@ pub fn run_job(
     };
     match evaluate::evaluate(registry, &flow, &new_facts) {
         Ok(Evaluation::Identity) => {
-            let _ = finish(db, job, "completed", None, None, data_dir);
+            let _ = finish(db, job, "completed", None, None, data_dir, events);
             let _ = db.with(|c| db::set_file_status(c, job.file_id, "completed"));
         }
         Ok(Evaluation::Plan(_)) => {
-            let _ = finish(db, job, "failed", Some("non_idempotent"), None, data_dir);
+            let _ = finish(db, job, "failed", Some("non_idempotent"), None, data_dir, events);
             let _ = db.with(|c| db::set_file_status(c, job.file_id, "failed"));
             anyhow::bail!("flow not idempotent for {}", final_path.display());
         }
         Ok(Evaluation::NoMatch) => {
-            let _ = finish(db, job, "completed", None, None, data_dir);
+            let _ = finish(db, job, "completed", None, None, data_dir, events);
             let _ = db.with(|c| db::set_file_status(c, job.file_id, "completed"));
         }
         Err(e) => {
@@ -904,6 +971,7 @@ pub fn run_job(
                 Some("verification_failed"),
                 None,
                 data_dir,
+                events,
             );
             let _ = db.with(|c| db::set_file_status(c, job.file_id, "failed"));
             return Err(e).context("re-evaluate after swap");
@@ -913,7 +981,8 @@ pub fn run_job(
 }
 
 /// Terminal state bookkeeping: finish the job row and (if given)
-/// move the failed output into the quarantine dir.
+/// move the failed output into the quarantine dir, then nudge live
+/// clients that this job's state changed.
 fn finish(
     db: &Db,
     job: &db::JobRow,
@@ -921,6 +990,7 @@ fn finish(
     exit_kind: Option<&str>,
     quarantine_target: Option<&Path>,
     data_dir: &Path,
+    events: &EventBus,
 ) -> Result<()> {
     let q = quarantine_target.map(|p| {
         let dir = db::quarantine_dir(data_dir);
@@ -944,6 +1014,7 @@ fn finish(
         _ => "failed",
     };
     db.with(|c| db::set_file_status(c, job.file_id, file_status))?;
+    events.emit(ServerEvent::JobChanged { job_id: job.id });
     Ok(())
 }
 
@@ -970,9 +1041,11 @@ pub async fn run_loop(state: AppState, mut shutdown: watch::Receiver<bool>) -> R
         // the encode process really is dead). A crash mid-encode
         // only ever leaves a sibling temp file behind, so re-running
         // is safe.
-        if let Ok(n) = state.db.with(|c| db::reclaim_jobs(c, true)) {
-            if n > 0 {
-                tracing::info!("reclaimed {n} stale job(s)");
+        let reclaimed = state.db.with(|c| db::reclaim_jobs(c, true))?;
+        if !reclaimed.is_empty() {
+            tracing::info!("reclaimed {} stale job(s)", reclaimed.len());
+            for jid in reclaimed {
+                state.events.emit(ServerEvent::JobChanged { job_id: jid });
             }
         }
 
@@ -1033,6 +1106,8 @@ pub async fn run_loop(state: AppState, mut shutdown: watch::Receiver<bool>) -> R
             // superseded the file).
             continue;
         }
+        // The row just moved queued → running; tell live clients.
+        state.events.emit(ServerEvent::JobChanged { job_id: job.id });
 
         // Count it in flight; the spawned task decrements when done.
         state.in_flight.fetch_add(1, Ordering::Relaxed);
@@ -1042,8 +1117,9 @@ pub async fn run_loop(state: AppState, mut shutdown: watch::Receiver<bool>) -> R
         let probe2 = state.probe.clone();
         let data2 = state.data_dir.clone();
         let registry2 = state.registry.clone();
+        let events2 = state.events.clone();
         tokio::task::spawn_blocking(move || {
-            let r = run_job(&db2, &job, &device, &ffmpeg2, &probe2, &data2, &registry2);
+            let r = run_job(&db2, &job, &device, &ffmpeg2, &probe2, &data2, &registry2, &events2);
             in_flight.fetch_sub(1, Ordering::Relaxed);
             r.map_err(|e| {
                 tracing::error!("job {} failed: {e:?}", job.id);
@@ -1069,6 +1145,7 @@ fn log_tail(path: &Path, n: usize) -> String {
         })
         .unwrap_or_default()
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;

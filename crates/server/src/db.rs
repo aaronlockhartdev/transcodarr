@@ -620,8 +620,8 @@ pub fn now_s() -> i64 {
         .unwrap_or(0)
 }
 
-/// Put unfinishable jobs back in the queue and return how many were
-/// reclaimed. With `expired_only`, only jobs whose lease has lapsed are
+/// Put unfinishable jobs back in the queue and return their ids.
+/// With `expired_only`, only jobs whose lease has lapsed are
 /// touched (the in-process reaper: a hung or panicked worker); with
 /// `false`, every `running`/`verifying` job is reclaimed — correct at
 /// startup, when a fresh process by definition holds no in-flight
@@ -629,7 +629,7 @@ pub fn now_s() -> i64 {
 /// `queued` so a scan (or the next poll) can re-claim them. A crashed
 /// encode only ever left a sibling temp file behind — the original is
 /// intact until a verified swap, so re-running is safe.
-pub fn reclaim_jobs(conn: &Connection, expired_only: bool) -> Result<usize> {
+pub fn reclaim_jobs(conn: &Connection, expired_only: bool) -> Result<Vec<i64>> {
     // Select the reclaim set first so both updates below are scoped
     // to exactly those rows.
     let select = if expired_only {
@@ -646,7 +646,7 @@ pub fn reclaim_jobs(conn: &Connection, expired_only: bool) -> Result<usize> {
             .collect::<rusqlite::Result<Vec<i64>>>()?
     };
     if ids.is_empty() {
-        return Ok(0);
+        return Ok(Vec::new());
     }
     let list = vec!["?".to_string(); ids.len()].join(",");
     conn.execute(
@@ -663,7 +663,7 @@ pub fn reclaim_jobs(conn: &Connection, expired_only: bool) -> Result<usize> {
         ),
         params_from_iter(&ids),
     )?;
-    Ok(ids.len())
+    Ok(ids)
 }
 
 /// Whether this file has a live job that must not be re-queued (one
@@ -694,19 +694,30 @@ pub fn has_running_job(conn: &Connection, file_id: i64) -> Result<bool> {
 }
 
 /// Cancel (fail) every queued job of a file with a given exit kind.
-/// Used when a flow edit makes a queued job's plan stale. Returns the
-/// number cancelled.
-pub fn cancel_queued_jobs(conn: &Connection, file_id: i64, exit_kind: &str) -> Result<usize> {
-    // One atomic, state-guarded statement: a job that a concurrent
-    // worker claims (or re-claims) in the meantime keeps running —
-    // only rows still `queued` at commit time are touched.
-    let n = conn.execute(
-        "UPDATE jobs SET state = 'failed', ended = ?2, exit_kind = ?3,
-                       claimed_by = NULL, lease_expires = NULL
-         WHERE file_id = ?1 AND state = 'queued'",
-        params![file_id, now_s(), exit_kind],
-    )?;
-    Ok(n)
+/// Used when a flow edit (or a re-probe) makes a queued job's plan
+/// stale. Returns the ids seen at call time.
+///
+/// The cancellation itself is one atomic, state-guarded statement: a
+/// job a concurrent worker claims (or re-claims) in the meantime
+/// keeps running — only rows still `queued` at commit time are
+/// touched. The SELECT that collects the ids runs *before* that
+/// statement, so the returned list may include a job that was just
+/// claimed; nudging clients about it is harmless (the nudge only
+/// triggers a jobs refetch).
+pub fn cancel_queued_jobs(conn: &Connection, file_id: i64, exit_kind: &str) -> Result<Vec<i64>> {
+    let ids: Vec<i64> = conn
+        .prepare("SELECT id FROM jobs WHERE file_id = ?1 AND state = 'queued'")?
+        .query_map(params![file_id], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    if !ids.is_empty() {
+        conn.execute(
+            "UPDATE jobs SET state = 'failed', ended = ?2, exit_kind = ?3,
+                           claimed_by = NULL, lease_expires = NULL
+             WHERE file_id = ?1 AND state = 'queued'",
+            params![file_id, now_s(), exit_kind],
+        )?;
+    }
+    Ok(ids)
 }
 
 /// Persist a re-evaluated file's status/timestamp without re-inserting:
@@ -1001,7 +1012,7 @@ mod tests {
         let qid = insert_job(&conn, &job).unwrap();
         job.state = "running".into();
         let rid = insert_job(&conn, &job).unwrap();
-        assert_eq!(cancel_queued_jobs(&conn, fid, "superseded").unwrap(), 1);
+        assert_eq!(cancel_queued_jobs(&conn, fid, "superseded").unwrap(), vec![qid]);
         assert_eq!(
             get_job(&conn, qid).unwrap().unwrap().exit_kind.as_deref(),
             Some("superseded")

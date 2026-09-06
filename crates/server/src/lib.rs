@@ -6,6 +6,7 @@ pub mod api;
 pub mod db;
 pub mod dbhandle;
 pub mod devices;
+pub mod events;
 pub mod jobs;
 pub mod probe;
 pub mod verify;

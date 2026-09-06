@@ -1,14 +1,20 @@
 //! The HTTP API (DESIGN §8, §13): flows, libraries, files, jobs,
-//! devices, settings, the flow schema, and the embedded-frontend SPA fallback.
+//! devices, settings, the flow schema, the live-update stream, and
+//! the embedded-frontend SPA fallback.
 //!
 //! All state access goes through [`Db`](crate::dbhandle::Db) — a
 //! fresh short-lived connection per operation (WAL mode; see that
 //! module for why a shared `Connection` is impossible in async).
 
 use std::sync::{Arc, atomic::AtomicUsize};
+/// The SSE `Last-Event-ID` request header (this axum/http version
+/// has no constant for it).
+const LAST_EVENT_ID: axum::http::HeaderName =
+    axum::http::HeaderName::from_static("last-event-id");
 
 use axum::extract::{OriginalUri, Path as PathParam, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
+use axum::response::sse::{KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -22,6 +28,7 @@ use transcodarr_core::registry::Registry;
 
 use crate::db;
 use crate::dbhandle::Db;
+use crate::events::{self, EventBus, SseStream, ServerEvent};
 use crate::probe::FfprobeFactExtractor;
 
 /// Shared server state.
@@ -35,6 +42,7 @@ pub struct AppState {
     pub data_dir: std::path::PathBuf,
     pub devices: Vec<Device>,
     pub in_flight: Arc<AtomicUsize>,
+    pub events: Arc<EventBus>,
 }
 
 /// Build the router.
@@ -58,6 +66,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/jobs", get(list_jobs))
         .route("/api/jobs/{id}", get(get_job))
         .route("/api/jobs/{id}/log", get(job_log))
+        .route("/api/events", get(sse_events))
         .route("/api/settings/{key}", get(get_setting).put(set_setting))
         .with_state(state)
         .fallback(spa)
@@ -158,8 +167,9 @@ async fn spawn_reeval(s: &AppState, library_id: i64) {
     let registry = s.registry.clone();
     let db2 = s.db.clone();
     let ffprobe2 = s.ffprobe.clone();
+    let events2 = s.events.clone();
     let _ = tokio::task::spawn_blocking(move || {
-        crate::jobs::scan_library(&db2, library_id, &registry, &probe, &ffprobe2, true)
+        crate::jobs::scan_library(&db2, library_id, &registry, &probe, &ffprobe2, true, &events2)
     })
     .await;
 }
@@ -204,6 +214,7 @@ async fn create_library(
         watchable: body.watchable.unwrap_or(false),
     };
     let id = s.db.with(|c| db::insert_library(c, &row))?;
+    s.events.emit(ServerEvent::LibraryChanged { library_id: id });
     Ok((StatusCode::CREATED, Json(json!({ "id": id }))))
 }
 
@@ -240,6 +251,7 @@ async fn update_library(
     // Any library change re-evaluates everything (a flow swap is the
     // common reason, and the check is cheap).
     s.db.with(|c| db::update_library(c, &row))?;
+    s.events.emit(ServerEvent::LibraryChanged { library_id: id });
     spawn_reeval(&s, id).await;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -249,6 +261,7 @@ async fn delete_library(
     PathParam(id): PathParam<i64>,
 ) -> Result<StatusCode, ApiError> {
     s.db.with(|c| db::delete_library(c, id))?;
+    s.events.emit(ServerEvent::LibraryChanged { library_id: id });
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -273,6 +286,7 @@ async fn create_flow(
     validate_flow(&body.flow_json)?;
     let id =
         s.db.with(|c| db::insert_flow(c, &body.name, &body.flow_json))?;
+    s.events.emit(ServerEvent::FlowChanged { flow_id: id });
     Ok((StatusCode::CREATED, Json(json!({ "id": id }))))
 }
 
@@ -298,6 +312,7 @@ async fn update_flow(
     validate_flow(&body.flow_json)?;
     let users = s.db.with(|c| db::libraries_using_flow(c, id))?;
     s.db.with(|c| db::update_flow(c, id, &body.name, &body.flow_json))?;
+    s.events.emit(ServerEvent::FlowChanged { flow_id: id });
     // A changed flow re-evaluates every library that uses it.
     if existing.name != body.name || existing.flow_json != body.flow_json {
         for lib_id in users {
@@ -318,6 +333,7 @@ async fn delete_flow(
     // ON DELETE SET NULL leaves the libraries with no flow;
     // re-evaluate so their file states settle to unmatched.
     s.db.with(|c| db::delete_flow(c, id))?;
+    s.events.emit(ServerEvent::FlowChanged { flow_id: id });
     for lib_id in users {
         spawn_reeval(&s, lib_id).await;
     }
@@ -342,8 +358,9 @@ async fn scan(
     let registry = s.registry.clone();
     let db2 = s.db.clone();
     let ffprobe2 = s.ffprobe.clone();
+    let events2 = s.events.clone();
     let (scanned, queued) = tokio::task::spawn_blocking(move || {
-        crate::jobs::scan_library(&db2, id, &registry, &probe, &ffprobe2, false)
+        crate::jobs::scan_library(&db2, id, &registry, &probe, &ffprobe2, false, &events2)
     })
     .await
     .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
@@ -419,6 +436,31 @@ async fn job_log(
             "log file missing".into(),
         )),
     }
+}
+
+// Live updates (SSE) ───────────────────────────────────────────────
+
+/// `/api/events` — one SSE connection per client (DESIGN §9.0).
+///
+/// The browser's `EventSource` reconnects automatically and echoes the
+/// last stream id it saw back as `Last-Event-ID`; the bus replays the
+/// retained ring (up to [`events::RING_CAP`] events) before joining the
+/// live feed, so a dropped connection resumes without losing updates.
+/// Initial state still comes from the regular JSON endpoints — this
+/// stream carries deltas only.
+async fn sse_events(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+) -> Result<events::SseResponse, ApiError> {
+    let last = headers
+        .get(LAST_EVENT_ID)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
+    let rx = s.events.subscribe();
+    let replay = s.events.replay_since(last).into_iter().collect();
+    let stream = SseStream::new(rx, replay);
+    Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(events::KEEPALIVE)))
 }
 
 // Settings ──────────────────────────────────────────────────────────
