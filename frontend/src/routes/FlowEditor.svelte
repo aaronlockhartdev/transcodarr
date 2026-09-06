@@ -33,7 +33,8 @@
 	let noMatchEscalate = $state(false);
 	function setNoMatchEscalate(v: boolean) {
 		if (!flow) return;
-		flow.no_match = { escalate: v };
+		if (v) flow.no_match = { escalate: v };
+		else delete flow.no_match;
 		noMatchEscalate = v;
 	}
 
@@ -81,12 +82,18 @@
 			if (noMatch) doc.no_match = noMatch;
 			const json = JSON.stringify(doc, null, 2);
 			await api.updateFlow(id, { name, flow_json: json });
-			// Refresh the dirty-check baseline with what was just stored,
-			// or the badge would stay lit against the pre-save snapshot.
-			if (flowRow) {
-				flowRow = { ...flowRow, name, flow_json: json, updated_at: Math.floor(Date.now() / 1000) };
-			}
+			flowName = name; // mirror the trimmed name, or the dirty check never settles
 			await store.refreshCore();
+			// Refresh the dirty-check baseline with what was just stored, so
+			// the badge clears instead of comparing against the pre-save snapshot.
+			if (flowRow) {
+				flowRow = {
+					...flowRow,
+					name,
+					flow_json: json,
+					updated_at: store.flows.find((f) => f.id === id)?.updated_at ?? Math.floor(Date.now() / 1000),
+				};
+			}
 			toast.success("Saved — libraries using this flow are re-evaluating");
 		} catch (e) {
 			toast.error(`Failed to save flow: ${e instanceof Error ? e.message : e}`);
@@ -121,17 +128,19 @@
 		condition: pruneCondition((s.condition ?? {}) as Record<string, unknown>),
 		operation: s.operation ?? {},
 	});
+	// { escalate: false } is semantically the same as an absent no_match —
+	// normalize both sides so a toggle on then off never reads as unsaved.
+	const normNoMatch = (nm: NoMatchPolicy | null | undefined) => (nm && nm.escalate ? nm : null);
 	const unsaved = $derived(
 		flow !== null &&
 			JSON.stringify({
 				steps: steps.map(normStep),
-				no_match: noMatch ?? null,
+				no_match: normNoMatch(noMatch),
 				name: flowName,
 			}) !==
 				JSON.stringify({
 					steps: (flowRow?.flow_json ? (JSON.parse(flowRow.flow_json).steps as FlowStep[]) : []).map(normStep),
-					no_match:
-						(flowRow?.flow_json ? (JSON.parse(flowRow.flow_json).no_match as NoMatchPolicy | undefined) : undefined) ?? null,
+					no_match: normNoMatch(flowRow?.flow_json ? (JSON.parse(flowRow.flow_json).no_match as NoMatchPolicy | undefined) : undefined),
 					name: flowRow?.name ?? "",
 				}),
 	);

@@ -234,7 +234,7 @@
 	}
 
 	// audio rules
-	type Rule = { match: { codecs: string[]; languages: string[] }; action: unknown };
+	type Rule = { match?: { codecs: string[]; languages: string[] }; action: unknown };
 	function rulesFor(): Rule[] {
 		const a = step.operation["audio"] as { rules?: Rule[] } | undefined;
 		return a?.rules ?? [];
