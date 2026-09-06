@@ -1,5 +1,5 @@
-//! The HTTP API (DESIGN §8, §13): libraries, files, jobs, devices,
-//! settings, the flow schema, and the embedded-frontend SPA fallback.
+//! The HTTP API (DESIGN §8, §13): flows, libraries, files, jobs,
+//! devices, settings, the flow schema, and the embedded-frontend SPA fallback.
 //!
 //! All state access goes through [`Db`](crate::dbhandle::Db) — a
 //! fresh short-lived connection per operation (WAL mode; see that
@@ -43,6 +43,11 @@ pub fn router(state: AppState) -> Router {
         .route("/api/health", get(health))
         .route("/api/schema/flow", get(schema_flow))
         .route("/api/devices", get(list_devices))
+        .route("/api/flows", get(list_flows).post(create_flow))
+        .route(
+            "/api/flows/{id}",
+            get(get_flow).put(update_flow).delete(delete_flow),
+        )
         .route("/api/libraries", get(list_libraries).post(create_library))
         .route(
             "/api/libraries/{id}",
@@ -64,6 +69,8 @@ async fn health() -> Json<Value> {
     Json(json!({
         "status": "ok",
         "flow_version": FLOW_VERSION,
+        "version": env!("CARGO_PKG_VERSION"),
+        "build": env!("BUILD_TIME"),
     }))
 }
 
@@ -82,12 +89,27 @@ async fn list_devices(State(s): State<AppState>) -> Json<Vec<Device>> {
 
 // Libraries ─────────────────────────────────────────────────────────
 
+/// `flow_id` needs three states over JSON: omitted, present `null`, or a
+/// number. Plain serde collapses omitted and `null` into the same `None` for
+/// `Option<..>`, so present fields go through this deserializer (re-wrapping
+/// in `Some`) while `#[serde(default)]` supplies the omitted-field case,
+/// which `deserialize_with` never sees.
+fn opt_opt_i64<'de, D>(d: D) -> Result<Option<Option<i64>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Some(Option::<i64>::deserialize(d)?))
+}
+
 #[derive(Deserialize)]
 struct LibraryBody {
     name: String,
     path: String,
-    #[serde(default)]
-    flow_json: Option<String>,
+    /// `None` = keep the current assignment (on update) / no flow (on
+    /// create); `Some(None)` = explicitly unassign (JSON `null`);
+    /// `Some(Some(id))` = use that flow.
+    #[serde(default, deserialize_with = "opt_opt_i64")]
+    flow_id: Option<Option<i64>>,
     #[serde(default)]
     lifecycle_mode: Option<String>,
     #[serde(default)]
@@ -101,8 +123,45 @@ struct LibraryBody {
     watchable: Option<bool>,
 }
 
-fn default_flow_json() -> String {
-    r#"{"flow_version":1,"steps":[]}"#.into()
+/// Validate a flow's JSON envelope and version before persisting it.
+fn validate_flow(flow_json: &str) -> Result<(), ApiError> {
+    let flow: Flow = serde_json::from_str(flow_json)
+        .map_err(|e| ApiError(StatusCode::UNPROCESSABLE_ENTITY, format!("bad flow: {e}")))?;
+    if flow.flow_version != FLOW_VERSION {
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!(
+                "flow version {} unsupported (this build: {FLOW_VERSION})",
+                flow.flow_version
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// A library referencing a flow that doesn't exist.
+fn ensure_flow_exists(s: &AppState, flow_id: i64) -> Result<(), ApiError> {
+    let found = s.db.with(|c| db::get_flow(c, flow_id))?.is_some();
+    if !found {
+        return Err(ApiError(
+            StatusCode::NOT_FOUND,
+            format!("flow {flow_id} not found"),
+        ));
+    }
+    Ok(())
+}
+
+/// Best-effort re-evaluation of one library (fire and forget; the
+/// scan loop would pick the change up anyway).
+async fn spawn_reeval(s: &AppState, library_id: i64) {
+    let probe = s.probe.clone();
+    let registry = s.registry.clone();
+    let db2 = s.db.clone();
+    let ffprobe2 = s.ffprobe.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        crate::jobs::scan_library(&db2, library_id, &registry, &probe, &ffprobe2, true)
+    })
+    .await;
 }
 
 async fn list_libraries(State(s): State<AppState>) -> Result<Json<Vec<db::LibraryRow>>, ApiError> {
@@ -125,26 +184,19 @@ async fn create_library(
     State(s): State<AppState>,
     Json(body): Json<LibraryBody>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
-    // Validate the flow up front: a library with a broken flow is a
-    // foot-gun, and the error belongs here, not at first scan.
-    let flow_json = body.flow_json.clone().unwrap_or_else(default_flow_json);
-    let flow: Flow = serde_json::from_str(&flow_json)
-        .map_err(|e| ApiError(StatusCode::UNPROCESSABLE_ENTITY, format!("bad flow: {e}")))?;
-    if flow.flow_version != FLOW_VERSION {
-        return Err(ApiError(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            format!(
-                "flow version {} unsupported (this build: {FLOW_VERSION})",
-                flow.flow_version
-            ),
-        ));
+    // The flow is a first-class object; a library only references it,
+    // and must point at an existing one (it was validated at save).
+    let flow_id = body.flow_id.and_then(|f| f);
+    if let Some(fid) = flow_id {
+        ensure_flow_exists(&s, fid)?;
     }
     let row = db::LibraryRow {
         id: 0,
         name: body.name,
         path: body.path,
         lifecycle_mode: body.lifecycle_mode.unwrap_or_else(|| "manual".into()),
-        flow_json,
+        flow_id,
+        flow_name: None, // display-only; the list/get join fills it
         auto_queue: body.auto_queue.unwrap_or(true),
         retention_days: body.retention_days.unwrap_or(7),
         auto_delete: body.auto_delete.unwrap_or(false),
@@ -160,32 +212,35 @@ async fn update_library(
     PathParam(id): PathParam<i64>,
     Json(body): Json<LibraryBody>,
 ) -> Result<StatusCode, ApiError> {
-    let flow_json = body.flow_json.clone().unwrap_or_else(default_flow_json);
-    let _flow: Flow = serde_json::from_str(&flow_json)
-        .map_err(|e| ApiError(StatusCode::UNPROCESSABLE_ENTITY, format!("bad flow: {e}")))?;
+    let existing =
+        s.db.with(|c| db::get_library(c, id))?
+            .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "library not found".into()))?;
+    // `None` in the body = keep the current assignment.
+    let flow_id = match body.flow_id {
+        None => existing.flow_id,
+        Some(None) => None,
+        Some(Some(fid)) => {
+            ensure_flow_exists(&s, fid)?;
+            Some(fid)
+        }
+    };
     let row = db::LibraryRow {
         id,
         name: body.name,
         path: body.path,
         lifecycle_mode: body.lifecycle_mode.unwrap_or_else(|| "manual".into()),
-        flow_json,
+        flow_id,
+        flow_name: existing.flow_name, // display-only; not written
         auto_queue: body.auto_queue.unwrap_or(true),
         retention_days: body.retention_days.unwrap_or(7),
         auto_delete: body.auto_delete.unwrap_or(false),
         scan_schedule: body.scan_schedule,
         watchable: body.watchable.unwrap_or(false),
     };
-    // A re-scan is implied by a flow change: evaluate everything again.
+    // Any library change re-evaluates everything (a flow swap is the
+    // common reason, and the check is cheap).
     s.db.with(|c| db::update_library(c, &row))?;
-    // Best-effort immediate re-scan (the loop would pick it up anyway).
-    let probe = s.probe.clone();
-    let registry = s.registry.clone();
-    let db2 = s.db.clone();
-    let ffprobe2 = s.ffprobe.clone();
-    let _ = tokio::task::spawn_blocking(move || {
-        crate::jobs::scan_library(&db2, id, &registry, &probe, &ffprobe2, true)
-    })
-    .await;
+    spawn_reeval(&s, id).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -194,6 +249,78 @@ async fn delete_library(
     PathParam(id): PathParam<i64>,
 ) -> Result<StatusCode, ApiError> {
     s.db.with(|c| db::delete_library(c, id))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// Flows ─────────────────────────────────────────────────────────
+
+/// Flows are library-independent (DESIGN §2): any number of
+/// libraries can point at the same flow.
+#[derive(Deserialize)]
+struct FlowBody {
+    name: String,
+    flow_json: String,
+}
+
+async fn list_flows(State(s): State<AppState>) -> Result<Json<Vec<db::FlowRow>>, ApiError> {
+    Ok(Json(s.db.with(db::list_flows)?))
+}
+
+async fn create_flow(
+    State(s): State<AppState>,
+    Json(body): Json<FlowBody>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    validate_flow(&body.flow_json)?;
+    let id =
+        s.db.with(|c| db::insert_flow(c, &body.name, &body.flow_json))?;
+    Ok((StatusCode::CREATED, Json(json!({ "id": id }))))
+}
+
+async fn get_flow(
+    State(s): State<AppState>,
+    PathParam(id): PathParam<i64>,
+) -> Result<Json<db::FlowRow>, ApiError> {
+    let flow = s.db.with(|c| db::get_flow(c, id))?;
+    let Some(flow) = flow else {
+        return Err(ApiError(StatusCode::NOT_FOUND, "flow not found".into()));
+    };
+    Ok(Json(flow))
+}
+
+async fn update_flow(
+    State(s): State<AppState>,
+    PathParam(id): PathParam<i64>,
+    Json(body): Json<FlowBody>,
+) -> Result<StatusCode, ApiError> {
+    let Some(existing) = s.db.with(|c| db::get_flow(c, id))? else {
+        return Err(ApiError(StatusCode::NOT_FOUND, "flow not found".into()));
+    };
+    validate_flow(&body.flow_json)?;
+    let users = s.db.with(|c| db::libraries_using_flow(c, id))?;
+    s.db.with(|c| db::update_flow(c, id, &body.name, &body.flow_json))?;
+    // A changed flow re-evaluates every library that uses it.
+    if existing.name != body.name || existing.flow_json != body.flow_json {
+        for lib_id in users {
+            spawn_reeval(&s, lib_id).await;
+        }
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn delete_flow(
+    State(s): State<AppState>,
+    PathParam(id): PathParam<i64>,
+) -> Result<StatusCode, ApiError> {
+    let Some(_) = s.db.with(|c| db::get_flow(c, id))? else {
+        return Err(ApiError(StatusCode::NOT_FOUND, "flow not found".into()));
+    };
+    let users = s.db.with(|c| db::libraries_using_flow(c, id))?;
+    // ON DELETE SET NULL leaves the libraries with no flow;
+    // re-evaluate so their file states settle to unmatched.
+    s.db.with(|c| db::delete_flow(c, id))?;
+    for lib_id in users {
+        spawn_reeval(&s, lib_id).await;
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -394,5 +521,27 @@ impl From<rusqlite::Error> for ApiError {
 impl From<anyhow::Error> for ApiError {
     fn from(e: anyhow::Error) -> Self {
         Self(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The `flow_id` wire tri-state: omitted = keep, present null =
+    /// unassign, present number = assign. The unassign case is the one
+    /// plain serde silently breaks (reviewed P0), so pin it here.
+    #[test]
+    fn library_body_flow_id_tri_state() {
+        let b: LibraryBody = serde_json::from_str("{\"name\":\"n\",\"path\":\"/p\"}").unwrap();
+        assert_eq!(b.flow_id, None);
+
+        let b: LibraryBody =
+            serde_json::from_str("{\"name\":\"n\",\"path\":\"/p\",\"flow_id\":null}").unwrap();
+        assert_eq!(b.flow_id, Some(None));
+
+        let b: LibraryBody =
+            serde_json::from_str("{\"name\":\"n\",\"path\":\"/p\",\"flow_id\":3}").unwrap();
+        assert_eq!(b.flow_id, Some(Some(3)));
     }
 }

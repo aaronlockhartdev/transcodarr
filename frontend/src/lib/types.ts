@@ -21,8 +21,10 @@ export interface Library {
 	path: string;
 	/** `manual` | `auto` */
 	lifecycle_mode: string;
-	/** A `Flow` serialized as a JSON string. */
-	flow_json: string;
+	/** id of the assigned flow, or null if the library uses none. */
+	flow_id: number | null;
+	/** Display name of the assigned flow (join-derived), or null. */
+	flow_name: string | null;
 	auto_queue: boolean;
 	retention_days: number;
 	auto_delete: boolean;
@@ -74,6 +76,10 @@ export interface JobRow {
 export interface Health {
 	status: string;
 	flow_version: number;
+	/** Server version (package version). */
+	version?: string;
+	/** Build date (YYYY-MM-DD) stamped into the binary at compile time. */
+	build?: string;
 }
 
 // ── Flow schema (GET /api/schema/flow) ─────────────────────────────
@@ -134,4 +140,17 @@ export interface Flow {
 	name?: string;
 	steps: FlowStep[];
 	no_match?: { escalate?: boolean };
+}
+
+// ── flows table row (first-class, library-independent) ───────────
+
+export interface FlowRecord {
+	id: number;
+	name: string;
+	/** The flow JSON as a string — parse for the Flow document. */
+	flow_json: string;
+	created_at: number;
+	updated_at: number;
+	/** Number of libraries currently referencing this flow. */
+	library_count: number;
 }

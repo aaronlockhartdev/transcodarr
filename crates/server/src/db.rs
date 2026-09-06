@@ -25,6 +25,9 @@ pub fn open(data_dir: &Path) -> Result<Connection> {
     conn.pragma_update(None, "journal_mode", "WAL")
         .context("enable WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
+    // Matches dbhandle::with — needed for the schema's ON DELETE
+    // CASCADE / SET NULL to actually fire.
+    conn.pragma_update(None, "foreign_keys", "ON")?;
     init_schema(&conn)?;
     Ok(conn)
 }
@@ -32,12 +35,20 @@ pub fn open(data_dir: &Path) -> Result<Connection> {
 fn init_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         r#"
+        CREATE TABLE IF NOT EXISTS flows (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            name       TEXT NOT NULL UNIQUE,
+            flow_json  TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS libraries (
             id             INTEGER PRIMARY KEY AUTOINCREMENT,
             name           TEXT NOT NULL UNIQUE,
             path           TEXT NOT NULL,
             lifecycle_mode TEXT NOT NULL DEFAULT 'manual',
-            flow_json      TEXT NOT NULL DEFAULT '{}',
+            flow_id        INTEGER REFERENCES flows(id) ON DELETE SET NULL,
             auto_queue     INTEGER NOT NULL DEFAULT 1,
             retention_days INTEGER NOT NULL DEFAULT 7,
             auto_delete    INTEGER NOT NULL DEFAULT 0,
@@ -96,6 +107,64 @@ fn init_schema(conn: &Connection) -> Result<()> {
         "#,
     )
     .context("init schema")?;
+    migrate_flows(conn)?;
+    Ok(())
+}
+
+/// One-shot migration for databases created before flows were
+/// first-class (DESIGN §10): each distinct `libraries.flow_json`
+/// becomes a `flows` row, libraries gain `flow_id`, and the old
+/// column is dropped. No-op on fresh databases.
+fn migrate_flows(conn: &Connection) -> Result<()> {
+    let has_old_column: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('libraries') WHERE name = 'flow_json'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .map(|n| n > 0)
+        .context("inspect libraries schema")?;
+    if !has_old_column {
+        return Ok(());
+    }
+    let now = now_s();
+    conn.execute_batch("BEGIN")?;
+    let distinct: Vec<String> = {
+        let mut stmt =
+            conn.prepare("SELECT DISTINCT flow_json FROM libraries ORDER BY flow_json")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .context("list old flow JSONs")?
+    };
+    for (i, fj) in distinct.iter().enumerate() {
+        let is_default = fj == "{}" || fj == r#"{"flow_version":1,"steps":[]}"#;
+        let name = if is_default {
+            "Default".into()
+        } else {
+            format!("Imported {}", i + 1)
+        };
+        conn.execute(
+            "INSERT OR IGNORE INTO flows (name, flow_json, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?3)",
+            params![name, fj, now],
+        )
+        .with_context(|| format!("import flow {name}"))?;
+    }
+    conn.execute(
+        "ALTER TABLE libraries
+         ADD COLUMN flow_id INTEGER REFERENCES flows(id) ON DELETE SET NULL",
+        [],
+    )
+    .context("add libraries.flow_id")?;
+    conn.execute(
+        "UPDATE libraries SET flow_id =
+             (SELECT f.id FROM flows f WHERE f.flow_json = libraries.flow_json LIMIT 1)",
+        [],
+    )
+    .context("backfill libraries.flow_id")?;
+    conn.execute("ALTER TABLE libraries DROP COLUMN flow_json", [])
+        .context("drop libraries.flow_json")?;
+    conn.execute_batch("COMMIT")?;
     Ok(())
 }
 
@@ -109,8 +178,10 @@ pub struct LibraryRow {
     pub path: String,
     /// `manual` | `auto`.
     pub lifecycle_mode: String,
-    /// The library's flow (a `transcodarr_core::flow::Flow` as JSON).
-    pub flow_json: String,
+    /// The assigned flow (NULL = no flow → files are unmatched).
+    pub flow_id: Option<i64>,
+    /// The assigned flow's name (NULL when unassigned); joined in.
+    pub flow_name: Option<String>,
     pub auto_queue: bool,
     pub retention_days: i64,
     pub auto_delete: bool,
@@ -120,14 +191,14 @@ pub struct LibraryRow {
 
 pub fn insert_library(conn: &Connection, lib: &LibraryRow) -> Result<i64> {
     conn.execute(
-        "INSERT INTO libraries (name, path, lifecycle_mode, flow_json, auto_queue,
+        "INSERT INTO libraries (name, path, lifecycle_mode, flow_id, auto_queue,
                                 retention_days, auto_delete, scan_schedule, watchable)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             lib.name,
             lib.path,
             lib.lifecycle_mode,
-            lib.flow_json,
+            lib.flow_id,
             i64::from(lib.auto_queue),
             lib.retention_days,
             i64::from(lib.auto_delete),
@@ -141,9 +212,10 @@ pub fn insert_library(conn: &Connection, lib: &LibraryRow) -> Result<i64> {
 
 pub fn list_libraries(conn: &Connection) -> Result<Vec<LibraryRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, path, lifecycle_mode, flow_json, auto_queue,
-                retention_days, auto_delete, scan_schedule, watchable
-         FROM libraries ORDER BY id",
+        "SELECT l.id, l.name, l.path, l.lifecycle_mode, l.flow_id, f.name,
+                l.auto_queue, l.retention_days, l.auto_delete, l.scan_schedule,
+                l.watchable
+         FROM libraries l LEFT JOIN flows f ON f.id = l.flow_id ORDER BY l.id",
     )?;
     let rows = stmt.query_map([], |r| {
         Ok(LibraryRow {
@@ -151,12 +223,13 @@ pub fn list_libraries(conn: &Connection) -> Result<Vec<LibraryRow>> {
             name: r.get(1)?,
             path: r.get(2)?,
             lifecycle_mode: r.get(3)?,
-            flow_json: r.get(4)?,
-            auto_queue: r.get::<_, i64>(5)? != 0,
-            retention_days: r.get(6)?,
-            auto_delete: r.get::<_, i64>(7)? != 0,
-            scan_schedule: r.get(8)?,
-            watchable: r.get::<_, i64>(9)? != 0,
+            flow_id: r.get(4)?,
+            flow_name: r.get(5)?,
+            auto_queue: r.get::<_, i64>(6)? != 0,
+            retention_days: r.get(7)?,
+            auto_delete: r.get::<_, i64>(8)? != 0,
+            scan_schedule: r.get(9)?,
+            watchable: r.get::<_, i64>(10)? != 0,
         })
     })?;
     let mut out = Vec::new();
@@ -168,9 +241,10 @@ pub fn list_libraries(conn: &Connection) -> Result<Vec<LibraryRow>> {
 
 pub fn get_library(conn: &Connection, id: i64) -> Result<Option<LibraryRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, path, lifecycle_mode, flow_json, auto_queue,
-                retention_days, auto_delete, scan_schedule, watchable
-         FROM libraries WHERE id = ?1",
+        "SELECT l.id, l.name, l.path, l.lifecycle_mode, l.flow_id, f.name,
+                l.auto_queue, l.retention_days, l.auto_delete, l.scan_schedule,
+                l.watchable
+         FROM libraries l LEFT JOIN flows f ON f.id = l.flow_id WHERE l.id = ?1",
     )?;
     let mut it = stmt.query_map(params![id], |r| {
         Ok(LibraryRow {
@@ -178,12 +252,13 @@ pub fn get_library(conn: &Connection, id: i64) -> Result<Option<LibraryRow>> {
             name: r.get(1)?,
             path: r.get(2)?,
             lifecycle_mode: r.get(3)?,
-            flow_json: r.get(4)?,
-            auto_queue: r.get::<_, i64>(5)? != 0,
-            retention_days: r.get(6)?,
-            auto_delete: r.get::<_, i64>(7)? != 0,
-            scan_schedule: r.get(8)?,
-            watchable: r.get::<_, i64>(9)? != 0,
+            flow_id: r.get(4)?,
+            flow_name: r.get(5)?,
+            auto_queue: r.get::<_, i64>(6)? != 0,
+            retention_days: r.get(7)?,
+            auto_delete: r.get::<_, i64>(8)? != 0,
+            scan_schedule: r.get(9)?,
+            watchable: r.get::<_, i64>(10)? != 0,
         })
     })?;
     it.next().transpose().context("get library")
@@ -191,7 +266,7 @@ pub fn get_library(conn: &Connection, id: i64) -> Result<Option<LibraryRow>> {
 
 pub fn update_library(conn: &Connection, lib: &LibraryRow) -> Result<()> {
     let n = conn.execute(
-        "UPDATE libraries SET name = ?2, path = ?3, lifecycle_mode = ?4, flow_json = ?5,
+        "UPDATE libraries SET name = ?2, path = ?3, lifecycle_mode = ?4, flow_id = ?5,
                 auto_queue = ?6, retention_days = ?7, auto_delete = ?8,
                 scan_schedule = ?9, watchable = ?10
          WHERE id = ?1",
@@ -200,7 +275,7 @@ pub fn update_library(conn: &Connection, lib: &LibraryRow) -> Result<()> {
             lib.name,
             lib.path,
             lib.lifecycle_mode,
-            lib.flow_json,
+            lib.flow_id,
             i64::from(lib.auto_queue),
             lib.retention_days,
             i64::from(lib.auto_delete),
@@ -217,6 +292,116 @@ pub fn update_library(conn: &Connection, lib: &LibraryRow) -> Result<()> {
 pub fn delete_library(conn: &Connection, id: i64) -> Result<()> {
     conn.execute("DELETE FROM libraries WHERE id = ?1", params![id])?;
     Ok(())
+}
+
+// ── Flows ─────────────────────────────────────────────────────────────
+
+/// A flow row as read from / written to SQLite.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FlowRow {
+    pub id: i64,
+    pub name: String,
+    /// The flow (a `transcodarr_core::flow::Flow` as JSON).
+    pub flow_json: String,
+    /// Unix seconds.
+    pub created_at: i64,
+    /// Unix seconds.
+    pub updated_at: i64,
+    /// How many libraries currently use this flow.
+    pub library_count: i64,
+}
+
+pub fn insert_flow(conn: &Connection, name: &str, flow_json: &str) -> Result<i64> {
+    let now = now_s();
+    conn.execute(
+        "INSERT INTO flows (name, flow_json, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?3)",
+        params![name, flow_json, now],
+    )
+    .context("insert flow")?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub fn list_flows(conn: &Connection) -> Result<Vec<FlowRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT f.id, f.name, f.flow_json, f.created_at, f.updated_at,
+                (SELECT COUNT(*) FROM libraries l WHERE l.flow_id = f.id)
+         FROM flows f ORDER BY f.name",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok(FlowRow {
+            id: r.get(0)?,
+            name: r.get(1)?,
+            flow_json: r.get(2)?,
+            created_at: r.get(3)?,
+            updated_at: r.get(4)?,
+            library_count: r.get(5)?,
+        })
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
+pub fn get_flow(conn: &Connection, id: i64) -> Result<Option<FlowRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT f.id, f.name, f.flow_json, f.created_at, f.updated_at,
+                (SELECT COUNT(*) FROM libraries l WHERE l.flow_id = f.id)
+         FROM flows f WHERE f.id = ?1",
+    )?;
+    let mut it = stmt.query_map(params![id], |r| {
+        Ok(FlowRow {
+            id: r.get(0)?,
+            name: r.get(1)?,
+            flow_json: r.get(2)?,
+            created_at: r.get(3)?,
+            updated_at: r.get(4)?,
+            library_count: r.get(5)?,
+        })
+    })?;
+    it.next().transpose().context("get flow")
+}
+
+pub fn update_flow(conn: &Connection, id: i64, name: &str, flow_json: &str) -> Result<()> {
+    let n = conn.execute(
+        "UPDATE flows SET name = ?2, flow_json = ?3, updated_at = ?4 WHERE id = ?1",
+        params![id, name, flow_json, now_s()],
+    )?;
+    if n == 0 {
+        bail!("flow {id} not found");
+    }
+    Ok(())
+}
+
+pub fn delete_flow(conn: &Connection, id: i64) -> Result<()> {
+    // Libraries referencing it get flow_id = NULL (ON DELETE SET NULL).
+    conn.execute("DELETE FROM flows WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
+/// The library ids that currently use this flow.
+pub fn libraries_using_flow(conn: &Connection, flow_id: i64) -> Result<Vec<i64>> {
+    let mut stmt = conn.prepare("SELECT id FROM libraries WHERE flow_id = ?1 ORDER BY id")?;
+    let rows = stmt.query_map(params![flow_id], |r| r.get::<_, i64>(0))?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .context("list libraries")
+}
+
+/// The JSON of the library's assigned flow, or the empty flow when it
+/// has none (empty flow ⇒ every file evaluates to NoMatch/unmatched,
+/// the same as the old empty `flow_json` default).
+pub fn flow_json_for_library(conn: &Connection, lib: &LibraryRow) -> Result<String> {
+    let json = match lib.flow_id {
+        Some(id) => {
+            get_flow(conn, id)?
+                .ok_or_else(|| anyhow::anyhow!("library {} references missing flow {id}", lib.id))?
+                .flow_json
+        }
+        None => r#"{"flow_version":1,"steps":[]}"#.into(),
+    };
+    Ok(json)
 }
 
 // ── Files ─────────────────────────────────────────────────────────────
@@ -763,7 +948,8 @@ mod tests {
             name: "L".into(),
             path: "/l".into(),
             lifecycle_mode: "auto".into(),
-            flow_json: "{}".into(),
+            flow_id: None,
+            flow_name: None,
             auto_queue: true,
             retention_days: 7,
             auto_delete: false,
@@ -851,6 +1037,104 @@ mod tests {
         let f = get_file(&conn, fid).unwrap().unwrap();
         assert_eq!(f.status, "completed");
         assert_eq!(f.last_evaluated, Some(6));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn old_library_schema_migrates_to_flows() {
+        let dir = std::env::temp_dir().join(format!(
+            "transcodarr-db-test-migrate-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Build a pre-flows database by hand.
+        {
+            let conn = rusqlite::Connection::open(dir.join("transcodarr.db")).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE libraries (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE,
+                    path TEXT NOT NULL,
+                    lifecycle_mode TEXT NOT NULL DEFAULT 'manual',
+                    flow_json TEXT NOT NULL DEFAULT '{}',
+                    auto_queue INTEGER NOT NULL DEFAULT 1,
+                    retention_days INTEGER NOT NULL DEFAULT 7,
+                    auto_delete INTEGER NOT NULL DEFAULT 0,
+                    scan_schedule TEXT,
+                    watchable INTEGER NOT NULL DEFAULT 0);",
+            )
+            .unwrap();
+            let default = r#"{"flow_version":1,"steps":[]}"#;
+            conn.execute(
+                "INSERT INTO libraries (name, path, flow_json) VALUES ('A', '/a', ?1)",
+                rusqlite::params![default],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO libraries (name, path, flow_json) VALUES ('B', '/b', ?1)",
+                rusqlite::params!["{}"],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO libraries (name, path, flow_json) VALUES ('C', '/c', ?1)",
+                rusqlite::params![r#"{"flow_version":1,"steps":[{"condition":{}}]}"#],
+            )
+            .unwrap();
+        }
+        // Reopening runs the migration.
+        let conn = open(&dir).unwrap();
+        // "{}" and the full empty flow are both "default" and dedupe to
+        // one row; the custom flow becomes "Imported 1" (sort order puts
+        // it first).
+        let flows = list_flows(&conn).unwrap();
+        assert_eq!(flows.len(), 2);
+        let lib_a = get_library(&conn, 1).unwrap().unwrap();
+        assert_eq!(lib_a.flow_name.as_deref(), Some("Default"));
+        let lib_b = get_library(&conn, 2).unwrap().unwrap();
+        assert_eq!(lib_b.flow_id, None); // its "{}" deduped into A's Default
+        let lib_c = get_library(&conn, 3).unwrap().unwrap();
+        assert!(
+            lib_c
+                .flow_name
+                .as_deref()
+                .is_some_and(|n| n.starts_with("Imported ")),
+            "custom flow should be imported, got {:?}",
+            lib_c.flow_name
+        );
+        let has_old = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('libraries')
+                 WHERE name = 'flow_json'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|n| n > 0)
+            .unwrap();
+        assert!(!has_old, "flow_json column should be dropped");
+        // A fresh open must be a no-op migration.
+        drop(conn);
+        let _ = open(&dir).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn flow_crud_and_library_reference() {
+        let (dir, conn) = temp_db("flows");
+        let fid = insert_flow(&conn, "F", r#"{"flow_version":1,"steps":[]}"#).unwrap();
+        let mut lib = lib_row();
+        lib.flow_id = Some(fid);
+        let lid = insert_library(&conn, &lib).unwrap();
+        let got = get_library(&conn, lid).unwrap().unwrap();
+        assert_eq!(got.flow_name.as_deref(), Some("F"));
+        assert_eq!(get_flow(&conn, fid).unwrap().unwrap().library_count, 1);
+        update_flow(&conn, fid, "F2", r#"{"flow_version":1,"steps":[]}"#).unwrap();
+        assert_eq!(get_flow(&conn, fid).unwrap().unwrap().name, "F2");
+        delete_flow(&conn, fid).unwrap();
+        let got = get_library(&conn, lid).unwrap().unwrap();
+        assert_eq!(got.flow_id, None); // ON DELETE SET NULL
+        assert_eq!(got.flow_name, None);
+        let json = flow_json_for_library(&conn, &got).unwrap();
+        assert_eq!(json, r#"{"flow_version":1,"steps":[]}"#);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

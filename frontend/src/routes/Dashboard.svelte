@@ -146,7 +146,7 @@
 		</Card.Root>
 		<Card.Root>
 			<Card.Header>
-				<Card.Description>Space saved by transcoding</Card.Description>
+				<Card.Description>Space saved</Card.Description>
 				<Card.Title>{formatBytes(spaceSavedBytes)}</Card.Title>
 			</Card.Header>
 		</Card.Root>
@@ -163,7 +163,7 @@
 		<Card.Root>
 			<Card.Header>
 				<Card.Title>Completed, last 30 days</Card.Title>
-				<Card.Description>Files per day from job history</Card.Description>
+				<Card.Description>Files per day</Card.Description>
 			</Card.Header>
 			<Card.Content>
 				{#if !hasCompleted}
@@ -214,7 +214,6 @@
 		<Card.Root>
 			<Card.Header>
 				<Card.Title>Recent failures</Card.Title>
-				<Card.Description>Jump to a job for its log</Card.Description>
 			</Card.Header>
 			<Card.Content>
 				{#if recentFailures.length === 0}
@@ -243,7 +242,6 @@
 		<Card.Root>
 			<Card.Header>
 				<Card.Title>Oldest waiting</Card.Title>
-				<Card.Description>Longest-queued jobs (FIFO)</Card.Description>
 			</Card.Header>
 			<Card.Content>
 				{#if oldestWaiting.length === 0}

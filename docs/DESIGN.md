@@ -23,9 +23,9 @@ Non-goals for v1 (see §11–12): distributed workers, \*arr API integration, au
 
 | Term | Meaning |
 |---|---|
-| **Library** | A directory tree the user adds. Carries: assigned flow, lifecycle mode (in-place or output tree), auto-queue toggle, scan schedule. |
+| **Library** | A directory tree the user adds. References a **flow** (a first-class shared object — see below), and carries: lifecycle mode (in-place or output tree), auto-queue toggle, scan schedule. |
 | **File facts** | Cached probe result for one file: container, video codec/profile/level/pixel format/resolution/frame rate, HDR format, audio tracks (codec, language, channel layout, Atmos flag), subtitle tracks (type, language, forced), size, duration, bitrate. |
-| **Flow** | The library's format policy: an ordered list of **steps**. A step = **condition** → **operation**. **First match wins.** |
+| **Flow** | A format policy: an ordered list of **steps**. A step = **condition** → **operation**. **First match wins.** Flows are **first-class, library-independent objects**: any number of libraries can reference the same flow, and editing one re-evaluates all of them. |
 | **Compliant** | The flow evaluates to **identity** for the file's facts: the matched operation (or no match at all) would change nothing — every stream copied, nothing dropped, container already correct. |
 | **Job** | One execution of an evaluated plan against one file: transcode → verify → swap → backup → retain. |
 
@@ -96,7 +96,7 @@ This section is the structural core of the "extremely easy to extend" requiremen
 
 **Principle: a flow is data; behavior lives in registries.**
 
-A flow is versioned JSON (`"flow_version": 1`) stored per library. Every variable part of the system is a registry of small Rust types behind a trait. v1 registries:
+A flow is versioned JSON (`"flow_version": 1`) stored as its own row in the `flows` table; libraries reference a flow by id (a library with no flow leaves all its files unmatched). Every variable part of the system is a registry of small Rust types behind a trait. v1 registries:
 
 | Registry | Entries (v1) | What an entry provides |
 |---|---|---|
@@ -223,13 +223,13 @@ All derived from existing tables; no new subsystem.
 ### 9.2 Libraries / Library detail
 
 - **Libraries**: list with per-library compliance summary (n files / n compliant / n queued / n running / n failed / n unmatched), assigned flow, watchability badge ("watched" vs. "scan-driven").
-- **Library detail**: compliance summary strip; **file table** (name, resolution, video/audio codecs, status, last checked, size, size delta after transcode); row actions: re-check · queue now · **history drawer** (that file's full job history) · view quarantined output. Library settings: lifecycle mode, flow assignment, auto-queue, retention N, auto-delete, scan schedule.
+- **Library detail**: compliance summary strip; **file table** (name, resolution, video/audio codecs, status, last checked, size, size delta after transcode); row actions: re-check · queue now · **history drawer** (that file's full job history) · view quarantined output. Library settings: lifecycle mode, flow **reference** (a picker over the shared flows — flows themselves are edited on the Flows page, not here), auto-queue, retention N, auto-delete, scan schedule.
 
 ### 9.3 Flow editor
 
 - Ordered **step cards**: condition card (pickers rendered from the flow schema) → operation card (video/audio/subtitle sections, §6).
-- **Impact preview (the killer feature)**: on every edit, `evaluate()` re-runs over the library's cached facts and shows, before saving: *"this edit changes the fate of N files: 12 will transcode, 3 will lose audio tracks, 4,180 untouched; 2 files become unmatched."*
-- **Raw JSON view** as the power-user escape hatch, validated against the flow schema on save.
+- **Impact preview (the killer feature)**: on every edit, `evaluate()` re-runs over the using libraries' cached facts and shows, before saving: *"this edit changes the fate of N files: 12 will transcode, 3 will lose audio tracks, 4,180 untouched; 2 files become unmatched."*
+- **No raw JSON escape hatch in v1** — every field is a schema-driven picker (§5); the schema is the only surface, which keeps every save structurally valid for a shared object.
 - The NoMatch behavior (unmatched status / warning escalation) is visible and configurable from this screen.
 
 ### 9.4 Jobs
@@ -246,7 +246,8 @@ Devices & per-device caps · system ceiling · default scan schedule · retentio
 
 | Table | Key columns |
 |---|---|
-| `libraries` | id, name, path, lifecycle_mode, flow_json (versioned), auto_queue, retention_days, auto_delete, scan_schedule, watchable |
+| `flows` | id, name (unique), flow_json (versioned), created_at, updated_at — **first-class and library-independent; any number of libraries can use one** |
+| `libraries` | id, name, path, lifecycle_mode, flow_id (→ flows, nullable — NULL = no flow), auto_queue, retention_days, auto_delete, scan_schedule, watchable |
 | `files` | id, library_id, path, dev, inode, size, mtime, sample_hash, facts_json, status (`compliant / needs_work / unmatched / queued / running / failed / quarantined`), last_probed, last_evaluated, input_size, output_size |
 | `jobs` | id, file_id, library_id, flow_version, plan_json, state, device_id, claimed_by, lease_expires, started, ended, exit_kind, log_path (the job's ffmpeg output file — **planned:** replaced by a `log_zstd` BLOB, zstd-compressed on job end and served decompressed by the log endpoint), quarantine_path — **retained: this table *is* the per-file job history** |
 | `devices` | id, kind (`cpu / gpu`), name, encoders_json, max_concurrent |
@@ -291,3 +292,4 @@ Made during the design session; each is a deliberate default, not a constraint:
 10. **Svelte 5 + Tailwind CSS + shadcn-svelte** for the SPA (copy-in-source; Melt UI underneath). The styling layer is swappable — the schema-driven editor (§5) does not depend on it.
 11. **Legacy wire forms are accepted at parse time and upgraded in place** (no flow-migration endpoint in v1): a device object without `kind` (`{"id": "…"}`) ⇒ GPU; `profile`/`level: null` ⇒ auto; the audio policy string `"re-encode"` ⇒ re-encode to the default target, source rate/channels kept.
 12. **Live updates will ride one SSE stream per client, not WebSockets** (planned — §9.0; v1 polls at 5 s) — the event flow is strictly one-way (client actions are ordinary POSTs); SSE is proxy-friendly, auto-reconnects, and resumes logs via `Last-Event-ID`.
+13. **Flows are first-class, library-independent objects** (a `flows` table; `libraries.flow_id` is nullable). Editing a flow re-evaluates every library that references it; deleting a flow unassigns its libraries (files settle to unmatched) rather than cascading.

@@ -135,7 +135,10 @@ pub fn scan_library(
     let lib = db
         .with(|c| db::get_library(c, library_id))?
         .with_context(|| format!("library {library_id}"))?;
-    let flow: Flow = serde_json::from_str(&lib.flow_json)
+    let flow_json = db
+        .with(|c| db::flow_json_for_library(c, &lib))
+        .with_context(|| format!("library {library_id} flow"))?;
+    let flow: Flow = serde_json::from_str(&flow_json)
         .with_context(|| format!("library {} flow JSON", library_id))?;
 
     let root = PathBuf::from(&lib.path);
@@ -858,7 +861,10 @@ pub fn run_job(
             return Err(e);
         }
     };
-    let flow = match serde_json::from_str::<Flow>(&lib.flow_json) {
+    let flow = match db
+        .with(|c| db::flow_json_for_library(c, &lib))
+        .and_then(|json| serde_json::from_str::<Flow>(&json).map_err(anyhow::Error::from))
+    {
         Ok(f) => f,
         Err(e) => {
             let _ = finish(

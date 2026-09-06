@@ -3,7 +3,7 @@
 // gentle — this is a LAN self-hosted tool, not a trading desk.
 
 import { api } from "./api.js";
-import type { Device, FileRow, Health, JobRow, Library } from "./types.js";
+import type { Device, FileRow, FlowRecord, Health, JobRow, Library } from "./types.js";
 
 const POLL_MS = 5000;
 
@@ -18,6 +18,7 @@ class Store {
 	filesByLibrary = $state<Record<number, FileRow[]>>({});
 	jobs = $state<JobRow[]>([]);
 	devices = $state<Device[]>([]);
+	flows = $state<FlowRecord[]>([]);
 	health = $state<Health | null>(null);
 	/** Non-null while a refresh is in flight (drives skeletons). */
 	refreshing = $state(false);
@@ -30,12 +31,14 @@ class Store {
 		if (this.refreshing) return; // stale-response guard: never overlap in-flight refreshes
 		this.refreshing = true;
 		try {
-			const [libs, devs, health] = await Promise.all([
+			const [libs, flows, devs, health] = await Promise.all([
 				api.listLibraries(),
+				api.listFlows(),
 				api.devices(),
 				api.health(),
 			]);
 			this.libraries = libs;
+			this.flows = flows;
 			this.devices = devs;
 			this.health = health;
 			this.fetchError = null;

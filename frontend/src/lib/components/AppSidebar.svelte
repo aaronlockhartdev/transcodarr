@@ -2,6 +2,7 @@
 	import HouseIcon from "@lucide/svelte/icons/house";
 	import FilmIcon from "@lucide/svelte/icons/film";
 	import ListTodoIcon from "@lucide/svelte/icons/list-todo";
+	import WorkflowIcon from "@lucide/svelte/icons/workflow";
 	import SettingsIcon from "@lucide/svelte/icons/settings";
 	import * as Sidebar from "$lib/components/ui/sidebar";
 	import * as Tooltip from "$lib/components/ui/tooltip";
@@ -18,7 +19,13 @@
 			title: "Libraries",
 			url: "/libraries",
 			icon: FilmIcon,
-			match: (p: string) => p.startsWith("/libraries") || p.startsWith("/flows"),
+			match: (p: string) => p.startsWith("/libraries"),
+		},
+		{
+			title: "Flows",
+			url: "/flows",
+			icon: WorkflowIcon,
+			match: (p: string) => p.startsWith("/flows"),
 		},
 		{
 			title: "Jobs",
@@ -39,13 +46,13 @@
 <Sidebar.Root variant="inset">
 	<Sidebar.Header>
 		<!-- Wordmark only — the icon comes later (kept out on purpose). -->
-		<div class="px-2 py-1.5 text-sm font-semibold tracking-tight">Transcodarr</div>
+		<div class="px-2 py-2 text-base font-semibold tracking-tight">Transcodarr</div>
 	</Sidebar.Header>
 
 	<Sidebar.Content>
 		<Sidebar.Group>
 			<Sidebar.GroupContent>
-				<Sidebar.Menu>
+				<Sidebar.Menu class="gap-1.5">
 					{#each items as item (item.title)}
 						<Sidebar.MenuItem>
 							<Sidebar.MenuButton isActive={item.match(path)} tooltipContent={item.title}>
@@ -99,8 +106,10 @@
 				</Tooltip.Root>
 			</Sidebar.MenuItem>
 		</Sidebar.Menu>
-		{#if store.health}
-			<p class="px-2 pb-1 text-xs text-muted-foreground">flow v{store.health.flow_version}</p>
+		{#if store.health && (store.health.version || store.health.build)}
+			<p class="px-2 pb-1 text-xs text-muted-foreground">
+				{store.health.version}{store.health.build ? ` · ${store.health.build}` : ""}
+			</p>
 		{/if}
 	</Sidebar.Footer>
 </Sidebar.Root>

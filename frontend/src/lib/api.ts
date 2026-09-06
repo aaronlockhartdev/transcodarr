@@ -1,6 +1,7 @@
 import type {
 	Device,
 	FileRow,
+	FlowRecord,
 	FlowSchema,
 	Health,
 	JobRow,
@@ -50,15 +51,29 @@ export const api = {
 	schemaFlow: () => request<FlowSchema>("/api/schema/flow"),
 	devices: () => request<Device[]>("/api/devices"),
 
+	listFlows: () => request<FlowRecord[]>("/api/flows"),
+	getFlow: (id: number) => request<FlowRecord>(`/api/flows/${id}`),
+	createFlow: (body: { name: string; flow_json: string }) =>
+		request<{ id: number }>("/api/flows", {
+			method: "POST",
+			body: JSON.stringify(body),
+		}),
+	updateFlow: (id: number, body: { name: string; flow_json: string }) =>
+		request<void>(`/api/flows/${id}`, {
+			method: "PUT",
+			body: JSON.stringify(body),
+		}),
+	deleteFlow: (id: number) => request<void>(`/api/flows/${id}`, { method: "DELETE" }),
+
 	listLibraries: () => request<Library[]>("/api/libraries"),
 	getLibrary: (id: number) => request<Library>(`/api/libraries/${id}`),
-	/** The server re-scans immediately after a flow change (best effort). */
-	createLibrary: (lib: Omit<Library, "id">) =>
+	/** The server re-evaluates all libraries that use the assigned flow. */
+	createLibrary: (lib: Omit<Library, "id" | "flow_name">) =>
 		request<{ id: number }>("/api/libraries", {
 			method: "POST",
 			body: JSON.stringify(lib),
 		}),
-	updateLibrary: (lib: Library) =>
+	updateLibrary: (lib: Omit<Library, "flow_name">) =>
 		request<void>(`/api/libraries/${lib.id}`, {
 			method: "PUT",
 			body: JSON.stringify(lib),

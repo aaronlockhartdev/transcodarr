@@ -35,15 +35,6 @@
 		};
 	}
 
-	function flowName(lib: Library): string | null {
-		try {
-			const f = JSON.parse(lib.flow_json);
-			return typeof f?.name === "string" && f.name.length > 0 ? f.name : null;
-		} catch {
-			return null;
-		}
-	}
-
 	async function confirmDelete() {
 		if (!deleting) return;
 		deletingBusy = true;
@@ -109,7 +100,21 @@
 								{/if}
 							</Table.Cell>
 							<Table.Cell class="max-w-56 truncate font-mono text-xs text-muted-foreground">{lib.path}</Table.Cell>
-							<Table.Cell>{#if flowName(lib)}{flowName(lib)}{:else}<span class="text-muted-foreground">(default)</span>{/if}</Table.Cell>
+							<Table.Cell>
+							{#if lib.flow_name}
+								<button
+									class="underline decoration-dotted underline-offset-2 hover:text-foreground"
+									onclick={(e) => {
+										e.stopPropagation();
+										navigate(`/flows/${lib.flow_id}`);
+									}}
+								>
+									{lib.flow_name}
+								</button>
+							{:else}
+								<span class="text-muted-foreground">none</span>
+							{/if}
+						</Table.Cell>
 							<Table.Cell><Badge variant="secondary">{lib.lifecycle_mode}</Badge></Table.Cell>
 							<Table.Cell class="text-right tabular-nums">{s.total}</Table.Cell>
 							<Table.Cell class="text-right tabular-nums {s.compliant < s.total ? '' : 'text-emerald-700 dark:text-emerald-400'}">{s.compliant}</Table.Cell>
@@ -129,9 +134,6 @@
 												}}
 											>
 												Edit
-											</DropdownMenu.Item>
-											<DropdownMenu.Item onclick={() => navigate(`/flows/${lib.id}`)}>
-												Edit flow
 											</DropdownMenu.Item>
 											<DropdownMenu.Separator />
 											<DropdownMenu.Item variant="destructive" onclick={() => (deleting = lib, deleteOpen = true)}>

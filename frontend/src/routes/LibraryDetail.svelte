@@ -118,6 +118,18 @@
 				<Badge variant="secondary">{lib.lifecycle_mode}</Badge>
 			</div>
 			<p class="truncate font-mono text-sm text-muted-foreground">{lib.path}</p>
+			<p class="text-sm text-muted-foreground">
+				Flow: {#if lib.flow_name}
+					<button
+						class="underline decoration-dotted underline-offset-2 hover:text-foreground"
+						onclick={() => navigate(`/flows/${lib.flow_id}`)}
+					>
+						{lib.flow_name}
+					</button>
+				{:else}
+					<span>none</span>
+				{/if}
+			</p>
 			<div class="mt-2 flex flex-wrap items-center gap-2 text-sm">
 				<Badge variant="secondary">{summary.total} files</Badge>
 				<Badge variant="secondary">{summary.compliant} compliant</Badge>
@@ -128,7 +140,6 @@
 			</div>
 		</div>
 		<div class="flex shrink-0 gap-2">
-			<Button variant="outline" onclick={() => navigate(`/flows/${lib.id}`)}>Edit flow</Button>
 			<Button variant="outline" onclick={() => (editOpen = true)}>Edit library</Button>
 			<Button onclick={scanNow} disabled={scanning}>
 				<ScanIcon class="size-4" data-icon="inline-start" />
@@ -208,7 +219,7 @@
 	<Sheet.Content>
 		<Sheet.Header>
 			<Sheet.Title>Job history — {historyFile ? basename(historyFile.path) : ""}</Sheet.Title>
-			<Sheet.Description>Most recent first; the jobs table doubles as per-file history.</Sheet.Description>
+			<Sheet.Description>Most recent first.</Sheet.Description>
 		</Sheet.Header>
 		<Sheet.Content class="pt-0">
 			{#if fileJobs.length === 0}

@@ -6,6 +6,7 @@
 	import AppSidebar from "$lib/components/AppSidebar.svelte";
 	import Dashboard from "$routes/Dashboard.svelte";
 	import Libraries from "$routes/Libraries.svelte";
+	import Flows from "$routes/Flows.svelte";
 	import LibraryDetail from "$routes/LibraryDetail.svelte";
 	import FlowEditor from "$routes/FlowEditor.svelte";
 	import Jobs from "$routes/Jobs.svelte";
@@ -46,6 +47,8 @@
 					<Libraries />
 				{:else if route.name === "library"}
 					<LibraryDetail id={Number(route.id)} />
+				{:else if route.name === "flows"}
+					<Flows />
 				{:else if route.name === "flow"}
 					<FlowEditor id={Number(route.id)} />
 				{:else if route.name === "jobs"}

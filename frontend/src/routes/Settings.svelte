@@ -73,7 +73,7 @@
 </script>
 
 <h1 class="text-2xl font-semibold tracking-tight">Settings</h1>
-<p class="text-muted-foreground">Server health, encoder devices, and the free-form settings store.</p>
+<p class="text-muted-foreground">Server, encoder devices, and the settings store.</p>
 
 <div class="mt-6 grid gap-4 lg:grid-cols-2">
 	<Card.Root>
@@ -89,6 +89,8 @@
 					</dd>
 					<dt class="text-muted-foreground">Flow version</dt>
 					<dd>v{store.health.flow_version}</dd>
+					<dt class="text-muted-foreground">Version</dt>
+					<dd>{store.health.version}{store.health.build ? ` · ${store.health.build}` : ""}</dd>
 					<dt class="text-muted-foreground">Devices</dt>
 					<dd>{store.devices.length}</dd>
 				</dl>
@@ -96,8 +98,7 @@
 				<p class="text-sm text-muted-foreground">No health data — is the API reachable?</p>
 			{/if}
 			<p class="mt-4 text-xs text-muted-foreground">
-				v1 binds to 127.0.0.1 by default with no built-in authentication — put it behind an
-				authenticating reverse proxy if the port must be exposed.
+				v1 binds 127.0.0.1 with no built-in auth — keep it behind an authenticating reverse proxy.
 			</p>
 		</Card.Content>
 	</Card.Root>
@@ -105,7 +106,7 @@
 	<Card.Root>
 		<Card.Header>
 			<Card.Title>Settings store</Card.Title>
-			<Card.Description>Free-form key/value pairs. v1 reads none by default — ffmpeg/ffprobe paths are CLI flags.</Card.Description>
+			<Card.Description>Free-form key/value pairs.</Card.Description>
 		</Card.Header>
 		<Card.Content>
 			{#if Object.keys(settings).length === 0}
@@ -152,9 +153,7 @@
 <Card.Root class="mt-6">
 	<Card.Header>
 		<Card.Title>Devices</Card.Title>
-		<Card.Description>
-			Detected at startup with a real test-encode; a device is listed only if at least one of its encoders works.
-		</Card.Description>
+		<Card.Description>Detected at startup with a test-encode.</Card.Description>
 	</Card.Header>
 	<Card.Content class="p-0">
 		<Table.Root>

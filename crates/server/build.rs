@@ -41,7 +41,28 @@ fn guess_mime(path: &Path) -> &'static str {
     }
 }
 
+/// Format a unix timestamp as `YYYY-MM-DD` (no date crate at build
+/// time; the standard civil-from-days algorithm).
+fn build_date() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0) as i64;
+    let z = secs / 86_400 + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
 fn main() {
+    println!("cargo:rustc-env=BUILD_TIME={}", build_date());
     let dist = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")

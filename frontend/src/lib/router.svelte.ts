@@ -33,6 +33,7 @@ export interface Route {
 		| "job"
 		| "settings"
 		| "flow"
+		| "flows"
 		| "notfound";
 	id?: string;
 }
@@ -49,7 +50,7 @@ export function parseRoute(path: string): Route {
 		case "settings":
 			return { name: "settings" };
 		case "flows":
-			return seg[1] ? { name: "flow", id: seg[1] } : { name: "libraries" };
+			return seg[1] ? { name: "flow", id: seg[1] } : { name: "flows" };
 		default:
 			return { name: "notfound" };
 	}

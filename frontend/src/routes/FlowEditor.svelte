@@ -1,242 +1,194 @@
 <script lang="ts">
-	/**
-	 * Schema-driven flow editor (design §5, §9.3): every condition field and
-	 * operation section is rendered from GET /api/schema/flow — nothing is
-	 * hardcoded. Impact preview is a v1 gap (no evaluate endpoint yet).
-	 */
 	import { onMount } from "svelte";
 	import { toast } from "svelte-sonner";
-	import PlusIcon from "@lucide/svelte/icons/plus";
+	import ChevronLeftIcon from "@lucide/svelte/icons/chevron-left";
 	import * as Card from "$lib/components/ui/card";
-	import * as Tabs from "$lib/components/ui/tabs";
-	import * as Empty from "$lib/components/ui/empty";
 	import { Badge } from "$lib/components/ui/badge";
 	import { Button } from "$lib/components/ui/button";
-	import SyncSwitch from "$lib/components/flow/SyncSwitch.svelte";
-	import { Textarea } from "$lib/components/ui/textarea";
-	import { Label } from "$lib/components/ui/label";
 	import StepCard from "$lib/components/flow/StepCard.svelte";
-	import { api } from "$lib/api.js";
+	import { api, ApiError } from "$lib/api.js";
 	import { navigate } from "$lib/router.svelte.js";
 	import { store } from "$lib/store.svelte.js";
 	import type { Flow, FlowSchema } from "$lib/types.js";
 
 	let { id }: { id: number } = $props();
 
-	const lib = $derived(store.libraries.find((l) => l.id === id));
+	// The flows row behind this editor (live from the store — library count, name).
+	const flowRow = $derived(store.flows.find((f) => f.id === id) ?? null);
 
 	let schema = $state<FlowSchema | null>(null);
 	let flow = $state<Flow | null>(null);
-	let savedJson = $state("");
-	let loadingError = $state<string | null>(null);
+	let loaded = $state(false);
+	let loadError = $state<string | null>(null);
+	let unsaved = $state(false);
+	let saving = $state(false);
+	let flowName = $state("");
 
-	let tab = $state<"steps" | "json">("steps");
-	let jsonText = $state("");
+	// The header name is live-editable; a name change counts as an edit too.
+	const dirty = $derived(unsaved || flowName !== (flowRow?.name ?? ""));
 
 	onMount(async () => {
 		try {
-			schema = await api.schemaFlow();
-			const l = await api.getLibrary(id);
-			const parsed = JSON.parse(l.flow_json) as Flow;
-			if (schema && parsed.flow_version !== schema.flow_version) {
-				throw new Error(
-					`Flow version mismatch: library has v${parsed.flow_version}, server speaks v${schema.flow_version}`,
-				);
-			}
-			flow = parsed;
-			savedJson = JSON.stringify(parsed, null, 2);
-			jsonText = savedJson;
+			const [schemaRes, record] = await Promise.all([api.schemaFlow(), api.getFlow(id)]);
+			schema = schemaRes;
+			flow = JSON.parse(record.flow_json) as Flow;
+			flowName = record.name;
+			loaded = true;
 		} catch (e) {
-			loadingError = e instanceof Error ? e.message : String(e);
+			loadError = e instanceof ApiError ? e.message : e instanceof Error ? e.message : String(e);
 		}
 	});
 
-	const dirty = $derived(
-		flow != null && JSON.stringify(flow, null, 2) !== savedJson,
-	);
-	const jsonDirty = $derived(flow != null && jsonText !== JSON.stringify(flow, null, 2)); // unapplied JSON-tab edits must be Applied before save
-	// Keep the Raw JSON tab live: re-serialize when the step editor mutates flow.
-	$effect(() => {
-		const f = flow;
-		if (f) jsonText = JSON.stringify(f, null, 2);
-	});
+	// Every mutation marks the form dirty; save() is the only write path.
+	function touch<T>(fn: (f: Flow) => T): T {
+		unsaved = true;
+		return fn(flow!);
+	}
 
 	function addStep() {
-		if (!flow) return;
-		flow.steps = [
-			...flow.steps,
-			{
-				id: `s${Math.random().toString(36).slice(2, 10)}`,
+		touch((f) => {
+			f.steps = f.steps ?? [];
+			f.steps.push({
+				id: `step_${Date.now()}_${f.steps.length}`,
 				condition: {},
 				operation: {},
-			},
-		];
-	}
-	function removeStep(i: number) {
-		if (!flow) return;
-		flow.steps = flow.steps.filter((_, j) => j !== i);
-	}
-	function moveStep(i: number, dir: -1 | 1) {
-		if (!flow) return;
-		const j = i + dir;
-		if (j < 0 || j >= flow.steps.length) return;
-		const steps = [...flow.steps];
-		[steps[i], steps[j]] = [steps[j], steps[i]];
-		flow.steps = steps;
+			});
+		});
 	}
 
-	function syncJsonFromSteps() {
-		if (flow) jsonText = JSON.stringify(flow, null, 2);
-	}
-	function applyJson() {
-		try {
-			const parsed = JSON.parse(jsonText) as Flow;
-			if (schema && parsed.flow_version !== schema.flow_version) {
-				throw new Error(`flow_version must be ${schema.flow_version}`);
-			}
-			if (!Array.isArray(parsed.steps)) throw new Error("missing steps array");
-			flow = parsed;
-			tab = "steps";
-			toast.success("Applied JSON to the step editor");
-		} catch (e) {
-			toast.error(e instanceof Error ? e.message : String(e));
-		}
+	function removeStep(idToRemove: string) {
+		touch((f) => {
+			f.steps = (f.steps ?? []).filter((s) => s.id !== idToRemove);
+		});
 	}
 
-	let saving = $state(false);
+	function moveStep(idToMove: string, dir: -1 | 1) {
+		touch((f) => {
+			const steps = f.steps ?? [];
+			const i = steps.findIndex((s) => s.id === idToMove);
+			const j = i + dir;
+			if (i < 0 || j < 0 || j >= steps.length) return;
+			const [s] = steps.splice(i, 1);
+			steps.splice(j, 0, s);
+		});
+	}
+
+	function setNoMatchEscalate(escalate: boolean) {
+		touch((f) => {
+			f.no_match = { escalate };
+		});
+	}
+
 	async function save() {
-		if (!flow || !lib) return;
-		if (jsonDirty) {
-			toast.error("Apply the Raw JSON changes first, then save");
+		if (!flow || !flowRow) return;
+		const name = flowName.trim();
+		if (name === "") {
+			toast.error("Flow name is required");
 			return;
 		}
 		saving = true;
 		try {
-			const flowJson = JSON.stringify(flow);
-			await api.updateLibrary({ ...lib, flow_json: flowJson });
-			savedJson = JSON.stringify(flow, null, 2);
+			const json = JSON.stringify(flow);
+			await api.updateFlow(id, { name, flow_json: json });
+			// Re-parse what the server stored (it validates and re-evaluates the
+			// using libraries on save) and refresh the store so the sidebar
+			// library counts pick up the new evaluations.
+			flow = JSON.parse(json) as Flow;
+			unsaved = false;
 			await store.refreshCore();
-			toast.success("Flow saved — the library is being re-scanned with the new rules");
+			toast.success("Saved — libraries using this flow are re-evaluating");
 		} catch (e) {
-			toast.error(e instanceof Error ? e.message : String(e));
+			toast.error(e instanceof ApiError ? e.message : e instanceof Error ? e.message : String(e));
 		} finally {
 			saving = false;
 		}
 	}
-
-	function setEscalate(v: boolean) {
-		if (!flow) return;
-		flow.no_match = { escalate: v };
-	}
-	const escalate = $derived(flow?.no_match?.escalate ?? false);
 </script>
 
-{#if loadingError}
-	<Empty.Root class="my-16 flex-col">
-		<Empty.Title>Could not load flow</Empty.Title>
-		<Empty.Content>{loadingError}</Empty.Content>
-	</Empty.Root>
-{:else if !schema || !flow || !lib}
-	<Empty.Root class="my-16 flex-col">
-		<Empty.Title>Loading schema…</Empty.Title>
-	</Empty.Root>
-{:else}
-	<div class="flex items-start justify-between gap-4">
-		<div>
-			<div class="flex items-center gap-3">
-				<h1 class="text-2xl font-semibold tracking-tight">Flow — {lib.name}</h1>
-				<Badge variant="outline">v{schema.flow_version}</Badge>
-				{#if dirty}
-					<Badge variant="destructive">unsaved</Badge>
-				{/if}
-			</div>
-			<p class="text-muted-foreground">
-				Steps are evaluated top to bottom; the first match wins. Files matching no step are marked
-				unmatched{escalate ? " and escalate to warnings" : ""}.
-			</p>
+{#if !loaded}
+	{#if loadError}
+		<div class="py-16 text-center text-sm text-destructive">
+			{loadError}
 		</div>
-		<div class="flex shrink-0 gap-2">
-			<Button variant="outline" onclick={addStep}>
-				<PlusIcon class="size-4" data-icon="inline-start" />
+	{:else}
+		<div class="py-16 text-center text-sm text-muted-foreground">Loading flow…</div>
+	{/if}
+{:else if schema && flow}
+	<button
+		class="mb-2 flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
+		onclick={() => navigate("/flows")}
+	>
+		<ChevronLeftIcon class="size-4" data-icon="inline-start" />
+		Flows
+	</button>
+
+	<div class="flex flex-wrap items-center gap-3">
+		<input
+			class="h-9 w-56 rounded-md border border-input bg-transparent px-3 text-xl font-semibold tracking-tight outline-none focus-visible:ring-1 focus-visible:ring-ring"
+			placeholder="Flow name"
+			bind:value={flowName}
+		/>
+		<Badge variant="secondary" class="font-mono">v{flow.flow_version}</Badge>
+		{#if flowRow && flowRow.library_count > 0}
+			<Badge variant="secondary">{flowRow.library_count} libraries</Badge>
+		{/if}
+		{#if dirty}
+			<Badge variant="outline" class="border-amber-500 text-amber-600 dark:border-amber-400 dark:text-amber-300">
+				unsaved changes
+			</Badge>
+		{/if}
+		<span class="flex-1"></span>
+		<Button onclick={save} disabled={saving || !dirty}>
+			{saving ? "Saving…" : "Save"}
+		</Button>
+	</div>
+	<p class="text-sm text-muted-foreground">
+		Steps are evaluated top to bottom; the first match decides. Saving re-evaluates every library that
+		uses this flow.
+	</p>
+
+	<Card.Root class="mt-4">
+		<Card.Header>
+			<Card.Title>Steps</Card.Title>
+			<Card.Description>Order matters — first matching step wins.</Card.Description>
+		</Card.Header>
+		<Card.Content>
+			{#each flow.steps ?? [] as step, i (step.id)}
+				<StepCard
+					{step}
+					index={i}
+					total={(flow.steps ?? []).length}
+					{schema}
+					devices={schema.devices}
+					onRemove={() => removeStep(step.id)}
+					onMoveUp={() => moveStep(step.id, -1)}
+					onMoveDown={() => moveStep(step.id, 1)}
+				/>
+			{:else}
+				<div class="rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground">
+					No steps yet — this flow matches nothing.
+				</div>
+			{/each}
+
+			<div class="mt-4 flex items-center justify-between gap-4 border-t pt-4">
+				<div class="flex flex-col gap-0.5">
+					<span class="text-sm font-medium">No matching step</span>
+					<span class="text-sm text-muted-foreground">Queue a failed job so the file is visible instead of silently compliant</span>
+				</div>
+				<Button
+					variant={flow.no_match?.escalate ? "default" : "outline"}
+					size="sm"
+					onclick={() => (flow ? setNoMatchEscalate(!(flow.no_match?.escalate)) : undefined)}
+				>
+					{flow.no_match?.escalate ? "Escalating" : "Not escalating"}
+				</Button>
+			</div>
+
+			<Button class="mt-4" variant="outline" onclick={addStep}>
 				Add step
 			</Button>
-			<Button onclick={save} disabled={!dirty || saving || jsonDirty}>
-				{saving ? "Saving…" : "Save flow"}
-			</Button>
-		</div>
-	</div>
-
-	<div class="mt-4 flex items-center gap-3 rounded-lg border p-3">
-		<SyncSwitch enabled={escalate} onSet={setEscalate} />
-		<div>
-			<p class="text-sm font-medium">Warn on no-match</p>
-			<p class="text-xs text-muted-foreground">
-				Escalate files that match no step to warnings instead of silently marking them unmatched.
-			</p>
-		</div>
-	</div>
-
-	<div class="mt-4">
-		<Tabs.Root bind:value={tab}>
-			<Tabs.List>
-				<Tabs.Trigger value="steps">Steps ({flow.steps.length})</Tabs.Trigger>
-				<Tabs.Trigger value="json">Raw JSON</Tabs.Trigger>
-			</Tabs.List>
-			<Tabs.Content value="steps" class="pt-4">
-				{#if flow.steps.length === 0}
-					<Empty.Root class="border-dashed">
-						<Empty.Title>No steps</Empty.Title>
-						<Empty.Content>
-							With no steps, every file is evaluated as unmatched. Add a step to start transcoding.
-						</Empty.Content>
-						<div class="mt-2">
-							<Button onclick={addStep}>
-								<PlusIcon class="size-4" data-icon="inline-start" />
-								Add the first step
-							</Button>
-						</div>
-					</Empty.Root>
-				{:else}
-					<div class="flex flex-col gap-3">
-						{#each flow.steps as step, i (step.id)}
-							<StepCard
-								{step}
-								index={i}
-								total={flow.steps.length}
-								{schema}
-								devices={store.devices}
-								onRemove={() => removeStep(i)}
-								onMoveUp={() => moveStep(i, -1)}
-								onMoveDown={() => moveStep(i, 1)}
-							/>
-						{/each}
-						<Button variant="outline" onclick={addStep}>
-							<PlusIcon class="size-4" data-icon="inline-start" />
-							Add step
-						</Button>
-					</div>
-				{/if}
-			</Tabs.Content>
-			<Tabs.Content value="json" class="pt-4">
-				<div class="flex flex-col gap-2">
-					<Label for="flow-json">Flow JSON (validated against v{schema.flow_version})</Label>
-					<Textarea id="flow-json" bind:value={jsonText} class="min-h-96 font-mono text-xs" spellcheck={false} />
-					<div class="flex gap-2">
-						<Button
-							variant="ghost"
-							onclick={() => {
-								syncJsonFromSteps();
-								toast.success("JSON refreshed from the step editor");
-							}}
-						>
-							Refresh from steps
-						</Button>
-						<Button variant="outline" onclick={applyJson} disabled={saving || !jsonDirty}>
-							{saving ? "Applying…" : "Apply"}
-						</Button>
-					</div>
-				</div>
-			</Tabs.Content>
-		</Tabs.Root>
-	</div>
+		</Card.Content>
+	</Card.Root>
+{:else}
+	<div class="py-16 text-center text-sm text-muted-foreground">Flow schema unavailable.</div>
 {/if}
