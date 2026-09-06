@@ -87,6 +87,7 @@ fn init_schema(conn: &Connection) -> Result<()> {
             ended            INTEGER,
             exit_kind        TEXT,
             log_path         TEXT,
+            log_zstd         BLOB,
             quarantine_path  TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_jobs_state ON jobs(state);
@@ -108,6 +109,7 @@ fn init_schema(conn: &Connection) -> Result<()> {
     )
     .context("init schema")?;
     migrate_flows(conn)?;
+    migrate_job_logs(conn)?;
     Ok(())
 }
 
@@ -793,6 +795,26 @@ pub fn finish_job(
     Ok(())
 }
 
+/// One-shot migration for databases created before job logs were
+/// archived (DESIGN §10): adds `jobs.log_zstd`. No backfill —
+/// pre-archive rows serve their on-disk log file instead.
+fn migrate_job_logs(conn: &Connection) -> Result<()> {
+    let has_column: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('jobs') WHERE name = 'log_zstd'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .map(|n| n > 0)
+        .context("inspect jobs schema")?;
+    if has_column {
+        return Ok(());
+    }
+    conn.execute("ALTER TABLE jobs ADD COLUMN log_zstd BLOB", [])
+        .context("add jobs.log_zstd")?;
+    Ok(())
+}
+
 pub fn set_job_log_path(conn: &Connection, id: i64, path: &str) -> Result<()> {
     conn.execute(
         "UPDATE jobs SET log_path = ?2 WHERE id = ?1",
@@ -800,6 +822,33 @@ pub fn set_job_log_path(conn: &Connection, id: i64, path: &str) -> Result<()> {
     )
     .context("set job log path")?;
     Ok(())
+}
+
+/// Store a job's zstd-compressed log (the canonical copy for the
+/// UI; the on-disk file remains the ops mirror).
+pub fn set_job_log_zstd(conn: &Connection, id: i64, bytes: &[u8]) -> Result<()> {
+    conn.execute(
+        "UPDATE jobs SET log_zstd = ?2 WHERE id = ?1",
+        params![id, bytes],
+    )
+    .context("set job log zstd")?;
+    Ok(())
+}
+
+/// A job's archived (zstd) log, if any.
+pub fn get_job_log_zstd(conn: &Connection, id: i64) -> Result<Option<Vec<u8>>> {
+    let v: Option<Vec<u8>> = conn
+        .query_row(
+            "SELECT log_zstd FROM jobs WHERE id = ?1",
+            params![id],
+            |r| match r.get_ref(0)? {
+                rusqlite::types::ValueRef::Null => Err(rusqlite::Error::QueryReturnedNoRows),
+                other => Ok(other.as_bytes()?.to_vec()),
+            },
+        )
+        .optional()
+        .context("get job log zstd")?;
+    Ok(v)
 }
 
 pub fn list_jobs(conn: &Connection, limit: i64) -> Result<Vec<JobRow>> {
@@ -1012,7 +1061,10 @@ mod tests {
         let qid = insert_job(&conn, &job).unwrap();
         job.state = "running".into();
         let rid = insert_job(&conn, &job).unwrap();
-        assert_eq!(cancel_queued_jobs(&conn, fid, "superseded").unwrap(), vec![qid]);
+        assert_eq!(
+            cancel_queued_jobs(&conn, fid, "superseded").unwrap(),
+            vec![qid]
+        );
         assert_eq!(
             get_job(&conn, qid).unwrap().unwrap().exit_kind.as_deref(),
             Some("superseded")
@@ -1147,5 +1199,96 @@ mod tests {
         let json = flow_json_for_library(&conn, &got).unwrap();
         assert_eq!(json, r#"{"flow_version":1,"steps":[]}"#);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn job_log_zstd_round_trip_and_column_migration() {
+        // Fresh databases already carry the column.
+        let (dir, conn) = temp_db("joblog");
+        let has: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('jobs') WHERE name = 'log_zstd'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+            > 0;
+        assert!(has);
+
+        // Round trip: compress a realistic log, store it, read it
+        // back, decompress, compare.
+        let lib = insert_library(&conn, &lib_row()).unwrap();
+        let fid = upsert_file(&conn, &file_row(lib, "/l/a.mkv")).unwrap();
+        let job = JobRow {
+            id: 0,
+            file_id: fid,
+            library_id: lib,
+            flow_version: 1,
+            plan_json: "{}".into(),
+            state: "queued".into(),
+            device_id: None,
+            claimed_by: None,
+            lease_expires: None,
+            started: None,
+            ended: None,
+            exit_kind: None,
+            log_path: None,
+            quarantine_path: None,
+        };
+        let jid = insert_job(&conn, &job).unwrap();
+        assert!(get_job_log_zstd(&conn, jid).unwrap().is_none());
+        let raw: String = (0..500)
+            .map(|i| format!("frame={i} pts={i}.000\n"))
+            .collect();
+        let compressed = zstd::encode_all(std::io::Cursor::new(raw.as_bytes()), 3).unwrap();
+        set_job_log_zstd(&conn, jid, &compressed).unwrap();
+        let got = get_job_log_zstd(&conn, jid).unwrap().unwrap();
+        assert!(got.len() < raw.len()); // it actually compressed
+        let decoded = zstd::decode_all(std::io::Cursor::new(&*got)).unwrap();
+        assert_eq!(String::from_utf8(decoded).unwrap(), raw);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Pre-archive databases: a jobs table without the column is
+        // migrated on open.
+        let dir2 = std::env::temp_dir().join(format!(
+            "transcodarr-db-test-oldjoblog-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir2);
+        std::fs::create_dir_all(&dir2).unwrap();
+        {
+            let c = Connection::open(dir2.join(DB_FILE)).unwrap();
+            c.execute_batch(
+                "CREATE TABLE jobs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    file_id INTEGER NOT NULL,
+                    library_id INTEGER NOT NULL,
+                    flow_version INTEGER NOT NULL,
+                    plan_json TEXT NOT NULL,
+                    state TEXT NOT NULL DEFAULT 'queued',
+                    device_id TEXT,
+                    claimed_by TEXT,
+                    lease_expires INTEGER,
+                    started INTEGER,
+                    ended INTEGER,
+                    exit_kind TEXT,
+                    log_path TEXT,
+                    quarantine_path TEXT
+                );",
+            )
+            .unwrap();
+        }
+        let c2 = open(&dir2).unwrap(); // triggers migrate_job_logs
+        let has2: bool = c2
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('jobs') WHERE name = 'log_zstd'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+            > 0;
+        assert!(has2);
+        drop(c2);
+        let _ = std::fs::remove_dir_all(&dir2);
     }
 }

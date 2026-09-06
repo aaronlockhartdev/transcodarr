@@ -7,7 +7,7 @@
 //! queued jobs and dispatches them to a blocking thread.
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -193,15 +193,7 @@ pub fn scan_library(
             }
             // Flow changed: re-evaluate every unchanged file with cached facts.
             if let Some(mut e) = existing {
-                if reevaluate_cached(
-                    db,
-                    &mut e,
-                    library_id,
-                    registry,
-                    &flow,
-                    &path,
-                    events,
-                )? {
+                if reevaluate_cached(db, &mut e, library_id, registry, &flow, &path, events)? {
                     queued += 1;
                 }
             }
@@ -567,27 +559,42 @@ fn lease_heartbeat(db: &Db, job_id: i64, stop: &Arc<(Condvar, Mutex<bool>)>) {
 ///
 /// `events` receives a `JobChanged` nudge when the job reaches its
 /// terminal state (live clients then refetch the row).
-pub fn run_job(
-    db: &Db,
-    job: &db::JobRow,
-    device: &Device,
-    ffmpeg: &str,
-    probe: &FfprobeFactExtractor,
-    data_dir: &Path,
-    registry: &Registry,
-    events: &EventBus,
-) -> Result<()> {
+/// `state` carries everything a run needs (DB handle, ffmpeg/ffprobe
+/// paths, data dir, registry, event bus).
+pub fn run_job(state: &AppState, job: &db::JobRow, device: &Device) -> Result<()> {
+    let db = &state.db;
+    let ffmpeg = &state.ffmpeg;
+    let probe = &state.probe;
+    let data_dir = &state.data_dir;
+    let registry = &state.registry;
+    let events = &state.events;
     // Every error path below calls `finish`: a job that leaves this
     // function without a terminal row would sit in "running" until
     // the lease expires and be re-run for no reason.
     let file = match db.with(|c| db::get_file(c, job.file_id)) {
         Ok(Some(f)) => f,
         Ok(None) => {
-            let _ = finish(db, job, "failed", Some("file_missing"), None, data_dir, events);
+            let _ = finish(
+                db,
+                job,
+                "failed",
+                Some("file_missing"),
+                None,
+                data_dir,
+                events,
+            );
             anyhow::bail!("file {} not found", job.file_id)
         }
         Err(e) => {
-            let _ = finish(db, job, "failed", Some("file_missing"), None, data_dir, events);
+            let _ = finish(
+                db,
+                job,
+                "failed",
+                Some("file_missing"),
+                None,
+                data_dir,
+                events,
+            );
             return Err(e);
         }
     };
@@ -605,7 +612,15 @@ pub fn run_job(
     let plan: FfmpegPlan = match serde_json::from_str(&job.plan_json) {
         Ok(p) => p,
         Err(e) => {
-            let _ = finish(db, job, "failed", Some("plan_invalid"), None, data_dir, events);
+            let _ = finish(
+                db,
+                job,
+                "failed",
+                Some("plan_invalid"),
+                None,
+                data_dir,
+                events,
+            );
             let _ = db.with(|c| db::set_file_status(c, job.file_id, "failed"));
             return Err(e).with_context(|| format!("job {} plan", job.id));
         }
@@ -640,7 +655,15 @@ pub fn run_job(
     // before the swap (tracked files are fully covered; the
     // residual race is noted there).
     if target_occupied(&final_path, &src) {
-        let _ = finish(db, job, "failed", Some("swap_failed"), None, data_dir, events);
+        let _ = finish(
+            db,
+            job,
+            "failed",
+            Some("swap_failed"),
+            None,
+            data_dir,
+            events,
+        );
         let _ = db.with(|c| db::set_file_status(c, job.file_id, "failed"));
         anyhow::bail!(
             "target {} is occupied by a different file; not overwriting",
@@ -676,7 +699,15 @@ pub fn run_job(
     // stuck in `running`.
     let logs = data_dir.join("logs");
     if let Err(e) = std::fs::create_dir_all(&logs) {
-        let _ = finish(db, job, "failed", Some("encode_failed"), None, data_dir, events);
+        let _ = finish(
+            db,
+            job,
+            "failed",
+            Some("encode_failed"),
+            None,
+            data_dir,
+            events,
+        );
         let _ = db.with(|c| db::set_file_status(c, job.file_id, "failed"));
         return Err(e).context("create log dir");
     }
@@ -685,14 +716,22 @@ pub fn run_job(
         let rel = rel.display().to_string();
         let _ = db.with(|c| db::set_job_log_path(c, job.id, &rel));
     }
-    let log_file = match File::create(&log_path) {
-        Ok(f) => f,
-        Err(e) => {
-            let _ = finish(db, job, "failed", Some("encode_failed"), None, data_dir, events);
-            let _ = db.with(|c| db::set_file_status(c, job.file_id, "failed"));
-            return Err(e).with_context(|| format!("log {}", log_path.display()));
-        }
-    };
+    // Create the log file up front; the capture's batcher opens it
+    // in append mode (a failed create is an encode failure — the
+    // job must never sit in `running` without a log).
+    if let Err(e) = File::create(&log_path) {
+        let _ = finish(
+            db,
+            job,
+            "failed",
+            Some("encode_failed"),
+            None,
+            data_dir,
+            events,
+        );
+        let _ = db.with(|c| db::set_file_status(c, job.file_id, "failed"));
+        return Err(e).with_context(|| format!("log {}", log_path.display()));
+    }
 
     let argv = transcodarr_core::plan::to_argv(&plan, device, &src, &dst);
     tracing::info!("job {} on {}: {}", job.id, device.name, argv.join(" "));
@@ -700,15 +739,30 @@ pub fn run_job(
     let mut cmd = std::process::Command::new(ffmpeg);
     cmd.args(&argv)
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::from(log_file));
+        .stderr(std::process::Stdio::piped());
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            let _ = finish(db, job, "failed", Some("encode_failed"), None, data_dir, events);
+            let _ = finish(
+                db,
+                job,
+                "failed",
+                Some("encode_failed"),
+                None,
+                data_dir,
+                events,
+            );
             let _ = db.with(|c| db::set_file_status(c, job.file_id, "failed"));
             anyhow::bail!("spawn ffmpeg {ffmpeg}: {e}");
         }
     };
+    // Live log capture (DESIGN §9.4): the stderr pipe is read
+    // line-by-line; the batcher mirrors it into the on-disk log, a
+    // capped in-memory tail, and `JobLog` events. `commit` (job end,
+    // and `Drop` — no early-exit path loses the log) archives the
+    // tail zstd-compressed into the job row.
+    let stderr = child.stderr.take().expect("stderr is piped");
+    let mut capture = LogCapture::start(&log_path, job.id, db, events, stderr);
 
     // Keep this job's lease alive while the encode runs (a live
     // multi-hour encode must not be reclaimed as stale).
@@ -724,6 +778,7 @@ pub fn run_job(
             *stop.1.lock().unwrap() = true;
             stop.0.notify_all();
             let _ = heartbeat.join();
+            capture.commit();
             let _ = finish(
                 db,
                 job,
@@ -741,6 +796,9 @@ pub fn run_job(
     *stop.1.lock().unwrap() = true;
     stop.0.notify_all();
     let _ = heartbeat.join();
+    // The child is gone, so the pipe is at EOF: the capture
+    // threads drain and the log is archived (idempotent).
+    capture.commit();
 
     if !status.success() {
         let tail = log_tail(&log_path, 20);
@@ -823,7 +881,15 @@ pub fn run_job(
         // Residual race: an UNTRACKED external file that appears in
         // the final check-to-rename gap can still be clobbered by the
         // rename; closing that fully needs a link-based protocol.
-        let _ = finish(db, job, "failed", Some("swap_failed"), Some(&dst), data_dir, events);
+        let _ = finish(
+            db,
+            job,
+            "failed",
+            Some("swap_failed"),
+            Some(&dst),
+            data_dir,
+            events,
+        );
         let _ = db.with(|c| db::set_file_status(c, job.file_id, "failed"));
         anyhow::bail!(
             "target {} is occupied by a different file; not overwriting",
@@ -839,7 +905,15 @@ pub fn run_job(
         Ok(()) => {}
         Err(e) => {
             // The original is still in place; only the temp is lost.
-            let _ = finish(db, job, "failed", Some("swap_failed"), Some(&dst), data_dir, events);
+            let _ = finish(
+                db,
+                job,
+                "failed",
+                Some("swap_failed"),
+                Some(&dst),
+                data_dir,
+                events,
+            );
             let _ = db.with(|c| db::set_file_status(c, job.file_id, "failed"));
             anyhow::bail!("quarantine original {}: {e}", src.display());
         }
@@ -860,7 +934,15 @@ pub fn run_job(
                 original_backup.display()
             );
         }
-        let _ = finish(db, job, "failed", Some("swap_failed"), Some(&dst), data_dir, events);
+        let _ = finish(
+            db,
+            job,
+            "failed",
+            Some("swap_failed"),
+            Some(&dst),
+            data_dir,
+            events,
+        );
         anyhow::bail!("swap failed: {e}");
     }
 
@@ -952,7 +1034,15 @@ pub fn run_job(
             let _ = db.with(|c| db::set_file_status(c, job.file_id, "completed"));
         }
         Ok(Evaluation::Plan(_)) => {
-            let _ = finish(db, job, "failed", Some("non_idempotent"), None, data_dir, events);
+            let _ = finish(
+                db,
+                job,
+                "failed",
+                Some("non_idempotent"),
+                None,
+                data_dir,
+                events,
+            );
             let _ = db.with(|c| db::set_file_status(c, job.file_id, "failed"));
             anyhow::bail!("flow not idempotent for {}", final_path.display());
         }
@@ -1107,25 +1197,216 @@ pub async fn run_loop(state: AppState, mut shutdown: watch::Receiver<bool>) -> R
             continue;
         }
         // The row just moved queued → running; tell live clients.
-        state.events.emit(ServerEvent::JobChanged { job_id: job.id });
+        state
+            .events
+            .emit(ServerEvent::JobChanged { job_id: job.id });
 
         // Count it in flight; the spawned task decrements when done.
         state.in_flight.fetch_add(1, Ordering::Relaxed);
         let in_flight = state.in_flight.clone();
-        let db2 = state.db.clone();
-        let ffmpeg2 = state.ffmpeg.clone();
-        let probe2 = state.probe.clone();
-        let data2 = state.data_dir.clone();
-        let registry2 = state.registry.clone();
-        let events2 = state.events.clone();
+        let state2 = state.clone();
         tokio::task::spawn_blocking(move || {
-            let r = run_job(&db2, &job, &device, &ffmpeg2, &probe2, &data2, &registry2, &events2);
+            let r = run_job(&state2, &job, &device);
             in_flight.fetch_sub(1, Ordering::Relaxed);
             r.map_err(|e| {
                 tracing::error!("job {} failed: {e:?}", job.id);
                 e
             })
         });
+    }
+}
+
+/// Live capture of one job's ffmpeg stderr (DESIGN §9.4).
+///
+/// The pipe is read line-by-line on a dedicated thread; a second
+/// thread batches the lines (~200 ms) into (a) the on-disk log file
+/// (the ops mirror — `tail -f` keeps working), (b) a capped
+/// in-memory tail of the full log, and (c) `JobLog` events for live
+/// viewers. `commit` (idempotent; also called from `Drop`, so no
+/// early-exit path loses the log) zstd-compresses the tail into the
+/// job row — the canonical copy the UI serves.
+struct LogCapture {
+    job_id: i64,
+    db: Db,
+    buffer: Arc<Mutex<String>>,
+    reader: Option<std::thread::JoinHandle<()>>,
+    batcher: Option<std::thread::JoinHandle<()>>,
+    committed: bool,
+}
+
+impl LogCapture {
+    /// Keep at most this much raw log in memory (a typical encode
+    /// log is far smaller; a 1 MB tail compresses to well under
+    /// 100 KB with zstd).
+    const BUFFER_CAP: usize = 1024 * 1024;
+    /// Max text per `JobLog` event (split at line boundaries).
+    const EVENT_CHUNK: usize = 64 * 1024;
+    /// Batch cadence for file writes and events.
+    const BATCH_MS: u64 = 200;
+
+    fn start(
+        log_file: &Path,
+        job_id: i64,
+        db: &Db,
+        events: &Arc<EventBus>,
+        stderr: std::process::ChildStderr,
+    ) -> Self {
+        let buffer: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+        let (line_tx, line_rx) = std::sync::mpsc::channel::<String>();
+        let reader = std::thread::spawn(move || {
+            let mut br = BufReader::new(stderr);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match br.read_line(&mut line) {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        if line_tx.send(line.clone()).is_err() {
+                            break; // batcher gone
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        let buffer2 = buffer.clone();
+        let events2 = events.clone();
+        let log_file_owned = log_file.to_path_buf();
+        let batcher = std::thread::spawn(move || {
+            // Append mode: the file was just created by run_job.
+            let mut file = match File::options()
+                .create(true)
+                .append(true)
+                .open(&log_file_owned)
+            {
+                Ok(f) => f,
+                Err(e) => {
+                    tracing::warn!("job log {} unreadable: {e}", log_file_owned.display());
+                    return;
+                }
+            };
+            let mut pending = String::new();
+            'outer: loop {
+                // Wait up to one batch window for the first line,
+                // then drain whatever else has already arrived (a
+                // bounded drain so a burst can't stall an event).
+                match line_rx.recv_timeout(std::time::Duration::from_millis(Self::BATCH_MS)) {
+                    Ok(l) => pending.push_str(&l),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+                for _ in 0..64 {
+                    match line_rx.try_recv() {
+                        Ok(l) => pending.push_str(&l),
+                        Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => break 'outer,
+                    }
+                }
+                Self::flush(&mut file, &mut pending, &buffer2, job_id, &events2);
+            }
+            // The reader is done: drain and flush the remainder.
+            while let Ok(l) = line_rx.try_recv() {
+                pending.push_str(&l);
+            }
+            Self::flush(&mut file, &mut pending, &buffer2, job_id, &events2);
+        });
+        Self {
+            job_id,
+            db: db.clone(),
+            buffer,
+            reader: Some(reader),
+            batcher: Some(batcher),
+            committed: false,
+        }
+    }
+
+    fn flush(
+        file: &mut File,
+        pending: &mut String,
+        buffer: &Arc<Mutex<String>>,
+        job_id: i64,
+        events: &EventBus,
+    ) {
+        if pending.is_empty() {
+            return;
+        }
+        // Ops mirror (best effort: a log write must never fail a
+        // job).
+        let _ = file.write_all(pending.as_bytes());
+        let _ = file.flush();
+        // Capped in-memory tail.
+        {
+            let mut b = buffer.lock().unwrap();
+            b.push_str(pending);
+            if b.len() > Self::BUFFER_CAP {
+                let excess = b.len() - Self::BUFFER_CAP;
+                b.drain(..excess);
+            }
+        }
+        // Live viewers (split at line boundaries, ≤ EVENT_CHUNK
+        // each).
+        let chunk = std::mem::take(pending);
+        let mut piece = String::new();
+        for line in chunk.split_inclusive('\n') {
+            if piece.len() + line.len() > Self::EVENT_CHUNK && !piece.is_empty() {
+                events.emit(ServerEvent::JobLog {
+                    job_id,
+                    chunk: std::mem::take(&mut piece),
+                });
+            }
+            piece.push_str(line);
+        }
+        if !piece.is_empty() {
+            events.emit(ServerEvent::JobLog {
+                job_id,
+                chunk: piece,
+            });
+        }
+    }
+
+    /// Stop the capture threads and archive the log (zstd level 3
+    /// into the job row). Idempotent; called at job end and from
+    /// `Drop`.
+    fn commit(&mut self) {
+        if self.committed {
+            return;
+        }
+        self.committed = true;
+        // The child has been waited on before this runs, so the pipe
+        // is at EOF: the reader exits, and the batcher drains and
+        // exits within one batch window.
+        if let Some(h) = self.reader.take() {
+            let _ = h.join();
+        }
+        if let Some(h) = self.batcher.take() {
+            let _ = h.join();
+        }
+        let raw = self.buffer.lock().unwrap().clone();
+        if raw.is_empty() {
+            return;
+        }
+        let compressed = match zstd::encode_all(std::io::Cursor::new(raw.as_bytes()), 3) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("job {} log: zstd failed: {e}", self.job_id);
+                return;
+            }
+        };
+        if let Err(e) = self
+            .db
+            .with(|c| db::set_job_log_zstd(c, self.job_id, &compressed))
+        {
+            tracing::warn!(
+                "job {} log: storing the archived log failed: {e}",
+                self.job_id
+            );
+        }
+    }
+}
+
+impl Drop for LogCapture {
+    fn drop(&mut self) {
+        self.commit();
     }
 }
 

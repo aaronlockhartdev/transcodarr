@@ -9,8 +9,7 @@
 use std::sync::{Arc, atomic::AtomicUsize};
 /// The SSE `Last-Event-ID` request header (this axum/http version
 /// has no constant for it).
-const LAST_EVENT_ID: axum::http::HeaderName =
-    axum::http::HeaderName::from_static("last-event-id");
+const LAST_EVENT_ID: axum::http::HeaderName = axum::http::HeaderName::from_static("last-event-id");
 
 use axum::extract::{OriginalUri, Path as PathParam, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
@@ -28,7 +27,7 @@ use transcodarr_core::registry::Registry;
 
 use crate::db;
 use crate::dbhandle::Db;
-use crate::events::{self, EventBus, SseStream, ServerEvent};
+use crate::events::{self, EventBus, ServerEvent, SseStream};
 use crate::probe::FfprobeFactExtractor;
 
 /// Shared server state.
@@ -169,7 +168,9 @@ async fn spawn_reeval(s: &AppState, library_id: i64) {
     let ffprobe2 = s.ffprobe.clone();
     let events2 = s.events.clone();
     let _ = tokio::task::spawn_blocking(move || {
-        crate::jobs::scan_library(&db2, library_id, &registry, &probe, &ffprobe2, true, &events2)
+        crate::jobs::scan_library(
+            &db2, library_id, &registry, &probe, &ffprobe2, true, &events2,
+        )
     })
     .await;
 }
@@ -214,7 +215,8 @@ async fn create_library(
         watchable: body.watchable.unwrap_or(false),
     };
     let id = s.db.with(|c| db::insert_library(c, &row))?;
-    s.events.emit(ServerEvent::LibraryChanged { library_id: id });
+    s.events
+        .emit(ServerEvent::LibraryChanged { library_id: id });
     Ok((StatusCode::CREATED, Json(json!({ "id": id }))))
 }
 
@@ -251,7 +253,8 @@ async fn update_library(
     // Any library change re-evaluates everything (a flow swap is the
     // common reason, and the check is cheap).
     s.db.with(|c| db::update_library(c, &row))?;
-    s.events.emit(ServerEvent::LibraryChanged { library_id: id });
+    s.events
+        .emit(ServerEvent::LibraryChanged { library_id: id });
     spawn_reeval(&s, id).await;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -261,7 +264,8 @@ async fn delete_library(
     PathParam(id): PathParam<i64>,
 ) -> Result<StatusCode, ApiError> {
     s.db.with(|c| db::delete_library(c, id))?;
-    s.events.emit(ServerEvent::LibraryChanged { library_id: id });
+    s.events
+        .emit(ServerEvent::LibraryChanged { library_id: id });
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -404,16 +408,21 @@ async fn job_log(
     let Some(job) = job else {
         return Err(ApiError(StatusCode::NOT_FOUND, "job not found".into()));
     };
-    let Some(p) = &job.log_path else {
-        return Ok((
-            StatusCode::NOT_FOUND,
-            HeaderMap::new(),
-            "no log for this job yet".into(),
-        ));
+    // The archived (zstd) log is the canonical copy; pre-archive
+    // rows fall back to the on-disk file (DESIGN §9.4).
+    let text = match s.db.with(|c| db::get_job_log_zstd(c, id))? {
+        Some(blob) => Some(
+            zstd::decode_all(std::io::Cursor::new(&*blob))
+                .map(|t| String::from_utf8_lossy(&t).into_owned())
+                .unwrap_or_default(),
+        ),
+        None => match &job.log_path {
+            Some(p) => std::fs::read_to_string(s.data_dir.join(p)).ok(),
+            None => None,
+        },
     };
-    let path = s.data_dir.join(p);
-    match std::fs::read_to_string(&path) {
-        Ok(text) => {
+    match text {
+        Some(text) => {
             let tail = text
                 .lines()
                 .rev()
@@ -430,10 +439,10 @@ async fn job_log(
             );
             Ok((StatusCode::OK, h, tail))
         }
-        Err(_) => Ok((
+        None => Ok((
             StatusCode::NOT_FOUND,
             HeaderMap::new(),
-            "log file missing".into(),
+            "no log for this job yet".into(),
         )),
     }
 }

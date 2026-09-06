@@ -82,7 +82,10 @@ async fn run(cli: Cli, data_dir: std::path::PathBuf) -> Result<()> {
     //     (crashed encodes only ever leave a sibling temp file).
     let reclaimed = dbh.with(|c| db::reclaim_jobs(c, false))?;
     if !reclaimed.is_empty() {
-        info!("reclaimed {} job(s) orphaned by a previous run", reclaimed.len());
+        info!(
+            "reclaimed {} job(s) orphaned by a previous run",
+            reclaimed.len()
+        );
     }
 
     // 2. Registry: pure v1 entries + I/O-bound entries.

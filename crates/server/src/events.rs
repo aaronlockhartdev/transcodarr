@@ -18,8 +18,8 @@
 use std::collections::VecDeque;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -263,9 +263,7 @@ impl Stream for SseStream {
         // allocation per idle poll — negligible at this volume).
         let mut fut = Box::pin(this.rx.recv());
         match fut.as_mut().poll(cx) {
-            Poll::Ready(Some(PumpMsg::Event(tagged))) => {
-                Poll::Ready(Some(Ok(frame(tagged))))
-            }
+            Poll::Ready(Some(PumpMsg::Event(tagged))) => Poll::Ready(Some(Ok(frame(tagged)))),
             Poll::Ready(Some(PumpMsg::Lagged)) => {
                 Poll::Ready(Some(Ok(Event::default().event(RESYNC))))
             }
@@ -278,9 +276,7 @@ impl Stream for SseStream {
 }
 
 /// The SSE keep-alive wrapper around a bus stream.
-pub type SseResponse = axum::response::Sse<
-    axum::response::sse::KeepAliveStream<SseStream>,
->;
+pub type SseResponse = axum::response::Sse<axum::response::sse::KeepAliveStream<SseStream>>;
 
 fn frame(tagged: Tagged) -> Event {
     let data = serde_json::to_string(&tagged.event).unwrap_or_else(|_| "{}".into());
@@ -342,12 +338,11 @@ mod tests {
 
     #[test]
     fn event_wire_shape_is_tagged_and_snake_cased() {
-        let v: serde_json::Value =
-            serde_json::to_value(ServerEvent::FileChanged {
-                file_id: 7,
-                library_id: 3,
-            })
-            .unwrap();
+        let v: serde_json::Value = serde_json::to_value(ServerEvent::FileChanged {
+            file_id: 7,
+            library_id: 3,
+        })
+        .unwrap();
         assert_eq!(v["type"], "file_changed");
         assert_eq!(v["file_id"], 7);
         assert_eq!(v["library_id"], 3);
@@ -369,8 +364,8 @@ mod tests {
             ServerEvent::FlowChanged { flow_id: 1 },
             ServerEvent::Tick,
         ] {
-            let tag = serde_json::to_value(&e).unwrap()["type"];
-            assert_eq!(tag, e.type_name());
+            let v = serde_json::to_value(&e).unwrap();
+            assert_eq!(v["type"].as_str().unwrap(), e.type_name());
         }
     }
 }
