@@ -59,6 +59,14 @@ pub trait OperationSection: Send + Sync {
     /// for this file (that is what makes it compliant).
     fn plan(&self, params: &Value, facts: &FileFacts) -> Result<SectionPlan>;
 
+    /// Validate this section's raw parameter JSON without file facts
+    /// (DESIGN §5, §6.5).
+    ///
+    /// Runs the typed deserializer, so bad values (an oversized filter
+    /// graph, a typo, a malformed rule) are rejected when a flow is
+    /// saved — not marked `failed` for every matching file at scan time.
+    fn validate(&self, params: &Value) -> Result<()>;
+
     /// UI schema for this section's parameters (DESIGN §5).
     fn ui_schema(&self) -> Value;
 }

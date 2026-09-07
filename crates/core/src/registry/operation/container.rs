@@ -119,6 +119,10 @@ impl OperationSection for Container {
         Ok(SectionPlan::Identity)
     }
 
+    fn validate(&self, params: &Value) -> crate::error::Result<()> {
+        parse::<ContainerOp>(self.key(), params).map(|_| ())
+    }
+
     fn ui_schema(&self) -> Value {
         json!({
             "kind": "single_select",

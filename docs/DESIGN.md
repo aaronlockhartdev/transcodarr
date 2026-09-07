@@ -168,7 +168,7 @@ ffmpeg -hwaccel cuda -i "In.Movie.2024.2160p.HEVC.mkv" \
 - Optional **per-track rules** matched by codec and/or language (e.g. "all DTS/TrueHD → EAC3 5.1").
 - **Atmos (EAC3-JOC) is copied unless an explicit rule re-encodes it** — never auto-downmixed.
 - Re-encoding, when invoked, applies to **all** matching tracks (deterministic target state, not "primary only").
-- **Filter graph**: optional ffmpeg `-af` expression (e.g. `loudnorm=…`) applied per retained track; empty = none — §6.5.
+- **Filter graph**: optional ffmpeg `-af` expression (e.g. `loudnorm=…`) applied to **re-encoded** tracks only (a copied bitstream cannot be filtered; with no re-encode it is inert); empty = none — §6.5.
 
 ### 6.3 Subtitle section (absent ⇒ keep all, copy)
 
@@ -180,9 +180,9 @@ ffmpeg -hwaccel cuda -i "In.Movie.2024.2160p.HEVC.mkv" \
 
 ### 6.5 Filter graphs (user expressions; one-shot semantics)
 
-A filter graph is an ffmpeg `-vf`/`-af` expression the user types into the video or audio section — e.g. `crop=1920:800:0:0`, `denoise`, `loudnorm=I=-16:TP=-1.5`, `volume=2`. Empty means no filter. The planner places the expression at a fixed position (video filters before the generated scale/HDR chain, so user intent comes first; audio filters after the codec decision) and **validates it twice**: at flow-save (parse check) and at job start (executed against the installed ffmpeg — a failing job with a clear message beats a silent no-op).
+A filter graph is an ffmpeg `-vf`/`-af` expression the user types into the video or audio section — e.g. `crop=1920:800:0:0`, `denoise`, `loudnorm=I=-16:TP=-1.5`, `volume=2`. Empty means no filter. The planner places the expression at a fixed position (the video graph is the **last** element of the generated chain, after the downscale/HDR stages; the audio graph applies per re-encoded track) and **validates it twice**: at flow-save (section-parameter parse check, via the registry) and at job start (executed against the installed ffmpeg — a failing job with a clear message beats a silent no-op).
 
-Filter graphs are **one-shot transformations**: the output's new facts do not record that a filter was applied (a cropped H.264 is still H.264). So the post-job idempotency gate (§3.3) re-evaluates the flow *with the filter graphs cleared*, and each file records which graphs it has already had applied (`files.applied_filters`). A rescan re-queues a filter plan only when the flow's graphs differ from the recorded ones, and a changed sample hash (new bytes) clears the ledger.
+Filter graphs are **one-shot transformations**: the output's new facts do not record that a filter was applied (a cropped H.264 is still H.264). So the post-job idempotency gate (§3.3) re-evaluates the flow *with the filter graphs cleared*, and each file records which graphs it has already had applied (`files.applied_filters`). A rescan re-queues a filter plan only when the flow's graphs differ from the recorded ones, and a changed sample hash (new bytes) clears the ledger; the ledger is written immediately after the file swap (before the gate) so a crash in between cannot cause a double application. The ledger's identity check is only as strong as the sample hash (FNV-1a over a 16KB head+tail sample). A graph must not undo the flow's other constraints for that step (e.g. a `scale` beyond the downscale target): the cleared flow stays non-identity, the job fails `non_idempotent`, and every scan re-queues the file.
 
 ---
 
@@ -256,7 +256,7 @@ Devices & per-device caps · system ceiling · default scan schedule · retentio
 |---|---|
 | `flows` | id, name (unique), flow_json (versioned), created_at, updated_at — **first-class and library-independent; any number of libraries can use one** |
 | `libraries` | id, name, path, lifecycle_mode, flow_id (→ flows, nullable — NULL = no flow), auto_queue, retention_days, auto_delete, scan_schedule, watchable |
-| `files` | id, library_id, path, dev, inode, size, mtime, sample_hash, facts_json, status (`compliant / needs_work / unmatched / queued / running / failed / quarantined`), last_probed, last_evaluated, input_size, output_size, **applied_filters** (JSON list of filter graphs already applied to this file's current bytes — §6.5) |
+| `files` | id, library_id, path, dev, inode, size, mtime, sample_hash, facts_json, status (`compliant / needs_work / unmatched / queued / running / failed / quarantined`), last_probed, last_evaluated, input_size, output_size, **applied_filters** (JSON `{hash, graphs}` — the sample hash at the time the graphs were applied, plus the graphs themselves — §6.5) |
 | `jobs` | id, file_id, library_id, flow_version, plan_json, state, device_id, claimed_by, lease_expires, started, ended, exit_kind, log_path (the on-disk ffmpeg stderr file, retained for `tail -f`), **log_zstd** (the canonical copy — zstd-compressed on job end, served decompressed by the log endpoint; pre-migration rows fall back to the file), quarantine_path — **retained: this table *is* the per-file job history** |
 | `devices` | id, kind (`cpu / gpu`), name, encoders_json, max_concurrent |
 | `settings` | key, value |

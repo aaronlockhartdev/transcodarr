@@ -131,8 +131,14 @@ struct LibraryBody {
     watchable: Option<bool>,
 }
 
-/// Validate a flow's JSON envelope and version before persisting it.
-fn validate_flow(flow_json: &str) -> Result<(), ApiError> {
+/// Validate a flow's JSON envelope, version, and section parameters
+/// before persisting it.
+///
+/// Section params are raw JSON inside the `Flow` envelope; running each
+/// section's typed deserializer through the registry rejects bad values
+/// (e.g. an oversized filter graph, DESIGN §6.5) at save time instead of
+/// marking every matching file `failed` at scan time.
+fn validate_flow(registry: &Registry, flow_json: &str) -> Result<(), ApiError> {
     let flow: Flow = serde_json::from_str(flow_json)
         .map_err(|e| ApiError(StatusCode::UNPROCESSABLE_ENTITY, format!("bad flow: {e}")))?;
     if flow.flow_version != FLOW_VERSION {
@@ -143,6 +149,19 @@ fn validate_flow(flow_json: &str) -> Result<(), ApiError> {
                 flow.flow_version
             ),
         ));
+    }
+    for step in &flow.steps {
+        for (key, params) in &step.operation.sections {
+            let section = registry.operation_section(key).ok_or_else(|| {
+                ApiError(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    format!("bad flow: unknown operation section '{key}'"),
+                )
+            })?;
+            section.validate(params).map_err(|e| {
+                ApiError(StatusCode::UNPROCESSABLE_ENTITY, format!("bad flow: {e}"))
+            })?;
+        }
     }
     Ok(())
 }
@@ -287,7 +306,7 @@ async fn create_flow(
     State(s): State<AppState>,
     Json(body): Json<FlowBody>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
-    validate_flow(&body.flow_json)?;
+    validate_flow(&s.registry, &body.flow_json)?;
     let id =
         s.db.with(|c| db::insert_flow(c, &body.name, &body.flow_json))?;
     s.events.emit(ServerEvent::FlowChanged { flow_id: id });
@@ -313,7 +332,7 @@ async fn update_flow(
     let Some(existing) = s.db.with(|c| db::get_flow(c, id))? else {
         return Err(ApiError(StatusCode::NOT_FOUND, "flow not found".into()));
     };
-    validate_flow(&body.flow_json)?;
+    validate_flow(&s.registry, &body.flow_json)?;
     let users = s.db.with(|c| db::libraries_using_flow(c, id))?;
     s.db.with(|c| db::update_flow(c, id, &body.name, &body.flow_json))?;
     s.events.emit(ServerEvent::FlowChanged { flow_id: id });
@@ -594,5 +613,28 @@ mod tests {
         let b: LibraryBody =
             serde_json::from_str("{\"name\":\"n\",\"path\":\"/p\",\"flow_id\":3}").unwrap();
         assert_eq!(b.flow_id, Some(Some(3)));
+    }
+
+    /// Bad section params must be rejected at save time (reviewed P1):
+    /// previously an oversized filter graph passed the envelope parse and
+    /// then failed every scan of the library it was assigned to.
+    #[test]
+    fn validate_flow_rejects_bad_section_params() {
+        let reg = Registry::v1();
+
+        let long = "a".repeat(4097);
+        let bad = format!(
+            "{{\"flow_version\":1,\"steps\":[{{\"condition\":{{}},\"operation\":{{\"video\":{{\"codec\":\"h264\",\"video_filter\":\"{long}\"}}}}}}]}}"
+        );
+        let err = validate_flow(&reg, &bad).unwrap_err();
+        assert_eq!(err.0, StatusCode::UNPROCESSABLE_ENTITY);
+
+        let unknown =
+            r#"{"flow_version":1,"steps":[{"condition":{},"operation":{"nonsense":{}}}]}"#;
+        let err = validate_flow(&reg, unknown).unwrap_err();
+        assert_eq!(err.0, StatusCode::UNPROCESSABLE_ENTITY);
+
+        let good = r#"{"flow_version":1,"steps":[{"condition":{},"operation":{"video":{"codec":"h264","video_filter":"denoise"}}}]}"#;
+        validate_flow(&reg, good).unwrap();
     }
 }

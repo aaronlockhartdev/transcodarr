@@ -277,6 +277,10 @@ impl OperationSection for Audio {
         }))
     }
 
+    fn validate(&self, params: &Value) -> crate::error::Result<()> {
+        parse::<AudioOp>(self.key(), params).map(|_| ())
+    }
+
     fn ui_schema(&self) -> Value {
         let mut default_policy = audio_policy_schema();
         default_policy["label"] = json!("Default policy");
@@ -296,7 +300,7 @@ impl OperationSection for Audio {
                     },
                     "hint": "The first matching rule wins. Re-encode applies to all matching tracks."
                 },
-                "audio_filter": { "kind": "text", "label": "Audio filter", "hint": "An ffmpeg filter graph applied to every re-encoded track (e.g. volume=2,loudnorm). Tracks that are copied are never filtered." }
+                "audio_filter": { "kind": "text", "label": "Audio filter", "hint": "An ffmpeg -af expression (e.g. volume=2,loudnorm). Applied to re-encoded tracks, after everything else; one-shot — runs once per file." }
             }
         })
     }
@@ -604,5 +608,16 @@ mod tests {
         let p: AudioPlan =
             serde_json::from_str(r#"{ "per_track": [ { "Copy": null } ] }"#).unwrap();
         assert!(p.filter.is_none());
+    }
+
+    #[test]
+    fn validate_rejects_oversized_filter() {
+        let j = json!({ "default": "copy", "audio_filter": "a".repeat(4097) });
+        assert!(Audio.validate(&j).is_err());
+    }
+
+    #[test]
+    fn validate_rejects_unknown_field() {
+        assert!(Audio.validate(&json!({ "bogus": true })).is_err());
     }
 }

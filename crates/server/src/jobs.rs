@@ -204,12 +204,15 @@ pub fn scan_library(
         // New bytes (changed sample hash): a ledger whose recorded
         // hash equals the new one was written by a filter job that
         // just ran (keep it); any other mismatch is an external
-        // change (the user replaced the file) — forget it.
-        if let Some(e) = &existing {
-            if e.sample_hash != Some(hash as i64) {
-                if let Ok(Some(l)) = db.with(|c| db::get_applied_filters(c, e.id)) {
-                    if l.hash != hash as i64 {
-                        let _ = db.with(|c| db::set_applied_filters(c, e.id, None));
+        // change (the user replaced the file) — forget it. A failed
+        // hash read (0) tells us nothing: never clear on it.
+        if hash != 0 {
+            if let Some(e) = &existing {
+                if e.sample_hash != Some(hash as i64) {
+                    if let Ok(Some(l)) = db.with(|c| db::get_applied_filters(c, e.id)) {
+                        if l.hash != hash as i64 {
+                            let _ = db.with(|c| db::set_applied_filters(c, e.id, None));
+                        }
                     }
                 }
             }
@@ -1008,6 +1011,27 @@ pub fn run_job(state: &AppState, job: &db::JobRow, device: &Device) -> Result<()
         }
     }
 
+    // One-shot filter ledger (DESIGN §6.5): the file now contains this
+    // job's filters, so record what was applied with the new hash right
+    // here — before the idempotency gate — because a crash anywhere
+    // after the swap must not make a later run re-apply them. A failed
+    // hash read (0) is never recorded.
+    {
+        let graphs = serde_json::from_str::<FfmpegPlan>(&job.plan_json)
+            .ok()
+            .map(|p| p.filter_graphs())
+            .unwrap_or_default();
+        let new_hash = sample_hash(&final_path).unwrap_or(0);
+        if new_hash == 0 {
+            tracing::warn!(
+                "could not sample-hash {} for the filter ledger",
+                final_path.display()
+            );
+        } else {
+            let _ = db.with(|c| db::add_applied_filters(c, job.file_id, new_hash as i64, &graphs));
+        }
+    }
+
     // Idempotency gate (DESIGN §13.6): re-evaluate the NEW file. If it
     // still wants to change, the flow is not idempotent for this
     // input — mark failed (non_idempotent), never loop.
@@ -1082,14 +1106,8 @@ pub fn run_job(state: &AppState, job: &db::JobRow, device: &Device) -> Result<()
     match evaluate::evaluate(registry, &flow.with_filters_cleared(), &new_facts) {
         Ok(Evaluation::Identity) => {
             let _ = finish(db, job, "completed", None, None, data_dir, events);
-            // Record the filter graphs this job applied, so future
-            // scans recognize the file as already filtered.
-            let graphs = serde_json::from_str::<FfmpegPlan>(&job.plan_json)
-                .ok()
-                .map(|p| p.filter_graphs())
-                .unwrap_or_default();
-            let new_hash = sample_hash(&final_path).unwrap_or(0) as i64;
-            let _ = db.with(|c| db::add_applied_filters(c, job.file_id, new_hash, &graphs));
+            // The filter ledger was already recorded at swap time, before
+            // this gate (a crash here must not un-record it).
             let _ = db.with(|c| db::set_file_status(c, job.file_id, "completed"));
         }
         Ok(Evaluation::Plan(_)) => {

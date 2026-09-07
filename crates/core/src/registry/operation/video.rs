@@ -476,6 +476,10 @@ impl OperationSection for Video {
         Ok(SectionPlan::Video(build_plan(&op, v)))
     }
 
+    fn validate(&self, params: &Value) -> crate::error::Result<()> {
+        parse::<VideoOp>(self.key(), params).map(|_| ())
+    }
+
     fn ui_schema(&self) -> Value {
         json!({
             "kind": "object",
@@ -521,7 +525,7 @@ impl OperationSection for Video {
                     "hint": "Never upscales. Sources at or above the target keep their resolution."
                 },
                 "hdr_to_sdr": { "kind": "boolean", "label": "Convert HDR to SDR", "default": false, "hint": "Changes the look of the image. Only enabled when you ask." },
-                "video_filter": { "kind": "text", "label": "Video filter", "hint": "An ffmpeg filter graph for the video stream (e.g. crop=1920:800:0:0,denoise). Applied after downscale and HDR conversion; a non-empty filter re-encodes the video." }
+                "video_filter": { "kind": "text", "label": "Video filter", "hint": "An ffmpeg -vf expression (e.g. crop=1920:800:0:0,denoise). Applied after everything else; one-shot — runs once per file." }
             }
         })
     }
@@ -813,6 +817,22 @@ mod tests {
                 "crop=1920:800:0:0".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn validate_rejects_oversized_filter() {
+        let j = json!({ "codec": "h264", "video_filter": "a".repeat(4097) });
+        assert!(matches!(
+            Video.validate(&j),
+            Err(crate::error::CoreError::Flow(_))
+        ));
+    }
+
+    #[test]
+    fn validate_accepts_typed_params() {
+        Video
+            .validate(&json!({ "codec": "h264", "video_filter": "denoise" }))
+            .unwrap();
     }
 
     // (module closes)

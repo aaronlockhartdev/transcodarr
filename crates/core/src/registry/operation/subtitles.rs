@@ -53,6 +53,10 @@ impl OperationSection for Subtitles {
         }))
     }
 
+    fn validate(&self, params: &Value) -> crate::error::Result<()> {
+        parse::<SubtitlesOp>(self.key(), params).map(|_| ())
+    }
+
     fn ui_schema(&self) -> Value {
         json!({
             "kind": "object",
