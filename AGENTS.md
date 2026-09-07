@@ -80,7 +80,7 @@ The repository currently contains **no code yet**. The following are the standin
 ## Gotchas
 
 - The multi-node claim endpoint exists **behind a config flag and must stay disabled** in v1 (design doc §7). Do not enable or depend on it.
-- File identity is path-based; re-probing is decided by dev/inode + size + mtime, and the stored sample hash (FNV-1a 64-bit over first + last 8 KB) is only a change signal for the applied-filter ledger (design doc §4). Don't invent whole-file hashing — it doesn't scale to 4K libraries.
+- File identity is path-based; re-probing is decided by dev/inode + size + mtime, and the stored sample hash (xxHash64 over the first + last 8 KB) is only a change signal for the applied-operations record (design doc §4); the in-file processed marker's fingerprint is xxHash3-128 over the applied operation (§6.6). Don't invent whole-file hashing — it doesn't scale to 4K libraries.
 - In-place mode **adopts the true container extension** (MKV→MP4 renames), which deliberately orphans \*arr DB records until re-scan (design doc §3.1; re-import automation is parked in §12). Don't "fix" this.
 - New condition fields, operation sections, or verification checks are **registry entries in `core`** (design doc §5) — one type implementing the trait + registration. Never special-case them in the planner, the server, or the frontend.
 - Transcoding is usually **disk-bound, not CPU-bound**: any scheduling change must respect the global concurrency ceiling (design doc §7).
