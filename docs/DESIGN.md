@@ -174,7 +174,7 @@ ffmpeg -hwaccel cuda -i "In.Movie.2024.2160p.HEVC.mkv" \
 
 ### 6.3 Subtitle section (absent ⇒ keep all, copy)
 
-`keep all` (default) / `keep forced-only` / `drop`. Copy only; **no burn-in in v1** (parked).
+`keep all` (default) / `keep first` (the first subtitle track in file order; a no-op for files without subtitles) / `keep forced-only` / `drop`. Copy only; **no burn-in in v1** (parked).
 
 ### 6.4 Container section (an explicit choice, with an optional MKV fallback)
 

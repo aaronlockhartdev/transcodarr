@@ -258,6 +258,9 @@ pub enum SubtitlePolicy {
     /// Keep every subtitle track (copy).
     #[default]
     KeepAll,
+    /// Keep only the first track in file order (`-map 0:s:0`);
+    /// a no-op for files without subtitles.
+    KeepFirst,
     /// Keep only forced tracks (drops the rest).
     KeepForced,
     /// Drop every subtitle track.
