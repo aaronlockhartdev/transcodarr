@@ -78,12 +78,15 @@
 		toast("Every filter type is already on this step");
 	}
 
-	function setFilterField(oldKey: string, newKey: string) {
+	function setFilterField(oldKey: string, newKey: string, sel: HTMLSelectElement) {
 		if (oldKey === newKey) return;
 		// A filter of this kind already on the step: reject the swap (no
 		// state change, so nothing is marked unsaved).
 		if ((step.condition as Record<string, unknown>)[newKey] !== undefined) {
 			toast(`A ${label(newKey, schema.condition_fields[newKey]?.schema as { label?: string })} filter is already on this step`);
+			// Svelte only rewrites value= when the bound value changes:
+			// put the picker back where it was.
+			sel.value = oldKey;
 			return;
 		}
 		const c: Record<string, unknown> = {};
@@ -93,6 +96,12 @@
 		c[newKey] = anyConstraint(newKey); // the swapped-in row moves last
 		step.condition = c;
 	}
+
+// A rejected swap (target kind used by another row) reverts the
+// select's displayed value to the row's current field.
+function resetFilterField(el: HTMLSelectElement, current: string) {
+	el.value = current;
+}
 
 	function removeFilter(field: string) {
 		const c = { ...step.condition };
@@ -316,13 +325,13 @@
 	function setRuleReencodeRate(i: number, text: string) {
 		const a = ruleActionObj(i);
 		const n = Number.parseInt(text, 10);
-		a.sample_rate = Number.isNaN(n) ? undefined : n;
+		a.sample_rate = Number.isInteger(n) && n >= 1 ? n : undefined;
 		writeRuleAction(i, a);
 	}
 	function setRuleReencodeChannels(i: number, text: string) {
 		const a = ruleActionObj(i);
 		const n = Number.parseInt(text, 10);
-		a.channels = Number.isNaN(n) ? undefined : n;
+		a.channels = Number.isInteger(n) && n >= 1 ? n : undefined;
 		writeRuleAction(i, a);
 	}
 	function setRuleLanguages(i: number, text: string) {
@@ -411,7 +420,7 @@
 							<select
 								class="h-8 w-36 rounded-lg border border-input bg-transparent px-2 text-sm"
 								value={field}
-								onchange={(e) => setFilterField(field, (e.target as HTMLSelectElement).value)}
+								onchange={(e) => { const v = (e.target as HTMLSelectElement).value; setFilterField(field, v, e.target as HTMLSelectElement); if (v !== field) resetFilterField(e.target as HTMLSelectElement, field); }}
 							>
 								{#each Object.entries(schema.condition_fields) as [k, cf] (k)}
 									<!-- a kind another row already uses can't be picked twice -->
@@ -578,8 +587,7 @@
 																<select
 																class="h-7 w-32 rounded-lg border border-input bg-transparent px-2 text-xs"
 																value={typeof rule.action === "string" ? policySelectValue(rule.action) : (rule.action as { codec?: string }).codec ?? reencodeCodecOpts[0]?.value ?? ""}
-																// Copy/Drop/Re-encode are always options; a re-encode action adds
-																// its codec choices to the same control (picking one keeps rate/channels).
+
 																onchange={(e) => {
 																const v = (e.target as HTMLSelectElement).value;
 																if (policyOpts.some((o) => o.value === v)) setRuleAction(i, v === "re_encode" ? reencodeActionDefault() : v);
@@ -599,18 +607,20 @@
 															<div class="flex flex-wrap items-center gap-1">
 															<Input
 															class="h-7 w-16"
-															placeholder="rate"
+															type="number" min="1" placeholder="auto"
 															title="Sample rate (Hz); auto keeps the source rate"
 															value={(rule.action as { sample_rate?: number }).sample_rate ?? ""}
 															oninput={(e) => setRuleReencodeRate(i, (e.target as HTMLInputElement).value)}
 															/>
+															<span class="text-xs text-muted-foreground">Hz</span>
 															<Input
 															class="h-7 w-16"
 															placeholder="auto"
-															title="Channel count; auto keeps the source count"
+															type="number" min="1" title="Channel count; auto keeps the source count"
 															value={(rule.action as { channels?: number }).channels ?? ""}
 															oninput={(e) => setRuleReencodeChannels(i, (e.target as HTMLInputElement).value)}
 															/>
+															<span class="text-xs text-muted-foreground">ch</span>
 															</div>
 															{/if}
 															<Button variant="ghost" size="sm" title="Remove rule" onclick={() => removeRule(i)}>

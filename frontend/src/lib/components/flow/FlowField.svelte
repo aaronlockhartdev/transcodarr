@@ -185,7 +185,7 @@
 		{/each}
 	</select>
 {:else if schema.kind === "text"}
-	<Input bind:value={textValue} oninput={() => setText(textValue)} class={className} placeholder={schema.hint ?? "auto"} />
+	<Input bind:value={textValue} oninput={() => setText(textValue)} class={className} placeholder={schema.default ?? "none"} />
 {:else if schema.kind === "boolean"}
 	<label class="flex items-center gap-2">
 		<Switch bind:checked={boolValue} onCheckedChange={setBool} />
