@@ -98,6 +98,11 @@ impl FfprobeFactExtractor {
 /// - **Track indices** are per-type (0-based within their stream
 ///   type) — the per-type indices are what ffmpeg `-map` uses in
 ///   plan.rs.
+/// - **Audio track extras**: the title comes from `tags.title`, the
+///   default flag from `disposition.default`, and the language is
+///   normalized to ISO 639-1 (`transcodarr_core::language`) so the
+///   audio rule's language axis matches probe spellings; subtitle
+///   languages stay raw (no matching axis consumes them).
 /// - **Atmos** is a heuristic (eac3 with ≥8 channels; ffprobe does
 ///   not expose JOC metadata in v1).
 /// - **HDR** comes from stream side data, collected as flags first
@@ -263,12 +268,25 @@ pub fn map_facts(
                 audio.push(AudioTrack {
                     index: aidx,
                     codec: codec.unwrap_or_default(),
-                    language,
+                    language: language
+                        .as_deref()
+                        .map(transcodarr_core::language::normalize),
                     channels,
                     sample_rate: s
                         .get("sample_rate")
                         .and_then(|v| v.as_u64())
                         .map(|v| v as u32),
+                    title: s
+                        .get("tags")
+                        .and_then(|t| t.get("title"))
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
+                    default: s
+                        .get("disposition")
+                        .and_then(|d| d.get("default"))
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0)
+                        != 0,
                     atmos: is_eac3 && channels.map(|c| c >= 8).unwrap_or(false),
                 });
                 aidx += 1;
@@ -370,7 +388,8 @@ mod tests {
                  "avg_frame_rate": "25/1", "bit_rate": "98765",
                  "side_data_list": [{"side_data_type": "Dolby Vision"}]},
                 {"codec_type": "audio", "codec_name": "eac3", "channels": 8,
-                 "sample_rate": "48000", "tags": {"language": "eng"}},
+                 "sample_rate": "48000", "tags": {"language": "eng", "title": "Dialog (English)"},
+                 "disposition": {"default": 1}},
                 {"codec_type": "subtitle", "codec_name": "mov_text",
                  "tags": {"language": "eng"}, "disposition": {"forced": 1}}
               ]
@@ -387,8 +406,24 @@ mod tests {
         assert_eq!(facts.audio.len(), 1);
         assert!(facts.audio[0].atmos);
         assert_eq!(facts.audio[0].channels, Some(8));
+        // Audio extras: the language normalizes to ISO 639-1, the
+        // title and the default flag come off the stream tags.
+        assert_eq!(facts.audio[0].language.as_deref(), Some("en"));
+        assert_eq!(facts.audio[0].title.as_deref(), Some("Dialog (English)"));
+        assert!(facts.audio[0].default);
         assert_eq!(facts.subtitles[0].index, 0);
         assert!(facts.subtitles[0].forced);
+    }
+    #[test]
+    fn audio_language_normalizes_and_missing_stays_none() {
+        let d = doc(r#"{"format": {"duration": "10"}, "streams": [
+                {"codec_type": "audio", "codec_name": "aac", "channels": 2,
+                 "tags": {"language": "EN-US"}},
+                {"codec_type": "audio", "codec_name": "aac", "channels": 2}
+            ]}"#);
+        let facts = map_facts(Path::new("/x.mkv"), &d, None).unwrap();
+        assert_eq!(facts.audio[0].language.as_deref(), Some("en"));
+        assert_eq!(facts.audio[1].language, None);
     }
 
     #[test]

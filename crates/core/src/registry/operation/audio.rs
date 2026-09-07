@@ -12,8 +12,11 @@ pub use crate::plan::{AudioTargetCodec as AudioCodec, AudioTrackPlan};
 /// `audio` — per-track policy for audio streams (DESIGN §6.2).
 ///
 /// The **default policy** applies to tracks no rule names; **rules**
-/// match tracks by codec and/or language and override it. Re-encoding
-/// always applies to *all* matching tracks (deterministic target state).
+/// match tracks on any axis — codec (Atmos via the `eac3_joc`
+/// pseudo-codec), language (ISO 639-1 normalized), channel count,
+/// sample rate, title substring, or the default-track flag — and
+/// override it. Re-encoding always applies to *all* matching tracks
+/// (deterministic target state).
 /// **Atmos (E-AC-3 JOC) is copied unless an explicit rule re-encodes
 /// it** — never auto-downmixed.
 ///
@@ -112,16 +115,69 @@ impl<'de> Deserialize<'de> for AudioPolicy {
     }
 }
 
-/// Which tracks a rule applies to. An empty `match` matches every track.
+/// Which tracks a rule applies to. An empty `match` matches every
+/// track; each set axis is AND-ed (DESIGN §6.2).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AudioMatch {
-    /// Codec names (case-insensitive).
+    /// Codec names (case-insensitive). Atmos matches through the
+    /// `eac3_joc` pseudo-codec — there is no separate Atmos field, so
+    /// the rule vocabulary stays the codec list (DESIGN §6.2).
     #[serde(default)]
     pub codecs: Vec<String>,
-    /// Language tags (e.g. `"eng"`, `"eng-2"`; case-insensitive).
+    /// Language codes. Both this list and the track's tag normalize
+    /// to ISO 639-1 before comparing (`und`/`mis`/`zzz` → `und` =
+    /// unknown), so `en` matches `eng`, `EN-US`, and `ger` matches
+    /// `de`.
     #[serde(default)]
     pub languages: Vec<String>,
+    /// Exact channel counts (1 = mono, 2 = stereo, 6 = 5.1, 8 = 7.1);
+    /// tracks with an unknown count never match a non-empty list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub channels: Vec<u32>,
+    /// Exact sample rates in Hz (commonly 44100, 48000, 96000).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sample_rate: Vec<u32>,
+    /// Case-insensitive substring of the track title (`tags.title`).
+    #[serde(default, skip_serializing_if = "is_blank")]
+    pub title_contains: Option<String>,
+    /// The file's default-track axis (any / default / non-default).
+    #[serde(default, skip_serializing_if = "DefaultMatch::is_any")]
+    pub default: DefaultMatch,
+}
+
+/// Whether a rule names the file's default audio track. Wire form:
+/// `"any"` (the default — omitted from the JSON) | `"default"` |
+/// `"not_default"`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DefaultMatch {
+    /// Every track.
+    #[default]
+    Any,
+    /// Only the file's default track.
+    Default,
+    /// Only non-default tracks.
+    NotDefault,
+}
+
+impl DefaultMatch {
+    /// No constraint (the default — also the serde skip predicate).
+    fn is_any(&self) -> bool {
+        matches!(self, Self::Any)
+    }
+
+    fn matches(&self, track: &crate::facts::AudioTrack) -> bool {
+        match self {
+            Self::Any => true,
+            Self::Default => track.default,
+            Self::NotDefault => !track.default,
+        }
+    }
+}
+
+fn is_blank(v: &Option<String>) -> bool {
+    v.as_deref().is_none_or(str::is_empty)
 }
 
 impl AudioMatch {
@@ -132,11 +188,24 @@ impl AudioMatch {
                 .iter()
                 .any(|c| c.eq_ignore_ascii_case(&track.codec));
         let lang_ok = self.languages.is_empty()
+            || self.languages.iter().any(|w| {
+                crate::language::normalize(w)
+                    == crate::language::normalize(track.language.as_deref().unwrap_or("und"))
+            });
+        let channels_ok =
+            self.channels.is_empty() || track.channels.is_some_and(|c| self.channels.contains(&c));
+        let rate_ok = self.sample_rate.is_empty()
             || track
-                .language
+                .sample_rate
+                .is_some_and(|r| self.sample_rate.contains(&r));
+        let title_ok = match &self.title_contains {
+            Some(needle) if !needle.trim().is_empty() => track
+                .title
                 .as_deref()
-                .is_some_and(|l| self.languages.iter().any(|w| w.eq_ignore_ascii_case(l)));
-        codec_ok && lang_ok
+                .is_some_and(|t| t.to_lowercase().contains(&needle.to_lowercase())),
+            _ => true,
+        };
+        codec_ok && lang_ok && channels_ok && rate_ok && title_ok && self.default.matches(track)
     }
 }
 
@@ -257,6 +326,16 @@ impl OperationSection for Audio {
     fn plan(&self, params: &Value, facts: &FileFacts) -> crate::error::Result<SectionPlan> {
         let op: AudioOp = parse(self.key(), params)?;
         let plans = plan_tracks(&op, facts);
+        // A file that carries audio may not be planned to zero audio
+        // tracks (DESIGN §6.2): fail loudly at plan time, before
+        // anything is encoded (a silent file is data loss, not a
+        // target state). Files without audio are unaffected — there is
+        // nothing to drop.
+        if !facts.audio.is_empty() && plans.iter().all(|p| matches!(p, AudioTrackPlan::Drop)) {
+            return Err(crate::error::CoreError::Flow(
+                "audio: the plan would drop every audio track — keep at least one (or leave the audio section off)".into(),
+            ));
+        }
         // The filter can only attach to re-encoded tracks; with none,
         // it is inert and the section stays identity.
         let filter = if op.audio_filter.is_empty()
@@ -292,7 +371,14 @@ impl OperationSection for Audio {
                 "kind": "list",
                 "label": "Rules",
                 "item": {
-                    "match": { "codecs": { "kind": "multi_select", "label": "Codecs", "values": crate::registry::condition::audio_codec::codec_value_pairs() }, "languages": { "kind": "multi_select", "label": "Languages" } },
+                    "match": {
+                        "codecs": { "kind": "multi_select", "label": "Codecs", "values": crate::registry::condition::audio_codec::codec_value_pairs(), "hint": "Atmos is matched here, as E-AC-3 (Atmos) (the eac3_joc pseudo-codec)." },
+                        "languages": { "kind": "text", "label": "Languages", "hint": "Comma-separated codes (eng, fr). Normalized to ISO 639-1 before matching; unknown languages (und/mis/zzz) match \"und\"." },
+                        "channels": { "kind": "multi_select", "label": "Channels", "values": [ { "value": "1", "label": "Mono" }, { "value": "2", "label": "Stereo" }, { "value": "6", "label": "5.1" }, { "value": "8", "label": "7.1" } ] },
+                        "sample_rate": { "kind": "multi_select", "label": "Sample rate", "values": [ { "value": "44100", "label": "44.1 kHz" }, { "value": "48000", "label": "48 kHz" }, { "value": "96000", "label": "96 kHz" } ] },
+                        "title_contains": { "kind": "text", "label": "Title contains", "hint": "Case-insensitive substring of the track title (tags.title)." },
+                        "default": { "kind": "single_select", "label": "Default track", "default": "any", "values": [ { "value": "any", "label": "Any" }, { "value": "default", "label": "Default track" }, { "value": "not_default", "label": "Non-default" } ] }
+                    },
                     "action": action_policy
                 },
                 "hint": "The first matching rule wins. Re-encode applies to all matching tracks."
@@ -620,5 +706,231 @@ mod tests {
     #[test]
     fn validate_rejects_unknown_field() {
         assert!(Audio.validate(&json!({ "bogus": true })).is_err());
+    }
+
+    fn track_full(
+        codec: &str,
+        channels: Option<u32>,
+        rate: Option<u32>,
+        language: Option<&str>,
+        title: Option<&str>,
+        default: bool,
+    ) -> AudioTrack {
+        AudioTrack {
+            index: 0,
+            codec: codec.into(),
+            channels,
+            sample_rate: rate,
+            language: language.map(str::to_string),
+            title: title.map(str::to_string),
+            default,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn rule_matches_on_channels_and_rate() {
+        let a = Audio;
+        let f = facts(vec![
+            track_full(
+                "dts",
+                Some(6),
+                Some(48_000),
+                Some("eng"),
+                Some("Dialog"),
+                true,
+            ),
+            track_full(
+                "dts",
+                Some(2),
+                Some(44_100),
+                Some("fre"),
+                Some("Commentary"),
+                false,
+            ),
+        ]);
+        let p = a
+            .plan(
+                &json!({
+                    "rules": [{
+                        "match": { "channels": [6], "sample_rate": [48000] },
+                        "action": "drop"
+                    }]
+                }),
+                &f,
+            )
+            .unwrap();
+        let AudioPlan { per_track, .. } = match p {
+            SectionPlan::Audio(p) => p,
+            other => panic!("expected audio plan, got {other:?}"),
+        };
+        assert!(matches!(per_track[0], AudioTrackPlan::Drop));
+        assert!(matches!(per_track[1], AudioTrackPlan::Copy));
+        // An unknown value on one axis never matches a non-empty list.
+        let f = facts(vec![track_full(
+            "dts",
+            None,
+            Some(48_000),
+            None,
+            None,
+            false,
+        )]);
+        let p = a
+            .plan(
+                &json!({ "rules": [{ "match": { "channels": [6] }, "action": "drop" }] }),
+                &f,
+            )
+            .unwrap();
+        assert!(matches!(p, SectionPlan::Identity));
+    }
+
+    #[test]
+    fn rule_matches_on_title_contains() {
+        let a = Audio;
+        let f = facts(vec![
+            track_full("eac3", Some(2), Some(48_000), None, Some("COMMENTS"), false),
+            track_full("eac3", Some(2), Some(48_000), None, None, false),
+        ]);
+        let p = a
+            .plan(
+                &json!({ "rules": [{ "match": { "title_contains": "comment" }, "action": "drop" }] }),
+                &f,
+            )
+            .unwrap();
+        let AudioPlan { per_track, .. } = match p {
+            SectionPlan::Audio(p) => p,
+            other => panic!("expected audio plan, got {other:?}"),
+        };
+        assert!(matches!(per_track[0], AudioTrackPlan::Drop));
+        assert!(matches!(per_track[1], AudioTrackPlan::Copy));
+    }
+
+    #[test]
+    fn rule_matches_on_default_axis() {
+        let a = Audio;
+        let f = facts(vec![
+            track_full("eac3", Some(2), Some(48_000), Some("eng"), None, true),
+            track_full("ac3", Some(2), Some(48_000), Some("fre"), None, false),
+        ]);
+        let p = a
+            .plan(
+                &json!({ "rules": [{ "match": { "default": "not_default" }, "action": "drop" }] }),
+                &f,
+            )
+            .unwrap();
+        let AudioPlan { per_track, .. } = match p {
+            SectionPlan::Audio(p) => p,
+            other => panic!("expected audio plan, got {other:?}"),
+        };
+        assert!(matches!(per_track[0], AudioTrackPlan::Copy));
+        assert!(matches!(per_track[1], AudioTrackPlan::Drop));
+        // The wire default is "any": an absent axis matches everything.
+        let m: AudioMatch = serde_json::from_str(r#"{ "codecs": [] }"#).unwrap();
+        assert!(
+            m.default
+                .matches(&facts(vec![track("eac3", false)]).audio[0])
+        );
+    }
+
+    #[test]
+    fn languages_normalize_on_both_sides() {
+        let a = Audio;
+        let f = facts(vec![
+            track_full("eac3", Some(2), Some(48_000), Some("eng"), None, false),
+            track_full("eac3", Some(2), Some(48_000), Some("EN-US"), None, false),
+            track_full("eac3", Some(2), Some(48_000), Some("ger"), None, false),
+            track_full("eac3", Some(2), Some(48_000), Some("zzz"), None, false),
+            track_full("eac3", Some(2), Some(48_000), None, None, false),
+        ]);
+        // "en" matches eng and EN-US, not the rest.
+        let p = a
+            .plan(
+                &json!({ "rules": [{ "match": { "languages": ["en"] }, "action": "drop" }] }),
+                &f,
+            )
+            .unwrap();
+        let AudioPlan { per_track, .. } = match p {
+            SectionPlan::Audio(p) => p,
+            other => panic!("expected audio plan, got {other:?}"),
+        };
+        assert!(matches!(per_track[0], AudioTrackPlan::Drop));
+        assert!(matches!(per_track[1], AudioTrackPlan::Drop));
+        assert!(matches!(per_track[2], AudioTrackPlan::Copy));
+        // "de" matches the 639-2 spelling "ger".
+        let p = a
+            .plan(
+                &json!({ "rules": [{ "match": { "languages": ["de"] }, "action": "drop" }] }),
+                &f,
+            )
+            .unwrap();
+        let AudioPlan { per_track, .. } = match p {
+            SectionPlan::Audio(p) => p,
+            other => panic!("expected audio plan, got {other:?}"),
+        };
+        assert!(matches!(per_track[2], AudioTrackPlan::Drop));
+        // "und" matches zzz and the missing language alike.
+        let p = a
+            .plan(
+                &json!({ "rules": [{ "match": { "languages": ["und"] }, "action": "drop" }] }),
+                &f,
+            )
+            .unwrap();
+        let AudioPlan { per_track, .. } = match p {
+            SectionPlan::Audio(p) => p,
+            other => panic!("expected audio plan, got {other:?}"),
+        };
+        assert!(matches!(per_track[3], AudioTrackPlan::Drop));
+        assert!(matches!(per_track[4], AudioTrackPlan::Drop));
+    }
+
+    #[test]
+    fn dropping_every_audio_track_fails_the_plan() {
+        let a = Audio;
+        let f = facts(vec![track("eac3", false), track("dts", false)]);
+        let err = a
+            .plan(&json!({ "default": "drop" }), &f)
+            .expect_err("dropping all audio must fail at plan time");
+        assert!(
+            err.to_string().contains("drop every audio track"),
+            "{err:?}"
+        );
+        // Same through a catch-all rule.
+        let err = a
+            .plan(&json!({ "rules": [{ "match": {}, "action": "drop" }] }), &f)
+            .expect_err("a catch-all drop rule must fail at plan time");
+        assert!(
+            err.to_string().contains("drop every audio track"),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn no_audio_tracks_no_drop_error() {
+        // Nothing to drop: the default drop policy stays an identity plan.
+        let a = Audio;
+        let f = facts(vec![]);
+        let p = a.plan(&json!({ "default": "drop" }), &f).unwrap();
+        assert!(matches!(p, SectionPlan::Identity));
+    }
+
+    #[test]
+    fn match_wire_omits_unset_axes() {
+        let m: AudioMatch =
+            serde_json::from_str(r#"{ "channels": [6], "sample_rate": [48000], "title_contains": "comment", "default": "not_default" }"#)
+                .unwrap();
+        let s = serde_json::to_value(&m).unwrap();
+        assert_eq!(s["channels"], json!([6]));
+        assert_eq!(s["sample_rate"], json!([48000]));
+        assert_eq!(s["title_contains"], "comment");
+        assert_eq!(s["default"], "not_default");
+        // An all-default match carries only the two legacy keys, so the
+        // fingerprints of pre-existing flows are untouched by this change.
+        let m: AudioMatch = Default::default();
+        let s = serde_json::to_value(&m).unwrap();
+        assert_eq!(
+            s.to_string(),
+            r#"{"codecs":[],"languages":[]}"#,
+            "the default match must not gain wire keys: {s}"
+        );
     }
 }

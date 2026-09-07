@@ -70,8 +70,16 @@ pub struct AudioTrack {
     /// Channel count (channel layout) when known.
     #[serde(default)]
     pub channels: Option<u32>,
+    /// Sample rate in Hz, when known.
     #[serde(default)]
     pub sample_rate: Option<u32>,
+    /// Stream title (ffprobe `tags.title`), if the container carries
+    /// one — the match target for the audio rule's `title_contains`.
+    #[serde(default)]
+    pub title: Option<String>,
+    /// The file's default audio track (ffprobe `disposition.default`).
+    #[serde(default)]
+    pub default: bool,
     /// Dolby Atmos (E-AC-3 JOC). Never auto-downmixed (DESIGN §6.2).
     #[serde(default)]
     pub atmos: bool,

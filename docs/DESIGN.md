@@ -24,7 +24,7 @@ Non-goals for v1 (see §11–12): distributed workers, \*arr API integration, au
 | Term | Meaning |
 |---|---|
 | **Library** | A directory tree the user adds. References a **flow** (a first-class shared object — see below), and carries: lifecycle mode (in-place or output tree), auto-queue toggle, scan schedule. |
-| **File facts** | Cached probe result for one file: container, video codec/profile/level/pixel format/resolution/frame rate, HDR format, audio tracks (codec, language, channel layout, Atmos flag), subtitle tracks (type, language, forced), size, duration, bitrate. |
+| **File facts** | Cached probe result for one file: container, video codec/profile/level/pixel format/resolution/frame rate, HDR format, audio tracks (codec, language, sample rate, channel layout, title, default flag, Atmos flag), subtitle tracks (type, language, forced), size, duration, bitrate. |
 | **Flow** | A format policy: an ordered list of **steps**. A step = **condition** → **operation** and may carry a user-assigned **display name** (unnamed steps show as "Step N"). **First match wins.** Flows are **first-class, library-independent objects**: any number of libraries can reference the same flow, and editing one re-evaluates all of them. |
 | **Compliant** | Either the flow evaluates to **identity** for the file's facts (the matched operation would change nothing — every stream copied, nothing dropped, container already correct), or the file carries a **processed marker** matching the plan this flow would produce (§6.6) — i.e. this flow already made these bytes and the file is unchanged since. |
 | **Job** | One execution of an evaluated plan against one file: transcode → verify → swap → backup → retain. |
@@ -166,7 +166,8 @@ ffmpeg -hwaccel cuda -i "In.Movie.2024.2160p.HEVC.mkv" \
 ### 6.2 Audio section (absent ⇒ copy all tracks)
 
 - **Default policy** for unnamed tracks: `copy` (default) / `re-encode` (codec; optional sample rate and channel count — **auto keeps the source values**) / `drop`.
-- Optional **per-track rules** matched by codec and/or language (e.g. "all DTS/TrueHD → EAC3 5.1").
+- Optional **per-track rules** matched on any axis — codec (Atmos is matched here, as the `eac3_joc` pseudo-codec — there is no separate Atmos field), language (both sides normalize to ISO 639-1; `und`/`mis`/`zzz` → unknown, so "unknown" is matchable), channel count, sample rate, title substring (`tags.title`), or the file's default-track flag (any / default / non-default) (e.g. "all DTS/TrueHD → EAC3 5.1").
+- **A plan that would drop every audio track of a file that has audio fails at plan time** (a silent file is data loss, not a target state); files without audio are unaffected (their drop plans are identities).
 - **Atmos (EAC3-JOC) is copied unless an explicit rule re-encodes it** — never auto-downmixed.
 - Re-encoding, when invoked, applies to **all** matching tracks (deterministic target state, not "primary only").
 - **Filter graph**: optional ffmpeg `-af` expression (e.g. `loudnorm=…`) applied to **re-encoded** tracks only (a copied bitstream cannot be filtered; with no re-encode it is inert); empty = none — §6.5.
