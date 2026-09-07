@@ -20,7 +20,7 @@ use tokio::sync::watch;
 
 use transcodarr_core::device::{Device, DeviceKind};
 use transcodarr_core::evaluate::{self, Evaluation};
-use transcodarr_core::facts::FileFacts;
+use transcodarr_core::facts::{AppliedOps, FileFacts, FileFingerprint};
 use transcodarr_core::flow::Flow;
 use transcodarr_core::plan::FfmpegPlan;
 use transcodarr_core::registry::{FactExtractor, Registry};
@@ -70,32 +70,30 @@ fn target_occupied(path: &Path, src: &Path) -> bool {
     path != src && path.symlink_metadata().is_ok()
 }
 
-/// FNV-1a over the first and last 8KB — the change-detection key.
-/// Cheap enough to run on every scan of every file, and stable for a
-/// given content version (DESIGN §13.6: a changed sample hash
-/// triggers a re-probe, which triggers a re-evaluation).
-fn sample_hash(path: &Path) -> Result<u64> {
-    let mut f = File::open(path)?;
-    let size = f.metadata()?.len();
-    let sample = 8 * 1024;
-    let mut h: u64 = 0xcbf29ce484222325;
-    let mut buf = [0u8; 65536];
-    let mut n = f.read(&mut buf)?;
-    h = fnv1a(h, &buf[..n.min(sample)]);
-    if size > 2 * sample as u64 {
-        f.seek(SeekFrom::End(-(sample as i64)))?;
-        n = f.read(&mut buf)?;
-        h = fnv1a(h, &buf[..n.min(sample)]);
+/// xxh3-128 over the 256 KB head, middle, and tail windows of a
+/// file (DESIGN §4, §13.15): the change-detection key. Sequential
+/// windowed reads keep it cheap on NAS; a failed read yields `None`
+/// (it must never clear a record on unknown input).
+pub(crate) fn sample_hash_file(path: &Path) -> Option<String> {
+    let mut f = File::open(path).ok()?;
+    let size = f.metadata().ok()?.len();
+    let windows = transcodarr_core::hash::sample_windows(size);
+    let mut chunks = Vec::with_capacity(windows.len());
+    for (off, len) in &windows {
+        f.seek(SeekFrom::Start(*off)).ok()?;
+        let mut buf = vec![0u8; *len as usize];
+        let mut got = 0u64;
+        while got < *len {
+            let n = f.read(&mut buf[got as usize..]).ok()?;
+            if n == 0 {
+                break;
+            }
+            got += n as u64;
+        }
+        buf.truncate(got as usize);
+        chunks.push(buf);
     }
-    Ok(h)
-}
-
-fn fnv1a(mut h: u64, data: &[u8]) -> u64 {
-    for &b in data {
-        h ^= u64::from(b);
-        h = h.wrapping_mul(0x100000001b3);
-    }
-    h
+    Some(transcodarr_core::hash::sample_hash(&windows, &chunks))
 }
 
 #[cfg(unix)]
@@ -116,6 +114,49 @@ fn file_dev_ino(path: &Path) -> Result<(i64, i64)> {
             .map(|d| d.as_nanos() as i64)
             .unwrap_or(0),
     ))
+}
+
+/// Whether a file already carries the effect of this plan (DESIGN
+/// §6.6): its in-file marker matches the planned one, or its
+/// applied-operations record covers the file's current bytes with a
+/// matching operation fingerprint. `current` is the fingerprint of
+/// the bytes as measured now; a failed hash read leaves it `None` and
+/// the record check is simply skipped (it can never prove).
+fn plan_already_applied(
+    db: &Db,
+    file_id: i64,
+    plan: &FfmpegPlan,
+    facts: &FileFacts,
+    current: Option<&FileFingerprint>,
+) -> bool {
+    // Marker memory: the file's bytes say so (survives a lost
+    // database).
+    if let Some(m) = plan.marker.as_deref() {
+        if facts.marker.as_deref() == Some(m) {
+            return true;
+        }
+    }
+    // Record memory: the database says so (survives metadata
+    // stripping).
+    if let (Some(fp), Some(op)) = (current, plan.ops_json.as_ref()) {
+        if let Ok(Some(rec)) = db.with(|c| db::get_applied_ops(c, file_id)) {
+            if evaluate::record_proves_applied(&rec, op, fp) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// The global processed-marker setting (DESIGN §6.6): default on;
+/// `false`/`0` turns it off (DB-only records — the pre-marker
+/// behavior).
+fn markers_enabled(db: &Db) -> bool {
+    db.with(|c| db::get_setting(c, "mark_processed_files"))
+        .ok()
+        .flatten()
+        .map(|v| v != "false" && v != "0")
+        .unwrap_or(true)
 }
 
 /// Walk `library`, probe what changed, evaluate against its flow,
@@ -185,7 +226,7 @@ pub fn scan_library(
                 && e.inode == ino
                 && e.size == size
                 && e.mtime == mtime
-                && e.sample_hash != Some(0)
+                && e.sample_hash.is_some()
         });
         if unchanged {
             if !reevaluate {
@@ -200,18 +241,18 @@ pub fn scan_library(
             continue;
         }
 
-        let hash = sample_hash(&path).unwrap_or(0);
-        // New bytes (changed sample hash): a ledger whose recorded
-        // hash equals the new one was written by a filter job that
+        let hash = sample_hash_file(&path);
+        // New bytes (changed sample hash): a record whose
+        // fingerprint matches the new one was written by a job that
         // just ran (keep it); any other mismatch is an external
         // change (the user replaced the file) — forget it. A failed
-        // hash read (0) tells us nothing: never clear on it.
-        if hash != 0 {
+        // hash read tells us nothing: never clear on it.
+        if let Some(hash) = &hash {
             if let Some(e) = &existing {
-                if e.sample_hash != Some(hash as i64) {
-                    if let Ok(Some(l)) = db.with(|c| db::get_applied_filters(c, e.id)) {
-                        if l.hash != hash as i64 {
-                            let _ = db.with(|c| db::set_applied_filters(c, e.id, None));
+                if e.sample_hash.as_deref() != Some(hash.as_str()) {
+                    if let Ok(Some(rec)) = db.with(|c| db::get_applied_ops(c, e.id)) {
+                        if rec.file.sample_hash != *hash {
+                            let _ = db.with(|c| db::set_applied_ops(c, e.id, None));
                         }
                     }
                 }
@@ -226,7 +267,7 @@ pub fn scan_library(
             inode: ino,
             size,
             mtime,
-            sample_hash: Some(hash as i64),
+            sample_hash: hash.clone(),
             facts_json: None,
             status: "scanning".into(),
             last_probed: Some(mtime),
@@ -292,54 +333,63 @@ pub fn scan_library(
                 "compliant"
             }
             Ok(Evaluation::Plan(plan)) => {
-                // One-shot filter delta (DESIGN §6.5): a plan that
-                // exists only because of a filter graph, on a file
-                // that already carries exactly those graphs, is at
-                // its target state — don't re-queue it.
-                let graphs = plan.filter_graphs();
-                let filter_only = !graphs.is_empty()
-                    && evaluate::evaluate(registry, &flow.with_filters_cleared(), &facts)
-                        .is_ok_and(|e| matches!(e, Evaluation::Identity));
-                let need_job = if filter_only {
-                    let applied = db
-                        .with(|c| db::get_applied_filters(c, file_id))
-                        .unwrap_or_default()
-                        .map(|l| l.graphs)
+                // The effect of this plan may already be on the file
+                // (DESIGN §6.6): its in-file marker matches, or its
+                // applied-operations record covers the current bytes
+                // with a matching operation fingerprint. Either memory
+                // alone suffices — redundant by design (the marker
+                // survives a lost database, the record survives a
+                // metadata-stripping tool).
+                let current = hash.as_ref().map(|h| FileFingerprint {
+                    dev,
+                    inode: ino,
+                    size,
+                    mtime,
+                    sample_hash: h.clone(),
+                });
+                if plan_already_applied(db, file_id, &plan, &facts, current.as_ref()) {
+                    // The file is at its target state — a job still
+                    // queued (from an older facts snapshot) is stale:
+                    // cancel it so it does not re-encode.
+                    let cancelled = db
+                        .with(|c| db::cancel_queued_jobs(c, file_id, "superseded"))
                         .unwrap_or_default();
-                    !graphs.iter().all(|g| applied.iter().any(|k| k == g))
+                    for jid in cancelled {
+                        events.emit(ServerEvent::JobChanged { job_id: jid });
+                    }
+                    "compliant"
                 } else {
-                    true
-                };
-                // Enqueue at most one live job per file. A direct
-                // query on the jobs table — correct for any history
-                // depth, unlike a fixed row window.
-                let has_live = db.with(|c| db::has_live_job(c, file_id))?;
-                if need_job && !has_live {
-                    // GPU preference is resolved at dispatch
-                    // (run_loop); the job stays device-agnostic here
-                    // so CPU can always take it.
-                    let plan_json = serde_json::to_string(&plan)?;
-                    let job = db::JobRow {
-                        id: 0,
-                        file_id,
-                        library_id,
-                        flow_version: flow.flow_version as i64,
-                        plan_json,
-                        state: "queued".into(),
-                        device_id: None,
-                        claimed_by: None,
-                        lease_expires: None,
-                        started: None,
-                        ended: None,
-                        exit_kind: None,
-                        log_path: None,
-                        quarantine_path: None,
-                    };
-                    let job_id = db.with(|c| db::insert_job(c, &job))?;
-                    events.emit(ServerEvent::JobChanged { job_id });
-                    queued += 1;
+                    // Enqueue at most one live job per file. A direct
+                    // query on the jobs table — correct for any history
+                    // depth, unlike a fixed row window.
+                    let has_live = db.with(|c| db::has_live_job(c, file_id))?;
+                    if !has_live {
+                        // GPU preference is resolved at dispatch
+                        // (run_loop); the job stays device-agnostic here
+                        // so CPU can always take it.
+                        let plan_json = serde_json::to_string(&plan)?;
+                        let job = db::JobRow {
+                            id: 0,
+                            file_id,
+                            library_id,
+                            flow_version: flow.flow_version as i64,
+                            plan_json,
+                            state: "queued".into(),
+                            device_id: None,
+                            claimed_by: None,
+                            lease_expires: None,
+                            started: None,
+                            ended: None,
+                            exit_kind: None,
+                            log_path: None,
+                            quarantine_path: None,
+                        };
+                        let job_id = db.with(|c| db::insert_job(c, &job))?;
+                        events.emit(ServerEvent::JobChanged { job_id });
+                        queued += 1;
+                    }
+                    "queued"
                 }
-                if need_job { "queued" } else { "compliant" }
             }
             Ok(Evaluation::NoMatch) => {
                 // Never silent (DESIGN §13.6). A queued job from an
@@ -420,21 +470,20 @@ fn reevaluate_cached(
         Ok(Evaluation::Identity) => (Some("compliant"), false, true),
         Ok(Evaluation::NoMatch) => (Some("unmatched"), false, true),
         Ok(Evaluation::Plan(plan)) => {
-            // One-shot filter delta (DESIGN §6.5): the file's bytes
-            // are unchanged here, so the applied-filter ledger is
-            // still meaningful — if it already carries exactly the
-            // graphs this plan would apply, the file is compliant.
-            let graphs = plan.filter_graphs();
-            let filter_only = !graphs.is_empty()
-                && evaluate::evaluate(registry, &flow.with_filters_cleared(), &facts)
-                    .is_ok_and(|e| matches!(e, Evaluation::Identity));
-            let already_filtered = filter_only
-                && db
-                    .with(|c| db::get_applied_filters(c, file.id))
-                    .unwrap_or_default()
-                    .map(|l| l.graphs.iter().any(|k| graphs.iter().all(|g| k == g)))
-                    .unwrap_or(false);
-            if already_filtered {
+            // The file's bytes are unchanged here, so both memories
+            // remain meaningful (DESIGN §6.6): the in-file marker or
+            // the applied-operations record prove the plan was
+            // already applied to exactly these bytes — compliant.
+            let current = file.sample_hash.as_ref().map(|h| FileFingerprint {
+                dev: file.dev,
+                inode: file.inode,
+                size: file.size,
+                mtime: file.mtime,
+                sample_hash: h.clone(),
+            });
+            let already_applied =
+                plan_already_applied(db, file.id, &plan, &facts, current.as_ref());
+            if already_applied {
                 (Some("compliant"), false, true)
             } else if db.with(|c| db::has_live_job(c, file.id)).unwrap_or(true) {
                 // A live job (possibly from an older flow) already
@@ -659,7 +708,7 @@ pub fn run_job(state: &AppState, job: &db::JobRow, device: &Device) -> Result<()
         .and_then(|j| serde_json::from_str(j).ok())
         .unwrap_or_default();
 
-    let plan: FfmpegPlan = match serde_json::from_str(&job.plan_json) {
+    let mut plan: FfmpegPlan = match serde_json::from_str(&job.plan_json) {
         Ok(p) => p,
         Err(e) => {
             let _ = finish(
@@ -675,6 +724,20 @@ pub fn run_job(state: &AppState, job: &db::JobRow, device: &Device) -> Result<()
             return Err(e).with_context(|| format!("job {} plan", job.id));
         }
     };
+
+    // The in-file marker this job should write (DESIGN §6.6).
+    // Off via the global setting → DB-only (record only). On the
+    // MP4/MOV family the marker rides the comment slot, which we
+    // never clobber: a user comment in use (or missing facts, where
+    // the slot can't be assessed) keeps it DB-only.
+    let marker_off = !markers_enabled(db)
+        || (plan.container.eq_ignore_ascii_case("mp4")
+            || plan.container.eq_ignore_ascii_case("mov")
+            || plan.container.eq_ignore_ascii_case("m4v"))
+            && (input_facts.container.is_empty() || input_facts.comment.is_some());
+    if marker_off {
+        plan.marker = None;
+    }
 
     // Temp name unique per claim generation (job id + claim
     // timestamp). A re-claimed job — lease expiry with a dead worker,
@@ -906,6 +969,24 @@ pub fn run_job(state: &AppState, job: &db::JobRow, device: &Device) -> Result<()
         anyhow::bail!("output metadata mismatch (output quarantined)");
     }
 
+    // The marker must already be in the output (DESIGN §6.6): we
+    // check before the swap, so a missing or wrong marker fails the
+    // job as non_idempotent — a safety net, not the normal path.
+    if let Some(expected) = &plan.marker {
+        if out_facts.marker.as_deref() != Some(expected) {
+            let _ = finish(
+                db,
+                job,
+                "failed",
+                Some("non_idempotent"),
+                Some(&dst),
+                data_dir,
+                events,
+            );
+            anyhow::bail!("output is missing the expected processed marker (output quarantined)");
+        }
+    }
+
     // Decode integrity: the output must also decode cleanly (the
     // metadata gate alone can pass a structurally broken file).
     if !decode_file(ffmpeg, &dst).unwrap_or(false) {
@@ -1011,30 +1092,11 @@ pub fn run_job(state: &AppState, job: &db::JobRow, device: &Device) -> Result<()
         }
     }
 
-    // One-shot filter ledger (DESIGN §6.5): the file now contains this
-    // job's filters, so record what was applied with the new hash right
-    // here — before the idempotency gate — because a crash anywhere
-    // after the swap must not make a later run re-apply them. A failed
-    // hash read (0) is never recorded.
-    {
-        let graphs = serde_json::from_str::<FfmpegPlan>(&job.plan_json)
-            .ok()
-            .map(|p| p.filter_graphs())
-            .unwrap_or_default();
-        let new_hash = sample_hash(&final_path).unwrap_or(0);
-        if new_hash == 0 {
-            tracing::warn!(
-                "could not sample-hash {} for the filter ledger",
-                final_path.display()
-            );
-        } else {
-            let _ = db.with(|c| db::add_applied_filters(c, job.file_id, new_hash as i64, &graphs));
-        }
-    }
-
-    // Idempotency gate (DESIGN §13.6): re-evaluate the NEW file. If it
-    // still wants to change, the flow is not idempotent for this
-    // input — mark failed (non_idempotent), never loop.
+    // Applied-operations record (DESIGN §6.6): what was applied to
+    // the file's current bytes, with the fingerprint at tagging
+    // time. Written right here — before the idempotency gate —
+    // because a crash anywhere after the swap must not make a later
+    // run re-apply the operation. The same probe feeds the gate.
     let new_facts = match probe_to_facts(probe, &final_path, None) {
         Ok(f) => f,
         Err(e) => {
@@ -1051,6 +1113,60 @@ pub fn run_job(state: &AppState, job: &db::JobRow, device: &Device) -> Result<()
             return Err(e).context("probe new file");
         }
     };
+    let new_hash = sample_hash_file(&final_path);
+    if let Some(h) = &new_hash {
+        if let Ok(meta2) = final_path.metadata() {
+            let (dev2, ino2) = file_dev_ino(&final_path).unwrap_or((0, 0));
+            let mtime2 = meta2
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            let fp = FileFingerprint {
+                dev: dev2,
+                inode: ino2,
+                size: meta2.len() as i64,
+                mtime: mtime2,
+                sample_hash: h.clone(),
+            };
+            let rec = AppliedOps {
+                marker: plan.marker.clone(),
+                ops_json: plan.ops_json.clone().unwrap_or(serde_json::Value::Null),
+                file: fp.clone(),
+                job_id: Some(job.id.to_string()),
+                applied_at: Some(unix_now()),
+            };
+            let _ = db.with(|c| db::set_applied_ops(c, job.file_id, Some(&rec)));
+            // The row must describe the current bytes, or the
+            // record check at the next scan misfires (the record is
+            // keyed to this fingerprint).
+            let _ = db.with(|c| {
+                db::update_file_fingerprint(
+                    c,
+                    job.file_id,
+                    &final_path.to_string_lossy(),
+                    &fp,
+                    Some(&serde_json::to_string(&new_facts).unwrap_or_default()),
+                    Some(unix_now()),
+                )
+            });
+        } else {
+            tracing::warn!(
+                "could not stat {} for the applied-operations record",
+                final_path.display()
+            );
+        }
+    } else {
+        tracing::warn!(
+            "could not sample-hash {} for the applied-operations record",
+            final_path.display()
+        );
+    }
+
+    // Idempotency gate (DESIGN §13.6): re-evaluate the NEW file. If it
+    // still wants to change, the flow is not idempotent for this
+    // input — mark failed (non_idempotent), never loop.
     let lib = match db.with(|c| db::get_library(c, job.library_id)) {
         Ok(Some(l)) => l,
         Ok(None) => {
@@ -1106,8 +1222,9 @@ pub fn run_job(state: &AppState, job: &db::JobRow, device: &Device) -> Result<()
     match evaluate::evaluate(registry, &flow.with_filters_cleared(), &new_facts) {
         Ok(Evaluation::Identity) => {
             let _ = finish(db, job, "completed", None, None, data_dir, events);
-            // The filter ledger was already recorded at swap time, before
-            // this gate (a crash here must not un-record it).
+            // The applied-operations record was already recorded at
+            // swap time, before this gate (a crash here must not
+            // un-record it).
             let _ = db.with(|c| db::set_file_status(c, job.file_id, "completed"));
         }
         Ok(Evaluation::Plan(_)) => {

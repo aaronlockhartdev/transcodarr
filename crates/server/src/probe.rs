@@ -8,6 +8,7 @@ use std::path::Path;
 
 use serde_json::Value;
 use transcodarr_core::facts::{AudioTrack, FileFacts, Hdr, SubtitleTrack, VideoFacts};
+use transcodarr_core::hash;
 use transcodarr_core::registry::FactExtractor;
 
 /// The ffprobe-backed fact extractor (registered in `Registry::v1()`
@@ -141,6 +142,27 @@ pub fn map_facts(
         .and_then(|f| f.get("bit_rate"))
         .and_then(|v| v.as_str())
         .and_then(|s| s.parse::<u64>().ok());
+    // The in-file processed marker (DESIGN §6.6) is read from the
+    // format tags: the custom `transcodarr` key (MKV/WebM — the
+    // muxer uppercases it, so lookups are case-insensitive) or the
+    // `comment` slot (MP4/MOV). The value's grammar is the
+    // discriminator: a user comment that does not match is simply
+    // not a marker.
+    let tags = doc
+        .get("format")
+        .and_then(|f| f.get("tags"))
+        .and_then(Value::as_object);
+    let tag = |name: &str| -> Option<String> {
+        tags?
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .and_then(|(_, v)| v.as_str())
+            .map(str::to_string)
+    };
+    let marker = tag("transcodarr")
+        .or_else(|| tag("comment"))
+        .filter(|s| hash::parse_marker(s).is_some());
+    let comment = tag("comment");
 
     let mut video = None;
     let mut audio = Vec::new();
@@ -276,6 +298,8 @@ pub fn map_facts(
         size,
         duration_s,
         bitrate_bps,
+        marker,
+        comment,
     })
 }
 
@@ -411,5 +435,45 @@ mod tests {
         assert_eq!(facts.container, "avi");
         assert!(facts.video.is_none());
         assert!(facts.audio.is_empty());
+    }
+
+    const MARKER: &str = "transcodarr:t1:5d1f076e9dbe36e27792d0199ccb7969";
+
+    #[test]
+    fn custom_tag_marker_is_read_case_insensitively() {
+        // The MKV muxer uppercases the custom key; the reader must not
+        // care.
+        let d = doc(&format!(
+            r#"{{"format": {{"duration": "10", "tags": {{"TRANSCODARR": "{}"}}}}, "streams": []}}"#,
+            MARKER
+        ));
+        let facts = map_facts(Path::new("/x.mkv"), &d, None).unwrap();
+        assert_eq!(facts.marker.as_deref(), Some(MARKER));
+        assert_eq!(facts.comment, None);
+    }
+
+    #[test]
+    fn comment_slot_marker_on_mp4() {
+        // MP4 family: the marker rides the standard comment field.
+        let d = doc(&format!(
+            r#"{{"format": {{"duration": "10", "tags": {{"comment": "{}"}}}}, "streams": []}}"#,
+            MARKER
+        ));
+        let facts = map_facts(Path::new("/x.mp4"), &d, None).unwrap();
+        assert_eq!(facts.marker.as_deref(), Some(MARKER));
+        assert_eq!(facts.comment.as_deref(), Some(MARKER));
+    }
+
+    #[test]
+    fn user_comment_is_not_a_marker() {
+        // A comment that does not match the marker grammar stays
+        // user data: no marker, and the slot is reported as used (the
+        // MP4/MOV marker must not clobber it, §6.6).
+        let d = doc(
+            r#"{"format": {"duration": "10", "tags": {"comment": "a note about life"}}, "streams": []}"#,
+        );
+        let facts = map_facts(Path::new("/x.mp4"), &d, None).unwrap();
+        assert_eq!(facts.marker, None);
+        assert_eq!(facts.comment.as_deref(), Some("a note about life"));
     }
 }

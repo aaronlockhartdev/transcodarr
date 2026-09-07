@@ -186,7 +186,7 @@ pub struct AppliedOps {
     /// The job that wrote this record (audit only).
     #[serde(default)]
     pub job_id: Option<String>,
-    /// When the operation was applied, ISO-8601 (audit only).
+    /// When the operation was applied, unix seconds (audit only).
     #[serde(default)]
-    pub applied_at: Option<String>,
+    pub applied_at: Option<i64>,
 }

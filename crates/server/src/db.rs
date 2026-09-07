@@ -9,6 +9,7 @@ use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 use serde::{Deserialize, Serialize};
 
 use transcodarr_core::device::{Device, DeviceKind};
+use transcodarr_core::facts::{AppliedOps, FileFingerprint};
 
 /// The database file name inside the data dir.
 pub const DB_FILE: &str = "transcodarr.db";
@@ -64,14 +65,14 @@ fn init_schema(conn: &Connection) -> Result<()> {
             inode          INTEGER NOT NULL,
             size           INTEGER NOT NULL DEFAULT 0,
             mtime          INTEGER NOT NULL DEFAULT 0,
-            sample_hash    INTEGER,
+            sample_hash    TEXT,
             facts_json     TEXT,
             status         TEXT NOT NULL DEFAULT 'unscanned',
             last_probed    INTEGER,
             last_evaluated INTEGER,
             input_size     INTEGER,
             output_size    INTEGER,
-            applied_filters TEXT
+            applied_ops     TEXT
         );
 
         CREATE TABLE IF NOT EXISTS jobs (
@@ -111,7 +112,8 @@ fn init_schema(conn: &Connection) -> Result<()> {
     .context("init schema")?;
     migrate_flows(conn)?;
     migrate_job_logs(conn)?;
-    migrate_applied_filters(conn)?;
+    migrate_applied_ops(conn)?;
+    migrate_sample_hash(conn)?;
     Ok(())
 }
 
@@ -412,8 +414,8 @@ pub fn flow_json_for_library(conn: &Connection, lib: &LibraryRow) -> Result<Stri
 
 /// A file row as read from / written to SQLite.
 ///
-/// Sizes and the sample hash are stored as SQLite `INTEGER` (i64);
-/// the hash is used for equality only, so sign is irrelevant.
+/// Sizes and the mtime are stored as SQLite `INTEGER` (i64); the
+/// sample hash is the xxh3-128 hex string (DESIGN §4, §13.15).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FileRow {
     pub id: i64,
@@ -424,7 +426,7 @@ pub struct FileRow {
     pub size: i64,
     /// Unix mtime (seconds).
     pub mtime: i64,
-    pub sample_hash: Option<i64>,
+    pub sample_hash: Option<String>,
     /// Cached `FileFacts` JSON (the unit of evaluation).
     pub facts_json: Option<String>,
     /// `unscanned` | `scanning` | `compliant` | `queued` | `running` |
@@ -817,12 +819,14 @@ fn migrate_job_logs(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// One-shot migration for databases created before filter graphs
-/// were recorded (DESIGN §10): adds `files.applied_filters`.
-/// No backfill — an empty ledger simply means "no filter has been
-/// applied yet", which is also the fresh-database state.
-fn migrate_applied_filters(conn: &Connection) -> Result<()> {
-    let has_column: bool = conn
+/// One-shot migration for databases created before the
+/// applied-operations record (DESIGN §6.6): renames
+/// `files.applied_filters` to `files.applied_ops` and clears it. The
+/// old ledger shape (`{hash, graphs}` with an i64 FNV-1a hash) is
+/// incompatible with the record and can no longer be verified; a
+/// one-time reprocess of filtered files is the pre-v1.0 cost.
+fn migrate_applied_ops(conn: &Connection) -> Result<()> {
+    let has_old: bool = conn
         .query_row(
             "SELECT COUNT(*) FROM pragma_table_info('files') WHERE name = 'applied_filters'",
             [],
@@ -830,29 +834,71 @@ fn migrate_applied_filters(conn: &Connection) -> Result<()> {
         )
         .map(|n| n > 0)
         .context("inspect files schema")?;
-    if has_column {
+    if !has_old {
         return Ok(());
     }
-    conn.execute("ALTER TABLE files ADD COLUMN applied_filters TEXT", [])
-        .context("add files.applied_filters")?;
+    conn.execute(
+        "ALTER TABLE files RENAME COLUMN applied_filters TO applied_ops",
+        [],
+    )
+    .context("rename applied_filters to applied_ops")?;
+    conn.execute("UPDATE files SET applied_ops = NULL", [])
+        .context("clear old-shape applied_ops rows")?;
     Ok(())
 }
 
-/// The filter graphs a file's *current bytes* have already had
-/// applied (DESIGN §6.5): the sample hash the file had when the last
-/// filter pass completed, plus the graphs. `None` when no filter has
-/// ever been applied.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct AppliedFilters {
-    /// `files.sample_hash` at the moment the graphs were applied.
-    pub hash: i64,
-    pub graphs: Vec<String>,
+/// One-shot migration for databases created before the xxh3-128
+/// sample hash (DESIGN §4, §13.15): `files.sample_hash` changes from
+/// an i64 FNV-1a digest to the 32-character hex string. Rows are
+/// re-stamped from disk (the files are still on it); a row whose
+/// file can no longer be read is left NULL and the next scan
+/// recomputes it. `DROP COLUMN` needs SQLite ≥ 3.35 — the bundled
+/// version qualifies, and an older one fails loudly.
+fn migrate_sample_hash(conn: &Connection) -> Result<()> {
+    let col_type: Option<String> = conn
+        .query_row(
+            "SELECT r.type FROM pragma_table_info('files') r WHERE r.name = 'sample_hash'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if col_type.as_deref() != Some("INTEGER") {
+        return Ok(());
+    }
+    conn.execute("ALTER TABLE files ADD COLUMN sample_hash_x TEXT", [])
+        .context("add files.sample_hash_x")?;
+    let mut stmt = conn.prepare("SELECT id, path FROM files")?;
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    for (id, path) in rows {
+        if let Some(hash) = crate::jobs::sample_hash_file(std::path::Path::new(&path)) {
+            conn.execute(
+                "UPDATE files SET sample_hash_x = ?2 WHERE id = ?1",
+                params![id, hash],
+            )
+            .with_context(|| format!("re-stamp sample hash of {path}"))?;
+        }
+    }
+    conn.execute("ALTER TABLE files DROP COLUMN sample_hash", [])
+        .context("drop old files.sample_hash")?;
+    conn.execute(
+        "ALTER TABLE files RENAME COLUMN sample_hash_x TO sample_hash",
+        [],
+    )
+    .context("rename sample_hash_x to sample_hash")?;
+    Ok(())
 }
 
-pub fn get_applied_filters(conn: &Connection, file_id: i64) -> Result<Option<AppliedFilters>> {
+/// The per-file applied-operations record (DESIGN §6.6) from
+/// `files.applied_ops`: the full operation applied to the file's
+/// current bytes, plus the fingerprint of those bytes at tagging
+/// time. `None` when nothing has been applied (or the record was
+/// cleared because the bytes changed without a job).
+pub fn get_applied_ops(conn: &Connection, file_id: i64) -> Result<Option<AppliedOps>> {
     let json: Option<String> = conn
         .query_row(
-            "SELECT applied_filters FROM files WHERE id = ?1",
+            "SELECT applied_ops FROM files WHERE id = ?1",
             [file_id],
             |r| r.get(0),
         )
@@ -861,69 +907,63 @@ pub fn get_applied_filters(conn: &Connection, file_id: i64) -> Result<Option<App
     match json {
         Some(j) => serde_json::from_str(&j)
             .map(Some)
-            .context("parse applied_filters"),
+            .context("parse applied_ops"),
         None => Ok(None),
     }
 }
 
-/// Record that these filter graphs have been applied to a file whose
-/// bytes now carry sample hash `hash` (idempotent: existing graphs
-/// are kept, the newest hash wins).
-pub fn add_applied_filters(
-    conn: &Connection,
-    file_id: i64,
-    hash: i64,
-    graphs: &[String],
-) -> Result<()> {
-    if graphs.is_empty() {
-        return Ok(());
-    }
-    let mut entry = get_applied_filters(conn, file_id)?;
-    let entry = entry.get_or_insert_with(|| AppliedFilters {
-        hash,
-        graphs: Vec::new(),
-    });
-    entry.hash = hash;
-    for g in graphs {
-        if !entry.graphs.contains(g) {
-            entry.graphs.push(g.clone());
-        }
-    }
-    let json = serde_json::to_string(&entry).context("serialize applied_filters")?;
-    conn.execute(
-        "UPDATE files SET applied_filters = ?2 WHERE id = ?1",
-        params![file_id, json],
-    )
-    .context("record applied filters")?;
-    Ok(())
-}
-
-/// Replace (or clear) a file's applied-filter ledger. `None` clears
-/// it — used when the file's bytes changed without a filter job
-/// (the user replaced the file).
-pub fn set_applied_filters(
-    conn: &Connection,
-    file_id: i64,
-    entry: Option<&AppliedFilters>,
-) -> Result<()> {
+/// Write (or clear) a file's applied-operations record (DESIGN
+/// §6.6). `None` clears — used when the file's bytes changed without
+/// a job (the user replaced the file), and by the migration.
+pub fn set_applied_ops(conn: &Connection, file_id: i64, entry: Option<&AppliedOps>) -> Result<()> {
     match entry {
         None => {
             conn.execute(
-                "UPDATE files SET applied_filters = NULL WHERE id = ?1",
+                "UPDATE files SET applied_ops = NULL WHERE id = ?1",
                 [file_id],
             )
-            .context("clear applied filters")?;
+            .context("clear applied_ops")?;
         }
         Some(e) => {
-            let json = serde_json::to_string(e).context("serialize applied_filters")?;
+            let json = serde_json::to_string(e).context("serialize applied_ops")?;
             conn.execute(
-                "UPDATE files SET applied_filters = ?2 WHERE id = ?1",
+                "UPDATE files SET applied_ops = ?2 WHERE id = ?1",
                 params![file_id, json],
             )
-            .context("set applied filters")?;
+            .context("set applied_ops")?;
         }
     }
     Ok(())
+}
+
+/// Refresh a file row to the file's current bytes after a job's swap
+/// (DESIGN §3.1, §6.6): the row must describe what is on disk, or
+/// the record check at the next scan misfires (the record is keyed
+/// to the post-swap fingerprint). Scoped to (id, path) like
+/// `touch_file_eval`: a row that moved is skipped, not re-inserted.
+/// Returns the number of rows updated.
+pub fn update_file_fingerprint(
+    conn: &Connection,
+    id: i64,
+    path: &str,
+    fp: &FileFingerprint,
+    facts_json: Option<&str>,
+    last_probed: Option<i64>,
+) -> Result<usize> {
+    Ok(conn.execute(
+        "UPDATE files SET dev = ?3, inode = ?4, size = ?5, mtime = ?6,\n                sample_hash = ?7, facts_json = ?8, last_probed = ?9\n         WHERE id = ?1 AND path = ?2",
+        params![
+            id,
+            path,
+            fp.dev,
+            fp.inode,
+            fp.size,
+            fp.mtime,
+            fp.sample_hash,
+            facts_json,
+            last_probed
+        ],
+    )?)
 }
 
 pub fn set_job_log_path(conn: &Connection, id: i64, path: &str) -> Result<()> {
@@ -1404,21 +1444,30 @@ mod tests {
     }
 
     #[test]
-    fn applied_filters_round_trip_and_column_migration() {
-        // Fresh databases already carry the column.
+    fn applied_ops_round_trip_and_column_migration() {
+        // Fresh databases carry the record column and the xxh3-128
+        // (TEXT) sample hash.
         let (dir, conn) = temp_db("applied");
         let has: bool = conn
             .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('files') WHERE name = 'applied_filters'",
+                "SELECT COUNT(*) FROM pragma_table_info('files') WHERE name = 'applied_ops'",
                 [],
                 |r| r.get::<_, i64>(0),
             )
             .unwrap()
             > 0;
         assert!(has);
+        let hash_type: String = conn
+            .query_row(
+                "SELECT r.type FROM pragma_table_info('files') r WHERE r.name = 'sample_hash'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(hash_type, "TEXT");
 
-        // Round trip: add is idempotent, get returns the ledger, set
-        // replaces, and an empty set clears to NULL.
+        // Round trip: get on a fresh row is None; set stores the
+        // record; setting None clears it.
         let lid = insert_library(&conn, &lib_row()).unwrap();
         let fid = upsert_file(
             &conn,
@@ -1430,7 +1479,7 @@ mod tests {
                 inode: 2,
                 size: 3,
                 mtime: 4,
-                sample_hash: None,
+                sample_hash: Some("0123456789abcdef".into()),
                 facts_json: None,
                 status: "unscanned".into(),
                 last_probed: None,
@@ -1440,32 +1489,36 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(get_applied_filters(&conn, fid).unwrap(), None);
-        add_applied_filters(&conn, fid, 111, &["crop=1:1".into()]).unwrap();
-        add_applied_filters(&conn, fid, 222, &["volume=2".into(), "crop=1:1".into()]).unwrap();
-        let got = get_applied_filters(&conn, fid).unwrap().unwrap();
-        assert_eq!(got.hash, 222); // the newest application wins
-        assert_eq!(
-            got.graphs,
-            vec!["crop=1:1".to_string(), "volume=2".to_string()]
-        );
-        set_applied_filters(
-            &conn,
-            fid,
-            Some(&AppliedFilters {
-                hash: 333,
-                graphs: vec!["loudnorm=I=16".into()],
-            }),
-        )
-        .unwrap();
-        let got = get_applied_filters(&conn, fid).unwrap().unwrap();
-        assert_eq!(got.hash, 333);
-        assert_eq!(got.graphs, vec!["loudnorm=I=16".to_string()]);
-        set_applied_filters(&conn, fid, None).unwrap();
-        assert_eq!(get_applied_filters(&conn, fid).unwrap(), None);
+        assert_eq!(get_applied_ops(&conn, fid).unwrap(), None);
+        let rec = AppliedOps {
+            marker: Some("transcodarr:t1:0123456789abcdef0123456789abcdef".into()),
+            ops_json: serde_json::json!({"video": {"codec": "h264"}}),
+            file: FileFingerprint {
+                dev: 9,
+                inode: 8,
+                size: 7,
+                mtime: 6,
+                sample_hash: "deadbeef".into(),
+            },
+            job_id: Some("42".into()),
+            applied_at: Some(1_700_000_000),
+        };
+        set_applied_ops(&conn, fid, Some(&rec)).unwrap();
+        let got = get_applied_ops(&conn, fid).unwrap().unwrap();
+        assert_eq!(got.marker, rec.marker);
+        assert_eq!(got.ops_json, rec.ops_json);
+        assert_eq!(got.file, rec.file);
+        assert_eq!(got.job_id, rec.job_id);
+        assert_eq!(got.applied_at, rec.applied_at);
+        set_applied_ops(&conn, fid, None).unwrap();
+        assert_eq!(get_applied_ops(&conn, fid).unwrap(), None);
 
-        // A pre-ledger database (files table without the column) gains
-        // it on open, with no data expectations.
+        // A pre-record database (old-shape `applied_filters` ledger
+        // + i64 FNV sample hash) migrates on open: the column is
+        // renamed and cleared (the old shape can no longer be
+        // verified), and the hash column becomes TEXT — a row whose
+        // file can no longer be read (this path does not exist)
+        // re-stamps to NULL for the next scan to recompute.
         let dir2 = std::env::temp_dir().join(format!(
             "transcodarr-db-test-applied2-{}",
             std::process::id()
@@ -1489,13 +1542,29 @@ mod tests {
                     last_probed INTEGER,
                     last_evaluated INTEGER,
                     input_size INTEGER,
-                    output_size INTEGER);
-                INSERT INTO files (library_id, path, dev, inode) VALUES (1, '/m/b.mkv', 1, 2);",
+                    output_size INTEGER,
+                    applied_filters TEXT)",
+            )
+            .unwrap();
+            let ledger = serde_json::json!({"hash": 12345, "graphs": ["crop=1:1"]});
+            c.execute(
+                "INSERT INTO files (library_id, path, dev, inode, sample_hash, applied_filters)
+                 VALUES (1, '/m/b.mkv', 1, 2, 12345, ?1)",
+                [serde_json::to_string(&ledger).unwrap()],
             )
             .unwrap();
         }
         let c2 = open(&dir2).unwrap();
         let has2: bool = c2
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('files') WHERE name = 'applied_ops'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+            > 0;
+        assert!(has2);
+        let old_gone: bool = c2
             .query_row(
                 "SELECT COUNT(*) FROM pragma_table_info('files') WHERE name = 'applied_filters'",
                 [],
@@ -1503,14 +1572,34 @@ mod tests {
             )
             .unwrap()
             > 0;
-        assert!(has2);
-        // The pre-existing row reads as "no filters applied".
+        assert!(!old_gone);
+        let hash_type2: String = c2
+            .query_row(
+                "SELECT r.type FROM pragma_table_info('files') r WHERE r.name = 'sample_hash'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(hash_type2, "TEXT");
         let gid: i64 = c2
             .query_row("SELECT id FROM files WHERE path = '/m/b.mkv'", [], |r| {
                 r.get(0)
             })
             .unwrap();
-        assert_eq!(get_applied_filters(&c2, gid).unwrap(), None);
+        // The old-shape ledger was cleared; the unreadable file's
+        // hash re-stamped to NULL (the next scan recomputes it). The
+        // rest of the row is untouched.
+        assert_eq!(get_applied_ops(&c2, gid).unwrap(), None);
+        let (h, d, i): (Option<String>, i64, i64) = c2
+            .query_row(
+                "SELECT sample_hash, dev, inode FROM files WHERE id = ?1",
+                [gid],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(h, None);
+        assert_eq!(d, 1);
+        assert_eq!(i, 2);
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&dir2);
     }
