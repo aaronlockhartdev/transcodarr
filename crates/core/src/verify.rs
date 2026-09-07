@@ -21,7 +21,15 @@ fn duration_tolerance_s(source: f64) -> f64 {
 /// Verify `output` against the plan and the source `input` (DESIGN §3.3).
 ///
 /// Checks, in order:
-/// 1. **Container** matches the plan's resolved target.
+/// 1. **Container** matches the plan's resolved target. This check is
+///    structural rather than independent: the runner pins the muxer
+///    with `-f <container>`, and the temp file being probed carries
+///    no real extension (its container comes from a probe override),
+///    so by verification time the container is whatever we told the
+///    muxer to write. The independent container observation happens
+///    after the swap, when the promoted file — named by its true
+///    extension — is re-probed without any override (the runner's
+///    idempotency gate).
 /// 2. **Duration** is within the tolerance window of the source
 ///    (truncation is fine; a big delta means a broken encode).
 /// 3. **Stream inventory**: the audio and subtitle track counts match
