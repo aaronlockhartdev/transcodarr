@@ -129,7 +129,7 @@
 			</div>
 			{#each TABS as t (t.value)}
 				<Tabs.Content value={t.value} class="p-0">
-					<Table.Root>
+				<Table.Root class="[&>thead>tr>th:first-child]:pl-4 [&>tbody>tr>td:first-child]:pl-4">
 						<Table.Header>
 							<Table.Row>
 								<Table.Head>Job</Table.Head>

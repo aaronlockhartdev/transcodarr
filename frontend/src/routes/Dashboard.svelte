@@ -73,6 +73,20 @@
 		return days;
 	});
 
+	// Whole-number y-axis ticks: files/day are integers, and the default
+	// nice-ticks would print fractional labels like 0.5 on this scale.
+	function intTicks(scale: { domain(): (number | string)[] }): number[] {
+		const dom = scale.domain();
+		if (dom.length < 2) return [];
+		const a = Number(dom[0]);
+		const b = Number(dom[dom.length - 1]);
+		if (!Number.isFinite(a) || !Number.isFinite(b) || b <= a) return [];
+		const step = Math.max(1, Math.ceil((b - a) / 5));
+		const vals: number[] = [];
+		for (let v = Math.ceil(a / step) * step; v <= b; v += step) vals.push(v);
+		return vals;
+	}
+
 	const hasCompleted = $derived(store.jobs.some((j) => j.state === "completed" && j.ended != null));
 
 	const chartConfig = {
@@ -171,6 +185,12 @@
 				{:else}
 					{#snippet axis(props: { context: import("layerchart").ChartState; facet: import("layerchart").Facet })}
 						<Axis placement="bottom" ticks={6} />
+						<Axis
+							placement="left"
+							ticks={intTicks}
+							format="integer"
+							grid={{ class: "stroke-border/50" }}
+						/>
 					{/snippet}
 					<Chart.Container config={chartConfig} class="min-h-[220px] w-full">
 						<BarChart
