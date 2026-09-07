@@ -55,6 +55,10 @@ pub enum ContainerChoice {
     Smart,
     Mp4,
     Mkv,
+    /// WebM (VP9/AV1 video, Opus/Vorbis audio) — a web-delivery target.
+    Webm,
+    /// QuickTime MOV — the MP4 muxer family's sibling wrapper.
+    Mov,
 }
 
 /// Profile: `auto` (sensible default per codec + bit depth) or an
@@ -485,18 +489,20 @@ impl OperationSection for Video {
             "kind": "object",
             "label": "Video",
             "fields": {
-                "container": {
+                "container": { "order": 8,
                     "kind": "single_select",
                     "label": "Container",
                     "values": [
                         { "value": "smart", "label": "Auto (MP4 when safe, else MKV)" },
                         { "value": "mp4", "label": "MP4" },
-                        { "value": "mkv", "label": "MKV" }
+                        { "value": "mkv", "label": "MKV" },
+                        { "value": "webm", "label": "WebM" },
+                        { "value": "mov", "label": "MOV" }
                     ],
                     "default": "smart",
                     "hint": "Auto picks MP4 when the output is MP4-safe, otherwise MKV."
                 },
-                "codec": {
+                "codec": { "order": 0,
                     "kind": "single_select",
                     "label": "Video codec",
                     "values": [
@@ -506,26 +512,26 @@ impl OperationSection for Video {
                     "default": "h264",
                     "hint": "AV1 is not available yet."
                 },
-                "profile": { "kind": "text", "label": "Profile", "default": "auto", "hint": "Leave as auto for the codec default at the source bit depth." },
-                "level": { "kind": "text", "label": "Level", "default": "auto", "hint": "Leave as auto for the codec default at the target resolution." },
-                "bitrate": {
+                "profile": { "order": 1, "kind": "text", "label": "Profile", "default": "auto", "hint": "Leave as auto for the codec default at the source bit depth." },
+                "level": { "order": 2, "kind": "text", "label": "Level", "default": "auto", "hint": "Leave as auto for the codec default at the target resolution." },
+                "bitrate": { "order": 3,
                     "kind": "bitrate_mode", "label": "Bitrate", "values": [{ "value": "source_capped", "label": "Source-capped" }, { "value": "fixed", "label": "Fixed bitrate" }, { "value": "crf", "label": "CRF" }],
                     "default": "source_capped",
                     "hint": "Source-capped: at or below the source bitrate, scaled to the target resolution."
                 },
-                "device": {
+                "device": { "order": 4,
                     "kind": "device_select",
                     "label": "Device",
                     "default": "auto",
                     "hint": "Chosen from the encoders available on this machine."
                 },
-                "downscale_to": {
+                "downscale_to": { "order": 5,
                     "kind": "resolution",
                     "label": "Downscale to",
                     "hint": "Never upscales. Sources at or above the target keep their resolution."
                 },
-                "hdr_to_sdr": { "kind": "boolean", "label": "Convert HDR to SDR", "default": false, "hint": "Changes the look of the image. Only enabled when you ask." },
-                "video_filter": { "kind": "text", "label": "Video filter", "hint": "An ffmpeg -vf expression (e.g. crop=1920:800:0:0,denoise). Applied after everything else; one-shot — runs once per file." }
+                "hdr_to_sdr": { "order": 6, "kind": "boolean", "label": "Convert HDR to SDR", "default": false, "hint": "Changes the look of the image. Only enabled when you ask." },
+                "video_filter": { "order": 7, "kind": "text", "label": "Video filter", "hint": "An ffmpeg -vf expression (e.g. crop=1920:800:0:0,denoise). Applied after everything else; one-shot — runs once per file." }
             }
         })
     }

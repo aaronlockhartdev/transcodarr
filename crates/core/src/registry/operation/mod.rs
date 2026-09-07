@@ -15,8 +15,8 @@ pub fn v1_operation_sections() -> Vec<Box<dyn OperationSection>> {
     vec![
         Box::new(video::Video),
         Box::new(audio::Audio),
-        Box::new(container::Container),
         Box::new(subtitles::Subtitles),
+        Box::new(container::Container),
     ]
 }
 

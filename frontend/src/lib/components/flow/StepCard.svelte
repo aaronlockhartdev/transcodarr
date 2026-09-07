@@ -540,7 +540,7 @@ function resetFilterField(el: HTMLSelectElement, current: string) {
 					<p class="text-xs text-muted-foreground">Sections you leave off leave the file unchanged</p>
 				</div>
 				<div class="mt-3 flex flex-col gap-3">
-					{#each Object.entries(schema.operation_sections) as [name, sec] (name)}
+					{#each Object.entries(schema.operation_sections).sort((a, b) => (a[1].order ?? 99) - (b[1].order ?? 99)) as [name, sec] (name)}
 						{@const enabled = sectionEnabled(name)}
 						<div class="rounded-md border p-2.5">
 							<div class="flex flex-wrap items-center gap-2">
@@ -553,7 +553,7 @@ function resetFilterField(el: HTMLSelectElement, current: string) {
 							{#if enabled}
 								{#if sec.schema.kind === "object"}
 									<div class="mt-2 grid gap-3 md:grid-cols-2">
-										{#each Object.entries(sec.schema.fields) as [field, f] (field)}
+										{#each Object.entries(sec.schema.fields).sort((a, b) => ((a[1] as { order?: number }).order ?? 99) - ((b[1] as { order?: number }).order ?? 99)) as [field, f] (field)}
 											{#if name === "video" && field === "container"}
 												<!-- hidden: the standalone Container section is the one control -->
 											{:else if name === "audio" && field === "rules"}

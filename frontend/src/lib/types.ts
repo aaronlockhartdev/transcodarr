@@ -145,6 +145,7 @@ export type UiSchema =
 				string,
 				{
 					kind: string;
+					order?: number;
 					label?: string;
 					values?: SchemaOption[];
 					hint?: string;
@@ -157,7 +158,7 @@ export type UiSchema =
 export interface FlowSchema {
 	flow_version: number;
 	condition_fields: Record<string, SchemaField>;
-	operation_sections: Record<string, SchemaField>;
+	operation_sections: Record<string, SchemaField & { order?: number }>;
 	devices: Device[];
 }
 

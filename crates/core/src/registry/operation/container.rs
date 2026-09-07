@@ -34,6 +34,8 @@ pub fn resolve(
     match choice {
         ContainerChoice::Mp4 => "mp4",
         ContainerChoice::Mkv => "mkv",
+        ContainerChoice::Webm => "webm",
+        ContainerChoice::Mov => "mov",
         ContainerChoice::Smart => {
             // Video — judged by the planned (target) codec: an encode
             // to h264/hevc is MP4-safe even when the source codec isn't.
@@ -84,7 +86,7 @@ pub fn resolve(
 /// remux even on a stream-identical step; **smart** is only a
 /// resolution input and never forces a remux by itself (DESIGN §13.7).
 ///
-/// Flow JSON: `{ "container": { "choice": "smart" | "mp4" | "mkv" } }`
+/// Flow JSON: `{ "container": { "choice": "smart" | "mp4" | "mkv" | "webm" | "mov" } }`
 pub struct Container;
 
 /// The `container` section parameters.
@@ -109,7 +111,7 @@ impl OperationSection for Container {
     }
 
     fn description(&self) -> &'static str {
-        "Target container: smart (MP4 if safe, else MKV), mp4, or mkv"
+        "Target container: smart (MP4 if safe, else MKV), mp4, mkv, webm, or mov"
     }
 
     fn plan(&self, params: &Value, _facts: &FileFacts) -> crate::error::Result<SectionPlan> {
@@ -130,7 +132,9 @@ impl OperationSection for Container {
             "values": [
                 { "value": "smart", "label": "Auto (MP4 when safe, else MKV)" },
                 { "value": "mp4", "label": "MP4" },
-                { "value": "mkv", "label": "MKV" }
+                { "value": "mkv", "label": "MKV" },
+                { "value": "webm", "label": "WebM" },
+                { "value": "mov", "label": "MOV" }
             ],
             "default": "smart",
             "hint": "Forces this container. Auto only picks between MP4 and MKV."
@@ -263,5 +267,17 @@ mod tests {
         let f = facts("mp4", "h264", &["aac"], &["hdmv_pgs"]);
         assert_eq!(resolve(ContainerChoice::Mkv, &f, &None, &None), "mkv");
         assert_eq!(resolve(ContainerChoice::Mp4, &f, &None, &None), "mp4");
+    }
+
+    #[test]
+    fn explicit_choices_resolve_verbatim() {
+        let f = facts("mkv", "h264", &["aac"], &[]);
+        assert_eq!(resolve(ContainerChoice::Webm, &f, &None, &None), "webm");
+        assert_eq!(resolve(ContainerChoice::Mov, &f, &None, &None), "mov");
+        // webm/mov are explicit actions: they remux even a stream-identical file
+        assert_ne!(
+            resolve(ContainerChoice::Webm, &f, &None, &None),
+            f.container
+        );
     }
 }

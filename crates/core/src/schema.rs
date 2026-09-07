@@ -31,10 +31,13 @@ pub fn flow_schema(registry: &Registry, devices: &[Device]) -> Value {
     }
 
     let mut operation_sections = Map::new();
-    for section in registry.operation_sections() {
+    for (order, section) in registry.operation_sections().enumerate() {
+        // JSON object keys are emitted in alphabetical order, so the
+        // display order is carried explicitly for the editor.
         operation_sections.insert(
             section.key().to_string(),
             json!({
+                "order": order,
                 "description": section.description(),
                 "schema": section.ui_schema(),
             }),

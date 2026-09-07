@@ -176,7 +176,7 @@ ffmpeg -hwaccel cuda -i "In.Movie.2024.2160p.HEVC.mkv" \
 
 ### 6.4 Container section (`smart` is a resolution input; an explicit choice is an action)
 
-`smart` (default) / `mp4` / `mkv`. `smart` resolves per §13.7 (MP4 if every planned stream is MP4-safe, else MKV). An explicit `mp4`/`mkv` that differs from the source container turns an otherwise-stream-identical step into a **pure remux** (all streams copied, container changed) — this is how "remux all MKV to MP4" is expressed without enumerating source codecs. A stream-identical step with `smart` **never** remuxes on its own (otherwise enabling any video section would silently remux every MKV in the library). The editor exposes **this section only** as the container control; the `container` field inside the video section remains a parseable wire form for older flows (hidden in the editor, the top-level choice wins in resolution).
+`smart` (default) / `mp4` / `mkv` / `webm` / `mov`. `smart` resolves per §13.7 (MP4 if every planned stream is MP4-safe, else MKV). An explicit choice that differs from the source container turns an otherwise-stream-identical step into a **pure remux** (all streams copied, container changed) — this is how "remux all MKV to MP4" is expressed without enumerating source codecs. A stream-identical step with `smart` **never** remuxes on its own (otherwise enabling any video section would silently remux every MKV in the library). The editor exposes **this section only** as the container control; the `container` field inside the video section remains a parseable wire form for older flows (hidden in the editor, the top-level choice wins in resolution).
 
 ### 6.5 Filter graphs (user expressions; one-shot semantics)
 

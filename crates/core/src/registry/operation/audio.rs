@@ -286,23 +286,24 @@ impl OperationSection for Audio {
         default_policy["label"] = json!("Default policy");
         let mut action_policy = audio_policy_schema();
         action_policy["label"] = json!("Action");
-        json!({
-            "kind": "object",
-            "label": "Audio",
-            "fields": {
-                "default": default_policy,
-                "rules": {
-                    "kind": "list",
-                    "label": "Rules",
-                    "item": {
-                        "match": { "codecs": { "kind": "multi_select", "label": "Codecs", "values": crate::registry::condition::audio_codec::codec_value_pairs() }, "languages": { "kind": "multi_select", "label": "Languages" } },
-                        "action": action_policy
-                    },
-                    "hint": "The first matching rule wins. Re-encode applies to all matching tracks."
+        let mut fields = json!({
+            "default": default_policy,
+            "rules": {
+                "kind": "list",
+                "label": "Rules",
+                "item": {
+                    "match": { "codecs": { "kind": "multi_select", "label": "Codecs", "values": crate::registry::condition::audio_codec::codec_value_pairs() }, "languages": { "kind": "multi_select", "label": "Languages" } },
+                    "action": action_policy
                 },
-                "audio_filter": { "kind": "text", "label": "Audio filter", "hint": "An ffmpeg -af expression (e.g. volume=2,loudnorm). Applied to re-encoded tracks, after everything else; one-shot — runs once per file." }
-            }
-        })
+                "hint": "The first matching rule wins. Re-encode applies to all matching tracks."
+            },
+            "audio_filter": { "kind": "text", "label": "Audio filter", "hint": "An ffmpeg -af expression (e.g. volume=2,loudnorm). Applied to re-encoded tracks, after everything else; one-shot — runs once per file." }
+        });
+        // JSON maps sort alphabetically; carry the display order explicitly.
+        fields["default"]["order"] = json!(0);
+        fields["rules"]["order"] = json!(1);
+        fields["audio_filter"]["order"] = json!(2);
+        json!({ "kind": "object", "label": "Audio", "fields": fields })
     }
 }
 
