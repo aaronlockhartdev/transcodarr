@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::super::registry::operation::video::{ContainerChoice, VideoOp};
+use super::super::registry::operation::video::{ContainerSpec, VideoOp};
 
 /// A step's operation: the **complete** plan for a matched file
 /// (DESIGN §6).
@@ -16,14 +16,16 @@ use super::super::registry::operation::video::{ContainerChoice, VideoOp};
 /// `container` is special: it changes no stream, it changes the
 /// wrapper. It may be written as a top-level operation field
 /// (DESIGN §6.3) or nested inside the `video` section (the §6 worked
-/// example); top-level wins. Absent ⇒ `smart`.
+/// example); top-level wins. Absent ⇒ the default spec (MP4 with the
+/// MKV fallback on — the old `smart`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Operation {
-    /// Target container (DESIGN §6.3). Top-level form; a value nested in
-    /// the `video` section is also accepted (top-level wins).
-    /// Absent ⇒ `smart`.
+    /// Target container (DESIGN §6.3): explicit choice + MKV fallback.
+    /// Top-level form; a value nested in the `video` section is also
+    /// accepted (top-level wins). Absent ⇒ the default spec (the old
+    /// `smart`). Legacy string forms upgrade in place (§13.11).
     #[serde(default)]
-    pub container: Option<ContainerChoice>,
+    pub container: Option<ContainerSpec>,
     /// Per-section parameters, keyed by section key.
     #[serde(flatten)]
     pub sections: BTreeMap<String, Value>,
@@ -37,9 +39,10 @@ impl Operation {
     }
 
     /// The effective target container: top-level field, else the
-    /// `video` section's `container`, else `smart`.
+    /// `video` section's `container`, else the default spec (the old
+    /// `smart`).
     #[must_use]
-    pub fn container(&self) -> ContainerChoice {
+    pub fn container(&self) -> ContainerSpec {
         if let Some(c) = &self.container {
             return *c;
         }
@@ -49,21 +52,13 @@ impl Operation {
                 .and_then(|v| v.get("video"))
                 .and_then(|v| v.get("container"))
         });
-        match container {
-            Some(Value::String(s)) => match s.as_str() {
-                "smart" => ContainerChoice::Smart,
-                "mp4" => ContainerChoice::Mp4,
-                "mkv" => ContainerChoice::Mkv,
-                other => {
-                    // Unknown value: default to smart (a schema/UI
-                    // concern, not a flow error — the section itself
-                    // validates it when planning).
-                    let _ = other;
-                    ContainerChoice::Smart
-                }
-            },
-            _ => ContainerChoice::Smart,
-        }
+        // The spec's own deserializer upgrades legacy string forms
+        // ("smart", "mp4", …) in place; anything unparseable falls back
+        // to the default (a schema/UI concern, not a flow error — the
+        // section validates at planning).
+        container
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default()
     }
 
     /// The `video` section's operation (the only section with a typed

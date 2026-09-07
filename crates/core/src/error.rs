@@ -26,6 +26,14 @@ pub enum CoreError {
     /// A verification check found the output does not match the plan.
     #[error("verification failed: {0}")]
     Verification(String),
+
+    /// A planned stream cannot fit the explicitly chosen container and
+    /// the MKV fallback is disabled (DESIGN §6.4) — the file fails at
+    /// plan time, before any encode is attempted.
+    #[error(
+        "stream(s) do not fit container '{target}' and the MKV fallback is off — enable the fallback or choose a container that fits"
+    )]
+    ContainerIncompatible { target: &'static str },
 }
 
 /// Core result alias.

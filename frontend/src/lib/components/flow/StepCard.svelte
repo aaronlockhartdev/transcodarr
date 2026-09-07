@@ -243,19 +243,33 @@ function resetFilterField(el: HTMLSelectElement, current: string) {
 	// The Container section is the single container control. The video
 	// section also carries a container field in its schema (legacy wire
 	// form — old flows may only have the value there), so it is hidden
-	// from the UI. This shows the effective choice — top-level field,
-	// else the video-section value — and writes the top-level field,
-	// which wins in resolution.
-	const containerShown = $derived.by(() => {
+	// from the UI. This shows the effective target — top-level field,
+	// else the video-section value, both with legacy string forms
+	// upgraded in place — and writes the top-level field, which wins in
+	// resolution.
+	function upgradeContainer(v: unknown): { choice: string; fallback: boolean } {
+		if (typeof v === "string") {
+			if (v === "smart") return { choice: "mp4", fallback: true };
+			if (v === "mp4" || v === "mkv" || v === "webm" || v === "mov")
+				return { choice: v, fallback: false };
+			return { choice: "mp4", fallback: true };
+		}
+		if (v !== null && typeof v === "object") {
+			const o = v as { choice?: unknown; fallback?: unknown };
+			const choice =
+				typeof o.choice === "string" ? upgradeContainer(o.choice).choice : "mp4";
+			return { choice, fallback: o.fallback === undefined ? true : !!o.fallback };
+		}
+		return { choice: "mp4", fallback: true };
+	}
+	const containerSpec = $derived.by(() => {
 		const o = step.operation as unknown as Record<string, any>;
-		return (
-			(o["container"] as string | undefined) ??
-			(o["video"] as { container?: string } | undefined)?.container ??
-			"smart"
+		return upgradeContainer(
+			o["container"] ?? (o["video"] as { container?: unknown } | undefined)?.container,
 		);
 	});
-	function setContainerTop(v: string) {
-		step.operation = { ...(step.operation as Record<string, unknown>), container: v };
+	function setContainerSpec(spec: { choice: string; fallback: boolean }) {
+		step.operation = { ...(step.operation as Record<string, unknown>), container: spec };
 	}
 
 	// audio rules
@@ -649,15 +663,28 @@ function resetFilterField(el: HTMLSelectElement, current: string) {
 										{/each}
 									</div>
 								{:else if name === "container"}
-									<select
-										class="mt-2 h-8 w-56 rounded-lg border border-input bg-transparent px-2 text-sm"
-										value={containerShown}
-										onchange={(e) => setContainerTop((e.target as HTMLSelectElement).value)}
-									>
-										{#each ((sec.schema as { values?: { value: string; label: string }[] }).values ?? []) as v (v.value)}
-											<option value={v.value}>{v.label}</option>
-										{/each}
-									</select>
+									<div class="mt-2 flex flex-wrap items-center gap-x-4 gap-y-2">
+										<select
+											class="h-8 w-40 rounded-lg border border-input bg-transparent px-2 text-sm"
+											value={containerSpec.choice}
+											onchange={(e) =>
+												setContainerSpec({ ...containerSpec, choice: (e.target as HTMLSelectElement).value })}
+										>
+											{#each ((sec.schema as { fields?: { choice?: { values?: { value: string; label: string }[] } } }).fields?.choice?.values ?? []) as v (v.value)}
+												<option value={v.value}>{v.label}</option>
+											{/each}
+										</select>
+										<label class="flex cursor-pointer items-center gap-1.5 text-sm">
+											<input
+												type="checkbox"
+												class="size-4 accent-primary"
+												checked={containerSpec.fallback}
+												onchange={(e) =>
+													setContainerSpec({ ...containerSpec, fallback: (e.target as HTMLInputElement).checked })}
+											/>
+											Fall back to MKV
+										</label>
+									</div>
 								{:else}
 									<FlowField schema={sec.schema} bind:value={op[name]} devices={devices} class="mt-2 w-64" />
 								{/if}

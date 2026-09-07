@@ -20,7 +20,7 @@ use crate::error::CoreError;
 use crate::facts::FileFacts;
 use crate::flow::{Condition, Flow, Operation};
 use crate::plan::{FfmpegPlan, VideoPlan};
-use crate::registry::operation::video::ContainerChoice;
+use crate::registry::operation::video::ContainerSpec;
 use crate::registry::{Registry, SectionPlan};
 
 /// The flow schema version this build implements (DESIGN §2, §11).
@@ -94,11 +94,14 @@ fn matches_condition(
 /// Build the plan for a matched operation (DESIGN §6, §7).
 ///
 /// Every section is planned independently. The container: an **explicit**
-/// (non-smart) choice is an *action* — when it resolves to a different
-/// container than the source, even a stream-identical step remuxes to it
-/// (a pure remux step). **Smart** is only a resolution input: it picks
-/// the container when streams change, but never forces a remux by itself
-/// (a compliant file stays byte-identical, DESIGN §2, §13.7).
+/// choice that resolves to a different container than the source is an
+/// *action* — even a stream-identical step remuxes to it (a pure remux
+/// step). The **default spec** (MP4 with the MKV fallback on — the old
+/// `smart`) is only a resolution input: it picks the container when
+/// streams change, but never forces a remux by itself (a compliant file
+/// stays byte-identical, DESIGN §2, §6.4, §13.7). A non-default spec
+/// whose chosen container cannot hold the planned streams errors out at
+/// plan time when the fallback is off.
 fn plan_operation(
     registry: &Registry,
     operation: &Operation,
@@ -132,13 +135,15 @@ fn plan_operation(
         }
     }
 
-    // Container: an explicit choice acts even on a stream-identical step
-    // (a pure remux request); smart never acts on its own.
-    let choice = operation.container();
-    let container = if !stream_change && matches!(choice, ContainerChoice::Smart) {
+    // Container: an explicit (non-default) choice acts even on a
+    // stream-identical step (a pure remux request); the default spec
+    // (the old smart) never acts on its own. A container that cannot
+    // hold the planned streams errors here when the fallback is off.
+    let spec = operation.container();
+    let container = if !stream_change && spec == ContainerSpec::default() {
         facts.container.clone()
     } else {
-        crate::registry::operation::container::resolve(choice, facts, &video, &audio).to_string()
+        crate::registry::operation::container::resolve(&spec, facts, &video, &audio)?.to_string()
     };
     let remux = !facts.container.eq_ignore_ascii_case(&container);
 
@@ -280,6 +285,85 @@ mod tests {
             evaluate(&r, &f, &h264_1080p_facts()).unwrap(),
             Evaluation::Identity
         ));
+    }
+
+    #[test]
+    fn explicit_mp4_without_fallback_fails_on_unsafe_stream() {
+        // mp4 target, fallback off, DTS audio that no audio section
+        // re-encodes: the file fails at plan time, before any encode.
+        let r = registry();
+        let f = flow(vec![(
+            BTreeMap::new(),
+            json!({ "container": { "choice": "mp4", "fallback": false } }),
+        )]);
+        let facts = FileFacts {
+            container: "mkv".into(),
+            video: Some(VideoFacts {
+                codec: "h264".into(),
+                ..Default::default()
+            }),
+            audio: vec![AudioTrack {
+                codec: "dts".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let err = evaluate(&r, &f, &facts).unwrap_err();
+        assert!(matches!(
+            err,
+            crate::error::CoreError::ContainerIncompatible { target: "mp4" }
+        ));
+    }
+
+    #[test]
+    fn explicit_mkv_remuxes_identical_streams() {
+        // A non-default spec is an action: an mp4 file with fully
+        // compliant streams remuxes to MKV (all streams copied).
+        let r = registry();
+        let f = flow(vec![(
+            BTreeMap::new(),
+            json!({ "container": { "choice": "mkv", "fallback": false } }),
+        )]);
+        let e = evaluate(&r, &f, &h264_1080p_facts()).unwrap();
+        match &e {
+            Evaluation::Plan(plan) => {
+                assert_eq!(plan.container, "mkv");
+                assert!(plan.remux);
+                assert!(matches!(plan.video, Some(VideoPlan::Copy)));
+            }
+            other => panic!("expected a remux plan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn non_default_mp4_family_with_fallback_falls_back_to_mkv() {
+        // mov is a non-default spec, so it acts even on a stream-
+        // identical file; the DTS audio is not mov-safe and the
+        // fallback is on → the output is MKV.
+        let r = registry();
+        let f = flow(vec![(
+            BTreeMap::new(),
+            json!({ "container": { "choice": "mov", "fallback": true } }),
+        )]);
+        let facts = FileFacts {
+            container: "mp4".into(),
+            video: Some(VideoFacts {
+                codec: "h264".into(),
+                ..Default::default()
+            }),
+            audio: vec![AudioTrack {
+                codec: "dts".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        match &evaluate(&r, &f, &facts).unwrap() {
+            Evaluation::Plan(plan) => {
+                assert_eq!(plan.container, "mkv");
+                assert!(plan.remux);
+            }
+            other => panic!("expected a remux plan, got {other:?}"),
+        }
     }
 
     #[test]

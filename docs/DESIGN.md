@@ -86,7 +86,7 @@ Notes:
 - A newly detected file flows through: probe → facts cached → flow evaluated → **auto-queued if needs-work**. Auto-queue is a per-library toggle, **default ON** — unattended compliance is the product promise. The first scan of a big library creates a large backlog; the scheduler's caps (§7) pace it.
 - **Flow edits re-evaluate instantly**: facts are cached, so editing a flow re-runs `evaluate()` over cached facts (milliseconds, no re-probe) and updates every file's status — this powers the impact preview (§9.3).
 
-**Change detection / probe cache.** A file's facts are re-probed only when any of (path, mtime, size, sample hash) changes. The sample hash is **SHA-256 over first 1 MB + middle 1 MB + last 1 MB** of the file — catches mid-file edits and tail appends; 3 MB of sequential reads is well under a second even on slow storage, so it can run on every scan pass. A changed hash clears prior verdicts; an in-flight job is aborted and re-queued (§3.3).
+**Change detection / probe cache.** A file's facts are re-probed only when any of (path, dev, inode, mtime, size) changes. The stored **sample hash** — FNV-1a 64-bit over the first 8 KB and last 8 KB of the file (recomputed whenever the row changes, so a changed hash clears the applied-filter ledger, §6.5) — is a secondary change signal for byte-level edits; it is not the file's identity (that is path + dev/inode + size + mtime).
 
 ---
 
@@ -174,9 +174,15 @@ ffmpeg -hwaccel cuda -i "In.Movie.2024.2160p.HEVC.mkv" \
 
 `keep all` (default) / `keep forced-only` / `drop`. Copy only; **no burn-in in v1** (parked).
 
-### 6.4 Container section (`smart` is a resolution input; an explicit choice is an action)
+### 6.4 Container section (an explicit choice, with an optional MKV fallback)
 
-`smart` (default) / `mp4` / `mkv` / `webm` / `mov`. `smart` resolves per §13.7 (MP4 if every planned stream is MP4-safe, else MKV). An explicit choice that differs from the source container turns an otherwise-stream-identical step into a **pure remux** (all streams copied, container changed) — this is how "remux all MKV to MP4" is expressed without enumerating source codecs. A stream-identical step with `smart` **never** remuxes on its own (otherwise enabling any video section would silently remux every MKV in the library). The editor exposes **this section only** as the container control; the `container` field inside the video section remains a parseable wire form for older flows (hidden in the editor, the top-level choice wins in resolution).
+The control is a **choice** (`mp4` / `mkv` / `webm` / `mov`) plus a **fall back to MKV** flag (on by default). Resolution happens per operation and judges the *planned* streams (an encoded video counts by its **target** codec; a re-encoded audio track by its target codec; dropped tracks are skipped):
+
+- `mp4` / `mov` (the MP4 family — the one with a known stream matrix: video h264/hevc, audio eac3/ac3/aac, text-based subtitles): if every planned stream fits, the chosen container is used; otherwise **MKV when the fallback is on, a plan-time failure when it is off** (the file fails with a clear reason before anything is encoded).
+- `mkv`: verbatim — the superset container.
+- `webm`: verbatim — there is no plan-time matrix for it, so an incompatible stream fails at encode time with ffmpeg's own error (visible in the job log).
+
+A choice that resolves to a container different from the source's turns an otherwise-stream-identical step into a **pure remux** (all streams copied, container changed) — this is how "remux all MKV to MP4" is expressed without enumerating source codecs. The **default** (MP4 with the fallback on — the old `smart`) **never** remuxes on its own: a stream-identical file keeps its container, whatever it is (otherwise enabling any video section would silently remux every MKV in the library). The editor exposes **this section only** as the container control; the `container` field inside the video section remains a parseable wire form for older flows (hidden in the editor, the top-level choice wins in resolution). Wire form: the top-level `container` field is `{ "choice": …, "fallback": … }`; legacy string forms (including `"smart"`) upgrade in place at parse time (§13.11).
 
 ### 6.5 Filter graphs (user expressions; one-shot semantics)
 
@@ -294,11 +300,11 @@ Made during the design session; each is a deliberate default, not a constraint:
 4. **Auto-queue ON** for newly detected files (the unattended-compliance promise); per-library kill switch.
 5. No built-in auth in v1 (reverse-proxy pattern).
 6. Single-pass encoding in v1.
-7. Target container smart-default MP4-if-safe-else-MKV, overridable per operation.
+7. Target container defaults to **MP4 with the MKV fallback on** (the old smart: MP4 if safe, else MKV). Any explicit choice **without** the fallback fails at plan time if a stream doesn't fit (§6.4).
 8. Docker image = canonical artifact; bare binary detects system ffmpeg.
 9. In-place renames adopt the true extension (orphaning \*arr records until re-scan; automation parked).
 10. **Svelte 5 + Tailwind CSS + shadcn-svelte** for the SPA (copy-in-source; Melt UI underneath). The styling layer is swappable — the schema-driven editor (§5) does not depend on it.
-11. **Legacy wire forms are accepted at parse time and upgraded in place** (no flow-migration endpoint in v1): a device object without `kind` (`{"id": "…"}`) ⇒ GPU; `profile`/`level: null` ⇒ auto; the audio policy string `"re-encode"` ⇒ re-encode to the default target, source rate/channels kept.
+11. **Legacy wire forms are accepted at parse time and upgraded in place** (no flow-migration endpoint in v1): a device object without `kind` (`{"id": "…"}`) ⇒ GPU; `profile`/`level: null` ⇒ auto; the audio policy string `"re-encode"` ⇒ re-encode to the default target, source rate/channels kept; the container string `"smart"` ⇒ MP4 with the fallback on, and `"mp4"`/`"mkv"`/`"webm"`/`"mov"` ⇒ that container **without** the fallback.
 12. **Live updates ride one SSE stream per client, not WebSockets** (§9.0) — the event flow is strictly one-way (client actions are ordinary POSTs); SSE is proxy-friendly, auto-reconnects, and resumes logs via `Last-Event-ID`.
 13. **Flows are first-class, library-independent objects** (a `flows` table; `libraries.flow_id` is nullable). Editing a flow re-evaluates every library that references it; deleting a flow unassigns its libraries (files settle to unmatched) rather than cascading.
 14. **Filter graphs are one-shot, not target-state** (§6.5): they run once per file and are recorded per file (`files.applied_filters`), so a file is re-queued only when the flow's graphs change or the file's bytes change. Editing a filter's parameters is a new graph → one more pass.

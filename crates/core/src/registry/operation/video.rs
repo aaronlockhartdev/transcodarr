@@ -20,7 +20,7 @@ pub use crate::plan::VideoTargetCodec as VideoCodec;
 /// Flow JSON:
 /// ```json
 /// { "video": {
-///   "container": "smart",
+///   "container": { "choice": "mp4", "fallback": true },
 ///   "codec": "h264",
 ///   "profile": "auto",
 ///   "level": "auto",
@@ -50,15 +50,126 @@ pub fn source_capped_ceiling(codec: VideoCodec, target_pixels: u64) -> u64 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContainerChoice {
-    /// MP4 if every planned stream is MP4-safe, else MKV (DESIGN §13.7).
+    /// MP4 — the streaming target; the MP4-safety check applies to it
+    /// (and to `mov`, its muxer sibling) (DESIGN §6.4).
     #[default]
-    Smart,
     Mp4,
     Mkv,
     /// WebM (VP9/AV1 video, Opus/Vorbis audio) — a web-delivery target.
     Webm,
     /// QuickTime MOV — the MP4 muxer family's sibling wrapper.
     Mov,
+}
+
+/// The container target: an explicit choice plus whether to fall back
+/// to MKV when a planned stream cannot fit the chosen container
+/// (DESIGN §6.4).
+///
+/// Serializes as `{ "choice": …, "fallback": … }`. Deserializes the
+/// **legacy string forms** in place (§13.11): `"smart"` becomes the
+/// default `{ "choice": "mp4", "fallback": true }` (the old smart
+/// behaviour: MP4 if safe, else MKV); `"mp4"`/`"mkv"`/`"webm"`/`"mov"`
+/// become that container **without** fallback; anything else becomes
+/// the default (lenient, as the old unknown-value handling was).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ContainerSpec {
+    pub choice: ContainerChoice,
+    /// Use MKV instead when a planned stream cannot fit `choice`
+    /// (MP4/MOV only — the containers with a known stream matrix).
+    pub fallback: bool,
+}
+
+impl Default for ContainerSpec {
+    fn default() -> Self {
+        Self {
+            choice: ContainerChoice::default(),
+            fallback: true,
+        }
+    }
+}
+
+/// Wire shape of [`ContainerSpec`]: strict about the object form
+/// (unknown fields rejected, `choice` validated against the enum).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ContainerSpecWire {
+    #[serde(default)]
+    choice: ContainerChoice,
+    /// Absent ⇒ true (the default keeps the old smart behaviour).
+    #[serde(default = "default_true")]
+    fallback: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl From<ContainerSpecWire> for ContainerSpec {
+    fn from(w: ContainerSpecWire) -> Self {
+        Self {
+            choice: w.choice,
+            fallback: w.fallback,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ContainerSpec {
+    fn deserialize<D>(d: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let v = Value::deserialize(d)?;
+        match v {
+            Value::String(s) => Ok(from_legacy(&s)),
+            Value::Object(_) => Ok(serde_json::from_value::<ContainerSpecWire>(v)
+                .map_err(de::Error::custom)?
+                .into()),
+            other => {
+                let exp = match &other {
+                    Value::Null => serde::de::Unexpected::Unit,
+                    Value::Number(n) => n
+                        .as_u64()
+                        .map(serde::de::Unexpected::Unsigned)
+                        .or_else(|| n.as_f64().map(serde::de::Unexpected::Float))
+                        .unwrap_or(serde::de::Unexpected::Map),
+                    Value::Array(_) => serde::de::Unexpected::Seq,
+                    _ => serde::de::Unexpected::Map,
+                };
+                Err(de::Error::invalid_type(
+                    exp,
+                    &"a string (\"smart\"|\"mp4\"|\"mkv\"|\"webm\"|\"mov\") or an object",
+                ))
+            }
+        }
+    }
+}
+
+/// Legacy-string upgrade (§13.11) — see [`ContainerSpec`].
+#[must_use]
+pub fn from_legacy(s: &str) -> ContainerSpec {
+    match s {
+        "smart" => ContainerSpec::default(),
+        "mp4" => ContainerSpec {
+            choice: ContainerChoice::Mp4,
+            fallback: false,
+        },
+        "mkv" => ContainerSpec {
+            choice: ContainerChoice::Mkv,
+            fallback: false,
+        },
+        "webm" => ContainerSpec {
+            choice: ContainerChoice::Webm,
+            fallback: false,
+        },
+        "mov" => ContainerSpec {
+            choice: ContainerChoice::Mov,
+            fallback: false,
+        },
+        // Unknown value: the old code defaulted unknown strings to
+        // smart — keep that tolerance (the section's own validation
+        // still rejects unknown values at flow save).
+        _ => ContainerSpec::default(),
+    }
 }
 
 /// Profile: `auto` (sensible default per codec + bit depth) or an
@@ -213,8 +324,12 @@ impl<'de> Deserialize<'de> for DeviceChoice {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VideoOp {
+    /// Target container: explicit choice + MKV fallback (DESIGN §6.4).
+    /// The editor writes the top-level operation field; this nested
+    /// field is a parseable wire form for older flows (top-level wins).
+    /// Default `{ "choice": "mp4", "fallback": true }` = the old smart.
     #[serde(default)]
-    pub container: ContainerChoice,
+    pub container: ContainerSpec,
     pub codec: VideoCodec,
     #[serde(default)]
     pub profile: ProfileSpec,
@@ -490,17 +605,20 @@ impl OperationSection for Video {
             "label": "Video",
             "fields": {
                 "container": { "order": 8,
-                    "kind": "single_select",
+                    "kind": "object",
                     "label": "Container",
-                    "values": [
-                        { "value": "smart", "label": "Auto (MP4 when safe, else MKV)" },
-                        { "value": "mp4", "label": "MP4" },
-                        { "value": "mkv", "label": "MKV" },
-                        { "value": "webm", "label": "WebM" },
-                        { "value": "mov", "label": "MOV" }
-                    ],
-                    "default": "smart",
-                    "hint": "Auto picks MP4 when the output is MP4-safe, otherwise MKV."
+                    "fields": {
+                        "choice": { "kind": "single_select", "label": "Container",
+                            "values": [
+                                { "value": "mp4", "label": "MP4" },
+                                { "value": "mkv", "label": "MKV" },
+                                { "value": "webm", "label": "WebM" },
+                                { "value": "mov", "label": "MOV" }
+                            ],
+                            "default": "mp4" },
+                        "fallback": { "kind": "boolean", "label": "Fall back to MKV", "default": true }
+                    },
+                    "hint": "Same control as the Container section; the top-level choice wins."
                 },
                 "codec": { "order": 0,
                     "kind": "single_select",
