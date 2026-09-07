@@ -191,6 +191,8 @@ mod tests {
             }),
             subtitles: None,
             remux: true,
+            ops_json: None,
+            marker: None,
         }
     }
 

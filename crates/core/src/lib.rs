@@ -13,6 +13,7 @@ pub mod error;
 pub mod evaluate;
 pub mod facts;
 pub mod flow;
+pub mod hash;
 pub mod plan;
 pub mod registry;
 pub mod schema;

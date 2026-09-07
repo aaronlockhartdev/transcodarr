@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_json::Value;
 
 use crate::device::{Device, hwaccel_for};
 
@@ -305,6 +306,20 @@ pub struct FfmpegPlan {
     /// True when the only change is the container (a remux).
     #[serde(default)]
     pub remux: bool,
+    /// The matched step's authored operation as written in the flow
+    /// (§6.6): the fingerprint input for the marker and the audit
+    /// copy in the applied-operations record. Absent for plans built
+    /// before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ops_json: Option<Value>,
+    /// The processed marker to embed in the output (§6.6):
+    /// `transcodarr:t<ver>:<32-hex fingerprint>` of the authored
+    /// operation, or `None` when the output cannot carry a marker
+    /// (the source MP4/MOV's comment slot is in use) or the marker
+    /// feature is disabled — such files are tagged in the database
+    /// only.
+    #[serde(default)]
+    pub marker: Option<String>,
 }
 
 impl FfmpegPlan {
@@ -527,6 +542,22 @@ pub fn to_argv(plan: &FfmpegPlan, device: &Device, src: &Path, dst: &Path) -> Ve
         a.push("-movflags".into());
         a.push("+faststart".into());
     }
+    // The processed marker (§6.6). MKV/WebM carry a custom global
+    // tag; the MP4 family has no custom-tag carrier, so the marker
+    // rides the comment slot (only ever written when the source
+    // leaves it empty — the planner knows; a re-tag overwrites an
+    // older marker, never user data).
+    if let Some(marker) = &plan.marker {
+        let key = if plan.container.eq_ignore_ascii_case("mkv")
+            || plan.container.eq_ignore_ascii_case("webm")
+        {
+            "transcodarr"
+        } else {
+            "comment"
+        };
+        a.push("-metadata".into());
+        a.push(format!("{key}={marker}"));
+    }
     // The temp output's extension is not a container name, so the
     // muxer must be stated explicitly. FFmpeg registers the Matroska
     // muxer under the name "matroska" — "mkv" is only its file
@@ -591,6 +622,8 @@ mod tests {
                 }],
             }),
             remux: true,
+            ops_json: None,
+            marker: None,
         }
     }
 
@@ -689,5 +722,40 @@ mod tests {
         let s = argv.join(" ");
         assert!(!s.contains("-c:v"), "no video stream, no -c:v: {s}");
         assert!(!s.contains("-hwaccel"), "{s}");
+    }
+
+    #[test]
+    fn marker_rides_the_custom_tag_on_mkv() {
+        let m = crate::hash::marker_string("0123456789abcdef0123456789abcdef");
+        let mut p = plan();
+        p.container = "mkv".into();
+        p.marker = Some(m.clone());
+        let argv = to_argv(&p, &cpu(), Path::new("/in.mp4"), Path::new("/out.mkv"));
+        let s = argv.join(" ");
+        assert!(s.contains(&format!("-metadata transcodarr={m}")), "{s}");
+        assert!(!s.contains("comment="), "{s}");
+    }
+
+    #[test]
+    fn marker_rides_the_comment_slot_on_mp4_and_mov() {
+        let m = crate::hash::marker_string("0123456789abcdef0123456789abcdef");
+        let mut p = plan();
+        p.container = "mp4".into();
+        p.marker = Some(m.clone());
+        let argv = to_argv(&p, &cpu(), Path::new("/in.mkv"), Path::new("/out.mp4"));
+        let s = argv.join(" ");
+        assert!(s.contains(&format!("-metadata comment={m}")), "{s}");
+        assert!(!s.contains("transcodarr="), "{s}");
+
+        p.container = "mov".into();
+        let argv = to_argv(&p, &cpu(), Path::new("/in.mkv"), Path::new("/out.mov"));
+        let s = argv.join(" ");
+        assert!(s.contains(&format!("-metadata comment={m}")), "{s}");
+    }
+
+    #[test]
+    fn no_marker_emits_no_metadata() {
+        let argv = to_argv(&plan(), &cpu(), Path::new("/in.mkv"), Path::new("/out.mp4"));
+        assert!(!argv.iter().any(|a| a == "-metadata"), "{argv:?}");
     }
 }

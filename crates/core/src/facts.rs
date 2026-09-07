@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// HDR metadata detected on a video stream.
 ///
@@ -113,6 +114,15 @@ pub struct FileFacts {
     /// Overall file bitrate in bits/s, if known.
     #[serde(default)]
     pub bitrate_bps: Option<u64>,
+    /// The in-file processed marker carried in a format tag (§6.6):
+    /// `transcodarr:t<ver>:<32-hex>`, or the comment slot's contents on
+    /// MP4/MOV. `None` when the file carries no marker.
+    #[serde(default)]
+    pub marker: Option<String>,
+    /// The format-level `comment` tag, if the source carries one (MP4/MOV
+    /// slot-usage check for the marker, §6.6).
+    #[serde(default)]
+    pub comment: Option<String>,
 }
 
 impl FileFacts {
@@ -130,4 +140,53 @@ impl FileFacts {
             .and_then(|v| v.bitrate_bps)
             .or(self.bitrate_bps)
     }
+}
+
+/// The identity and content fingerprint of one file at one moment in
+/// time (DESIGN §4, §6.6).
+///
+/// dev+inode+size+mtime is the primary change signal (a new file on a
+/// new volume, a hardlink re-point, a replacement file all move at
+/// least one of these); `sample_hash` (xxh3-128 over the three
+/// 256 KB windows, §4) is the secondary signal that catches
+/// same-size in-place rewrites of the sampled regions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileFingerprint {
+    pub dev: i64,
+    pub inode: i64,
+    /// Size in bytes.
+    pub size: i64,
+    /// Unix mtime (seconds).
+    pub mtime: i64,
+    /// xxh3-128 hex over the sampled windows (§4, §13.15).
+    pub sample_hash: String,
+}
+
+/// The per-file **applied-operations record** — the `files.applied_ops`
+/// JSON (DESIGN §6.6): the full applied operation plus the file
+/// fingerprint at the moment of tagging.
+///
+/// In-place, this record and the in-file marker are redundant memories
+/// of the same fact: the marker survives a lost database, the record
+/// survives a metadata-stripping tool. `marker` is `None` when the
+/// marker stayed DB-only (disabled, or the MP4/MOV comment slot was in
+/// use) or for records written before markers existed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AppliedOps {
+    /// The in-file marker written with this operation (`None` =
+    /// DB-only, see the type doc).
+    #[serde(default)]
+    pub marker: Option<String>,
+    /// The matched step's authored operation as written in the flow
+    /// (the fingerprint input, §6.6).
+    #[serde(default)]
+    pub ops_json: Value,
+    /// The file's fingerprint at the moment the operation was applied.
+    pub file: FileFingerprint,
+    /// The job that wrote this record (audit only).
+    #[serde(default)]
+    pub job_id: Option<String>,
+    /// When the operation was applied, ISO-8601 (audit only).
+    #[serde(default)]
+    pub applied_at: Option<String>,
 }

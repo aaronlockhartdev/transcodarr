@@ -16,9 +16,12 @@
 //! touches the filesystem or a probe (facts are cached inputs), which is
 //! what makes re-evaluation after a flow edit cheap and testable.
 
+use serde_json::Value;
+
 use crate::error::CoreError;
-use crate::facts::FileFacts;
+use crate::facts::{AppliedOps, FileFacts, FileFingerprint};
 use crate::flow::{Condition, Flow, Operation};
+use crate::hash;
 use crate::plan::{FfmpegPlan, VideoPlan};
 use crate::registry::operation::video::ContainerSpec;
 use crate::registry::{Registry, SectionPlan};
@@ -150,13 +153,47 @@ fn plan_operation(
     // An audio plan that only copies is the same as no audio plan.
     let audio = audio.filter(|a| a.changes_anything());
 
+    // The authored operation (the flow's own JSON for this step) is
+    // the single input to the marker's fingerprint (§6.6): a pure
+    // function of what the user wrote — unrelated flow edits or a
+    // newly detected GPU never invalidate it.
+    let ops_json = serde_json::to_value(operation).unwrap_or(Value::Null);
+    let marker = hash::marker_string(&hash::fingerprint(&ops_json));
+
     Ok(FfmpegPlan {
         container,
         video,
         audio,
         subtitles,
         remux,
+        ops_json: Some(ops_json),
+        marker: Some(marker),
     })
+}
+
+/// The in-file marker (§6.6) a completed run of `op` should write
+/// into its output: `transcodarr:t<ver>:` + xxh3-128 over the
+/// canonical JSON of the authored operation.
+#[must_use]
+pub fn marker_for(op: &Operation) -> Option<String> {
+    let v = serde_json::to_value(op).ok()?;
+    Some(hash::marker_string(&hash::fingerprint(&v)))
+}
+
+/// Whether an applied-operations record (§6.6) proves `current_op` was
+/// already applied to the file's *current* bytes: the record's file
+/// fingerprint equals the current one, and the recorded operation's
+/// fingerprint equals the current operation's. A flow edit that
+/// changes the applied operation changes the fingerprint and reopens
+/// the file; any change to the file's bytes clears the record at scan
+/// time, so the fingerprint comparison alone is the verdict.
+#[must_use]
+pub fn record_proves_applied(
+    record: &AppliedOps,
+    current_op: &Value,
+    current: &FileFingerprint,
+) -> bool {
+    record.file == *current && hash::fingerprint(&record.ops_json) == hash::fingerprint(current_op)
 }
 
 #[cfg(test)]
@@ -572,5 +609,107 @@ mod tests {
         // No video in the input ⇒ no video in the plan (to_argv must
         // not emit a video -map for it).
         assert!(p.video.is_none(), "{p:?}");
+    }
+
+    #[test]
+    fn plans_carry_ops_json_and_marker() {
+        let r = registry();
+        let op_json = json!({ "video": { "codec": "h264", "video_filter": "crop=1920:800:0:0" } });
+        let f = flow(vec![(BTreeMap::new(), op_json.clone())]);
+        let e = evaluate(&r, &f, &h264_1080p_facts()).unwrap();
+        let Evaluation::Plan(p) = &e else {
+            panic!("expected plan: {e:?}");
+        };
+        // The plan carries the authored operation (its re-serialization
+        // is the fingerprint input) and the derived marker.
+        let op: Operation = serde_json::from_value(op_json).unwrap();
+        assert_eq!(
+            p.ops_json.as_ref(),
+            Some(&serde_json::to_value(&op).unwrap())
+        );
+        assert_eq!(p.marker.as_deref(), marker_for(&op).as_deref());
+        // The marker grammar parses back (the reader's discriminator).
+        assert!(hash::parse_marker(p.marker.as_deref().unwrap()).is_some());
+    }
+
+    /// CI fixture pin (DESIGN §13.15): one authored operation JSON maps
+    /// to exactly this marker string end-to-end. Any change to the
+    /// canonicalization (key order, escaping, number format), the
+    /// fingerprint, or the marker grammar changes the constant and
+    /// fails the build — instead of silently invalidating every
+    /// in-file marker across a release upgrade.
+    #[test]
+    fn marker_is_pinned_end_to_end() {
+        const FIXTURE: &str = r#"{"video":{"video_filter":"crop=1920:800:0:0"}}"#;
+        const PINNED: &str = "transcodarr:t1:5d1f076e9dbe36e27792d0199ccb7969";
+        let op: Operation = serde_json::from_str(FIXTURE).unwrap();
+        assert_eq!(marker_for(&op).as_deref(), Some(PINNED));
+        // The pin covers the whole chain: the exact canonical bytes of
+        // the operation (independent of how the user wrote it) and the
+        // digest over them (cross-checked against the xxhsum 0.8.3
+        // reference: xxh3-128 of the canonical string is 5d1f…69).
+        let canon = hash::canonical_json(&serde_json::to_value(&op).unwrap());
+        assert_eq!(
+            canon,
+            r#"{"container":null,"video":{"video_filter":"crop=1920:800:0:0"}}"#
+        );
+        // And the pinned value is a well-formed marker whose fingerprint
+        // is the digest of exactly those bytes.
+        assert_eq!(
+            hash::parse_marker(PINNED).map(str::to_string),
+            Some(hash::xxh3_128_hex(canon.as_bytes()))
+        );
+    }
+
+    fn fingerprint(dev: i64, hash: &str) -> FileFingerprint {
+        FileFingerprint {
+            dev,
+            inode: 2,
+            size: 3,
+            mtime: 4,
+            sample_hash: hash.into(),
+        }
+    }
+
+    fn record(ops_json: &Value, file: &FileFingerprint) -> AppliedOps {
+        AppliedOps {
+            marker: Some("transcodarr:t1:00000000000000000000000000000000".into()),
+            ops_json: ops_json.clone(),
+            file: file.clone(),
+            job_id: Some("1".into()),
+            applied_at: None,
+        }
+    }
+
+    #[test]
+    fn record_proves_applied_when_op_and_file_match() {
+        let fp = fingerprint(1, "abcdabcdabcdabcdabcdabcdabcdabcd");
+        let op_a: Value = json!({ "video": { "video_filter": "crop=1:1:0:0" } });
+        let rec = record(&op_a, &fp);
+        assert!(record_proves_applied(&rec, &op_a, &fp));
+    }
+
+    #[test]
+    fn record_rejects_a_changed_operation() {
+        // A flow edit that changes the applied operation changes the
+        // fingerprint: the record no longer proves it.
+        let fp = fingerprint(1, "abcdabcdabcdabcdabcdabcdabcdabcd");
+        let op_a: Value = json!({ "video": { "video_filter": "crop=1:1:0:0" } });
+        let op_b: Value = json!({ "video": { "video_filter": "crop=2:2:0:0" } });
+        let rec = record(&op_a, &fp);
+        assert!(!record_proves_applied(&rec, &op_b, &fp));
+    }
+
+    #[test]
+    fn record_rejects_changed_bytes() {
+        // The file's bytes changed after tagging (the scan cleared
+        // nothing because it couldn't tell) — the fingerprint
+        // comparison is what catches it.
+        let fp_old = fingerprint(1, "00000000000000000000000000000000");
+        let fp_new = fingerprint(1, "11111111111111111111111111111111");
+        let op: Value = json!({ "video": { "video_filter": "crop=1:1:0:0" } });
+        let rec = record(&op, &fp_old);
+        assert!(!record_proves_applied(&rec, &op, &fp_new));
+        assert!(record_proves_applied(&rec, &op, &fp_old));
     }
 }
