@@ -172,6 +172,28 @@
 		const hh = Number(h);
 		value = ww > 0 && hh > 0 ? [ww, hh] : undefined;
 	}
+
+	// tonemap: { method?, desat? } | undefined (undefined = the server
+	// defaults). The select always shows a concrete value (first option is
+	// the server default); the wire object omits keys equal to the defaults.
+	let desatText = $state("");
+	$effect(() => {
+		const t = value as { desat?: number } | undefined;
+		desatText = t?.desat != null ? String(t.desat) : "";
+	});
+	const tonemapMethod = $derived.by(() => {
+		const t = value as { method?: string } | undefined;
+		return t?.method ?? schemaOpts[0]?.value ?? "bt2390";
+	});
+	function setTonemap(method: string, text: string) {
+		desatText = text;
+		const a: Record<string, unknown> = {};
+		const first = schemaOpts[0]?.value ?? "bt2390";
+		if (method !== first) a.method = method;
+		const n = Number(text);
+		if (text !== "" && Number.isFinite(n) && n > 0) a.desat = Math.min(1, n);
+		value = Object.keys(a).length > 0 ? a : undefined;
+	}
 </script>
 
 {#if schema.kind === "single_select"}
@@ -277,6 +299,29 @@
 		<Input type="number" min="0" value={res.w ? String(res.w) : ""} oninput={(e) => setRes((e.target as HTMLInputElement).value, String(res.h))} class="w-24" placeholder="width" />
 		<span class="text-muted-foreground">×</span>
 		<Input type="number" min="0" value={res.h ? String(res.h) : ""} oninput={(e) => setRes(String(res.w), (e.target as HTMLInputElement).value)} class="w-24" placeholder="height" />
+	</div>
+{:else if schema.kind === "tonemap"}
+	<div class="flex items-center gap-2">
+		<select
+			class={cn(SELECT_CLASS, "w-40")}
+			value={tonemapMethod}
+			onchange={(e) => setTonemap((e.target as HTMLSelectElement).value, desatText)}
+		>
+			{#each schemaOpts as v (v.value)}
+				<option value={v.value}>{v.label}</option>
+			{/each}
+		</select>
+		<Input
+			type="number"
+			min="0"
+			max="1"
+			step="0.1"
+			value={desatText}
+			oninput={(e) => setTonemap(tonemapMethod, (e.target as HTMLInputElement).value)}
+			class="w-24"
+			placeholder="0"
+		/>
+		<span class="text-xs text-muted-foreground">desat</span>
 	</div>
 {:else}
 	<p class="text-xs text-muted-foreground">unsupported field kind: {schema.kind}</p>

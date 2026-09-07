@@ -135,6 +135,7 @@ A step's operation is the **complete** plan for a matched file. Each section is 
 | Device | `software` or a specific detected GPU (populated from startup encoder probe; unavailable encoders shown disabled with a hint) |
 | Downscale to | optional target resolution (e.g. 1920×1080). **Never upscale.** |
 | HDR → SDR | explicit on/off flag (default off; destructive to look, never implicit) |
+| Tonemap | settings for the HDR→SDR conversion: method `bt2390` (default) / `narkowe` / `hable` + desaturation `0.0`–`1.0` (default none); applied only when the flag above is on and the source is HDR |
 | Filter graph | optional ffmpeg `-vf` expression the user types in (e.g. `crop=…`, `denoise`); empty = none — §6.5 |
 
 One ffmpeg invocation per job (decode → filter → encode → mux). The exact filter chain (e.g. the zscale/tonemap sequence for HDR→SDR) is an implementation detail. Two-pass encoding is parked.
@@ -302,7 +303,7 @@ Indexes: `files(library_id, status)`, `files(path)`, `jobs(state, started)`. Fil
 - **AV1** target (newer-GPU-only encoder) as a preset-grade option; **two-pass** encoding; **subtitle burn-in**.
 - **Audio-only and image libraries** (different rule shapes).
 - Additional condition fields (profile, level, frame rate, duration, subtitle presence) and OR-condition groups — additive via the registry, no migrations.
-- HDR handling beyond the on/off HDR→SDR flag (tonemapping presets).
+- HDR handling beyond the tonemap method + desat selection (§6.1): per-HDR-format conversion chains, tonemapping presets/bundles.
 
 ---
 

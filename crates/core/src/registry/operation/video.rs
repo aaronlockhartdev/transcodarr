@@ -28,6 +28,7 @@ pub use crate::plan::VideoTargetCodec as VideoCodec;
 ///   "device": "auto",
 ///   "downscale_to": [1920, 1080],
 ///   "hdr_to_sdr": false,
+///   "tonemap": { "method": "narkowe", "desat": 0.5 },
 ///   "video_filter": "crop=1920:800:0:0"
 /// } }
 /// ```
@@ -320,6 +321,71 @@ impl<'de> Deserialize<'de> for DeviceChoice {
     }
 }
 
+/// Tone-mapping method for HDR→SDR conversion — the value of ffmpeg's
+/// `tonemap=…:tonemap=` option (DESIGN §6.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TonemapMethod {
+    /// `bt.2390` — the BT.2390 piecewise-linear curve (the long-standing
+    /// default chain).
+    #[default]
+    Bt2390,
+    /// Narkowicz filmic curve.
+    Narkowe,
+    /// Hable ("Uncharted 2") filmic curve.
+    Hable,
+}
+
+impl TonemapMethod {
+    /// The method string ffmpeg's `tonemap` filter expects.
+    #[must_use]
+    pub fn ffmpeg(self) -> &'static str {
+        match self {
+            Self::Bt2390 => "bt.2390",
+            Self::Narkowe => "narkowe",
+            Self::Hable => "hable",
+        }
+    }
+}
+
+/// `desat` is a 0.0–1.0 threshold; anything outside is a flow-editing
+/// mistake, so reject it at parse time (like [`FilterGraph`]).
+fn deserialize_desat<'de, D>(d: D) -> Result<f32, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let v = f32::deserialize(d)?;
+    if v.is_finite() && (0.0..=1.0).contains(&v) {
+        Ok(v)
+    } else {
+        Err(de::Error::custom(
+            "desat must be a number between 0.0 and 1.0",
+        ))
+    }
+}
+
+fn desat_is_default(d: &f32) -> bool {
+    *d == 0.0
+}
+
+/// Tone-mapping settings for HDR→SDR conversion (DESIGN §6.1).
+///
+/// JSON: `{ "method": "bt2390" | "narkowe" | "hable", "desat": 0.0–1.0 }`;
+/// both fields optional, defaulting to the historical behaviour
+/// (BT.2390, no desaturation). A zero `desat` is omitted on serialize.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TonemapSpec {
+    #[serde(default)]
+    pub method: TonemapMethod,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_desat",
+        skip_serializing_if = "desat_is_default"
+    )]
+    pub desat: f32,
+}
+
 /// The `video` section parameters.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -347,6 +413,10 @@ pub struct VideoOp {
     /// never implicit (DESIGN §6.1).
     #[serde(default)]
     pub hdr_to_sdr: bool,
+    /// Tone-mapping settings for the HDR→SDR conversion above (method +
+    /// desaturation); absent = the historical defaults (BT.2390, none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tonemap: Option<TonemapSpec>,
     /// User filter graph applied to the video stream (DESIGN §6.5).
     /// A non-empty graph always re-encodes (filters cannot be applied
     /// to a stream being copied).
@@ -495,8 +565,20 @@ fn build_filters(v: &VideoFacts, op: &VideoOp, target_w: u32, target_h: u32) -> 
         } else {
             "yuv420p"
         };
+        let spec = op.tonemap.unwrap_or_default();
+        // 0.0 renders as "0" (the historical string); otherwise up to
+        // three decimals, trailing zeros trimmed.
+        let desat = if spec.desat == 0.0 {
+            "0".to_string()
+        } else {
+            let s = format!("{:.3}", spec.desat);
+            s.trim_end_matches('0').trim_end_matches('.').to_string()
+        };
         filters.push("zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709".to_string());
-        filters.push("tonemap=tonemap=bt.2390:desat=0".to_string());
+        filters.push(format!(
+            "tonemap=tonemap={}:desat={desat}",
+            spec.method.ffmpeg()
+        ));
         filters.push(format!("zscale=t=bt709:m=bt709:r=tv,format={out_fmt}"));
     }
     // The user's graph comes last: after downscale and HDR conversion
@@ -604,7 +686,7 @@ impl OperationSection for Video {
             "kind": "object",
             "label": "Video",
             "fields": {
-                "container": { "order": 8,
+                "container": { "order": 9,
                     "kind": "object",
                     "label": "Container",
                     "fields": {
@@ -649,7 +731,15 @@ impl OperationSection for Video {
                     "hint": "Never upscales. Sources at or above the target keep their resolution."
                 },
                 "hdr_to_sdr": { "order": 6, "kind": "boolean", "label": "Convert HDR to SDR", "default": false, "hint": "Changes the look of the image. Only enabled when you ask." },
-                "video_filter": { "order": 7, "kind": "text", "label": "Video filter", "hint": "An ffmpeg -vf expression (e.g. crop=1920:800:0:0,denoise). Applied after everything else; one-shot — runs once per file." }
+                "tonemap": { "order": 7, "kind": "tonemap", "label": "Tonemap",
+                    "values": [
+                        { "value": "bt2390", "label": "BT.2390 (default)" },
+                        { "value": "narkowe", "label": "Narkowicz" },
+                        { "value": "hable", "label": "Hable (filmic)" }
+                    ],
+                    "hint": "Method + desaturation for the HDR→SDR conversion. Desat (0–1) desaturates colors outside the target gamut; empty = never."
+                },
+                "video_filter": { "order": 8, "kind": "text", "label": "Video filter", "hint": "An ffmpeg -vf expression (e.g. crop=1920:800:0:0,denoise). Applied after everything else; one-shot — runs once per file." }
             }
         })
     }
@@ -957,6 +1047,79 @@ mod tests {
         Video
             .validate(&json!({ "codec": "h264", "video_filter": "denoise" }))
             .unwrap();
+    }
+
+    #[test]
+    fn tonemap_default_keeps_historical_chain() {
+        let s = Video;
+        let mut v = video("hevc", 3840, 2160, Some(60_000_000));
+        v.hdr = Hdr::Hdr10;
+        let f = facts(Some(v));
+        let j = json!({ "codec": "h264", "hdr_to_sdr": true });
+        let VideoPlan::Encode(e) = enc(s.plan(&j, &f).unwrap()) else {
+            panic!("expected Encode")
+        };
+        // Absent tonemap section ⇒ exactly the pre-existing default chain.
+        assert!(
+            e.filters
+                .iter()
+                .any(|x| x == "tonemap=tonemap=bt.2390:desat=0")
+        );
+    }
+
+    #[test]
+    fn tonemap_method_and_desat_render_into_chain() {
+        let s = Video;
+        let mut v = video("hevc", 3840, 2160, Some(60_000_000));
+        v.hdr = Hdr::Hdr10;
+        let f = facts(Some(v));
+        let j = json!({ "codec": "h264", "hdr_to_sdr": true,
+            "tonemap": { "method": "narkowe", "desat": 0.5 } });
+        let VideoPlan::Encode(e) = enc(s.plan(&j, &f).unwrap()) else {
+            panic!("expected Encode")
+        };
+        assert!(
+            e.filters
+                .iter()
+                .any(|x| x == "tonemap=tonemap=narkowe:desat=0.5")
+        );
+    }
+
+    #[test]
+    fn tonemap_partial_defaults_round_trip() {
+        // {"tonemap": {}} parses to the historical defaults…
+        let op: VideoOp =
+            serde_json::from_value(json!({ "codec": "h264", "tonemap": {} })).unwrap();
+        let spec = op.tonemap.expect("present key stays present");
+        assert_eq!(spec.method, TonemapMethod::Bt2390);
+        assert_eq!(spec.desat, 0.0);
+        // …and serializes stably: method explicit, zero desat omitted.
+        assert_eq!(
+            serde_json::to_value(&op).unwrap()["tonemap"],
+            json!({ "method": "bt2390" })
+        );
+    }
+
+    #[test]
+    fn tonemap_rejects_invalid_values() {
+        let bad = |v: Value| serde_json::from_value::<VideoOp>(v).is_err();
+        assert!(bad(
+            json!({ "codec": "h264", "tonemap": { "method": "narkowe", "desat": 1.5 } })
+        ));
+        assert!(bad(
+            json!({ "codec": "h264", "tonemap": { "method": "narkowe", "desat": -0.1 } })
+        ));
+        assert!(bad(
+            json!({ "codec": "h264", "tonemap": { "method": "nope" } })
+        ));
+        assert!(bad(json!({ "codec": "h264", "tonemap": { "bogus": 1 } })));
+        // Boundary values are legal.
+        assert!(!bad(
+            json!({ "codec": "h264", "tonemap": { "desat": 1.0 } })
+        ));
+        assert!(!bad(
+            json!({ "codec": "h264", "tonemap": { "desat": 0.0 } })
+        ));
     }
 
     // (module closes)

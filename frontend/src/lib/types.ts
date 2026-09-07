@@ -136,6 +136,7 @@ export type UiSchema =
 			default?: string;
 	  }
 	| { kind: "resolution"; label?: string; hint?: string }
+	| { kind: "tonemap"; label?: string; values: SchemaOption[]; hint?: string }
 	| { kind: "list"; label?: string; item: Record<string, unknown>; hint?: string }
 	| {
 			kind: "object";
