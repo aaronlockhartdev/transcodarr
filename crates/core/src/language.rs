@@ -137,6 +137,7 @@ const TABLE: &[(&str, &str)] = &[
     ("zul", "zu"),
     ("chn", "zh"),
     ("chi", "zh"),
+    ("zho", "zh"),
 ];
 
 /// Normalize a language code to ISO 639-1 (DESIGN §6.2).
@@ -187,6 +188,7 @@ mod tests {
             ("dut", "nl"),
             ("chn", "zh"),
             ("chi", "zh"),
+            ("zho", "zh"),
             ("jpn", "ja"),
             ("kor", "ko"),
             ("rus", "ru"),
