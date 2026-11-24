@@ -13,3 +13,8 @@ setup:
 # The whole gate. The pre-commit hook and CI both call only this.
 check:
     bash scripts/check.sh
+
+# Prove the gate still has teeth after any edit to scripts/check.sh: each rule must go red on the
+# defect and stay green when the defect is excluded or absent.
+selftest:
+    bash scripts/selftest.sh
