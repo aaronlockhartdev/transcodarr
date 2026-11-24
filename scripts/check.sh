@@ -157,9 +157,12 @@ else
   skip "diff budget" "root commit, nothing to compare against"
 fi
 if [ ${#scope[@]} -gt 0 ]; then
+  # --numstat lines are `adds TAB dels TAB path`, so exclusions match the third field. Anchoring
+  # `^contracts/` at the line start silently matched nothing and counted generated output as work.
   read -r lines files < <(git diff --numstat "${scope[@]}" -- \
-    | grep -vE '(package-lock\.json|Cargo\.lock|\.lock)$|^apps/web/src/lib/api/|^contracts/|^\.sqlx/' \
-    | awk '{a += $1 + $2; n++} END {print a + 0, n + 0}')
+    | awk -F'\t' '$3 !~ /(^|\/)(package-lock\.json|Cargo\.lock)$/ && $3 !~ /\.lock$/ \
+              && $3 !~ /^(apps\/web\/src\/lib\/api|contracts|\.sqlx)\// {a += $1 + $2; n++} \
+              END {print a + 0, n + 0}')
   if [ "$lines" -gt 200 ] || [ "$files" -gt 10 ]; then
     echo "        $lines lines across $files files; ADR-0001 allows 200 lines and 10 files. Split it."
     fail "diff budget"

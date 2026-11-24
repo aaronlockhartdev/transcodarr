@@ -31,3 +31,9 @@ jobs:
 
       - name: check
         run: just check
+
+      # A gate suite with no CI wiring is how an inert check ships green: two projects were found
+      # with a passing script suite that nothing in CI ran. The suite runs in a scratch repo, so it
+      # cannot interfere with the checkout above.
+      - name: selftest
+        run: just selftest
