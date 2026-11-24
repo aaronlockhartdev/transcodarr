@@ -1,0 +1,16 @@
+# Line endings are pinned so that a regenerated file diffs empty on every machine. Without
+# this, a Windows checkout or a stray autocrlf makes the drift gate (ADR-0003) fire on files
+# nobody edited, or stay silent on one that was.
+* text=auto eol=lf
+*.sql text eol=lf
+*.json text eol=lf
+*.ts text eol=lf
+*.rs text eol=lf
+*.svelte text eol=lf
+*.toml text eol=lf
+
+*.png binary
+*.jpg binary
+*.webp binary
+*.ico binary
+*.woff2 binary

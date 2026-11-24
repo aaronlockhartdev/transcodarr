@@ -1,0 +1,4 @@
+#!/bin/sh
+# A convenience, not the wall: `git commit --no-verify` skips this. CI runs the same script on
+# its own machine, which no flag bypasses (ADR-0001).
+exec just check

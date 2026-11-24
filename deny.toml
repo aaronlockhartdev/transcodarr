@@ -1,0 +1,37 @@
+# License policy for AGPL-3.0-only (ADR-0004). `cargo deny check` runs in `just check` and in CI.
+#
+# Widening this file to unblock a build is banned, and so is `cargo deny` config you found by
+# searching for the error message. If a dependency fails here, report it; the fix is a different
+# dependency, not a new entry below.
+
+[licenses]
+version = 2
+unlicensed = "deny"
+copyleft = "warn"
+confidence-threshold = 0.93
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "BSD-2-clause",
+    "BSD-3-clause",
+    "CC0-1.0",
+    "ISC",
+    "MIT",
+    "MPL-2.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+]
+private = { ignore = true }
+
+# The one entry the ADR names by hand: AGPL-incompatible, and easy to pull in transitively.
+deny = [
+    { expression = "GPL-2.0-only", reason = "incompatible with AGPL-3.0-only; see ADR-0004" },
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+
+[advisories]
+yanked = "deny"

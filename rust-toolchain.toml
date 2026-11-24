@@ -1,0 +1,5 @@
+# The toolchain is a dependency. Agents hallucinate API surfaces across versions, so the
+# channel is pinned exactly rather than tracking `stable` (ADR-0003). `just setup` installs it.
+[toolchain]
+channel = "1.100.0"
+components = ["clippy", "rustfmt"]

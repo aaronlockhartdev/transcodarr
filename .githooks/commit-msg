@@ -1,0 +1,19 @@
+#!/bin/sh
+# ADR-0001: every commit carries `Task:`/`Agent:`/`Verified:`. Provenance for humans and CI.
+msg=$(cat "$1")
+case "$msg" in
+  Merge* | Revert* ) exit 0 ;;
+esac
+
+missing=""
+for t in Task Agent Verified; do
+  printf '%s\n' "$msg" | grep -q "^$t: " || missing="$missing $t"
+done
+
+if [ -n "$missing" ]; then
+  echo "commit-msg: missing trailer(s):$missing" >&2
+  echo "  Task: #<issue> or bootstrap" >&2
+  echo "  Agent: <harness and model that wrote it>" >&2
+  echo "  Verified: <the command you ran, with its result>" >&2
+  exit 1
+fi

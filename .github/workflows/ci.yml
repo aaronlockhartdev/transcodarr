@@ -1,0 +1,33 @@
+# The independent signal: the same `just check` the hook runs, on a machine
+# the agent cannot reach and cannot skip with --no-verify (ADR-0001).
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: check
+    runs-on: ubuntu-latest
+    steps:
+      # Pinned by SHA: this runs on PRs and is a FLAG path (ADR-0001).
+      # actions/checkout v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+
+      # node, just, gitleaks, cargo-deny at the versions pinned in mise.toml.
+      # jdx/mise-action v5.3.0
+      - uses: jdx/mise-action@924e7c586e33d7d4bae9c14e26c5d22e2beb6e78
+
+      # Installs the channel pinned in rust-toolchain.toml.
+      - name: Rust toolchain
+        run: rustup show
+
+      - name: check
+        run: just check

@@ -1,0 +1,25 @@
+# Rust and Svelte build output
+/target
+node_modules/
+apps/web/build/
+apps/web/.svelte-kit/
+
+# Runtime data: never commit a user's library, its backups, or a scratch database.
+# The test database is created fresh in a temp dir (ADR-0002), so it has no home here either.
+/data/
+/backups/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Secrets live in the config file, not in git (ADR-0002).
+*.env
+.env
+
+# pi's project-local package install; .pi/npm/.gitignore already ignores its contents.
+.pi/npm/node_modules/
+
+# Deliberately NOT ignored: contracts/openapi.json, apps/web/src/lib/api/schema.ts, Cargo.lock,
+# .sqlx/. The drift gate and sqlx's offline compile-time checks depend on those being tracked;
+# scripts/check.sh asserts it.

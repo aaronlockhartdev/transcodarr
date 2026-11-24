@@ -1,0 +1,9 @@
+# Machine default is `mise use -g node@latest` (~/.config/mise/config.toml); these pins win
+# here. If the toolchain looks wrong, test an INTERACTIVE shell (`zsh -i -c`): zsh reads
+# ~/.zshrc only when interactive, so `zsh -l -c` shows a PATH no agent actually uses.
+# `just check` asserts node and rustc against these, so a shadowed binary fails loudly.
+[tools]
+node = "22.23.5"
+gitleaks = "8.30.1"
+just = "1.59.0"
+"cargo:cargo-deny" = "0.22.0"

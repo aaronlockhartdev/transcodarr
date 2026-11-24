@@ -1,0 +1,5 @@
+{
+  "packages": [
+    "npm:@sveltejs/pi@0.1.0"
+  ]
+}
