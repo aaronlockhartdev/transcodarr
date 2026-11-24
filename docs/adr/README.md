@@ -49,12 +49,12 @@ secondary blogs have been caught wrong once here already, before any gate existe
 
 ## Index
 
-|#|Title|Status|
-|---|---|---|
-|0001|Development process: lanes, branching, diff budget|proposed|
-|0002|Database policy before 1.0|proposed|
-|0003|Typed contract between the Rust API and the Svelte frontend|proposed|
-|0004|License: AGPL-3.0-only|proposed|
+|#|Title|Status|File|
+|---|---|---|---|
+|0001|Development process: lanes, branching, diff budget|proposed|0001-development-process.md|
+|0002|Database policy before 1.0|proposed|0002-database-policy.md|
+|0003|Typed contract between the Rust API and the Svelte frontend|proposed|0003-contract-pipeline.md|
+|0004|License: AGPL-3.0-only|proposed|0004-license.md|
 
 Deliberately absent:
 

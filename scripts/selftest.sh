@@ -127,8 +127,40 @@ else
   skipping "path exists" "generated and lockfile output excluded"
 fi
 
+# The .md gates, both directions. Each line below is a live misfire found by auditing the corpus
+# checks against a scratch tree: a mistyped filename was invisible to every ADR check, and an index
+# row that named no file made the README-to-file direction check nothing. The status vocabulary and
+# the required-section list are deliberately absent here, because the Vale unit lands them as config
+# and carries their fixtures instead.
+adr_body() { printf 'Status: %s\n\n# T\n\n## Context\n\nb\n\n## Decision\n\nd\n\n## Rejected alternatives\n\nr\n\n## Evidence\n\ne\n\n## Binding summary for AGENTS.md\n\nz\n' "$1"; }
+expect_check() { run_gate; # check want name
+  local line got
+  line=$(grep -E "^  (PASS|FAIL|SKIP|WARN)  $1" "$log" | head -1)
+  case "$line" in
+    *FAIL*) got=red ;; *WARN*) got=warn ;; *SKIP*) got=skip ;; *PASS*) got=green ;; *) got=absent ;;
+  esac
+  if [ "$got" = "$2" ]; then printf '  ok    %-42s %s\n' "$3" "$got"
+  else printf '  BROKE %-42s wanted %s, gate said %s\n' "$3" "$2" "$got"; bad=$((bad + 1)); fi
+}
+
+if make docs/adr/000-misnumbered.md "$(adr_body proposed)"; then
+  expect_check adr-structure red "ADR filename no glob can see"
+  rm -f docs/adr/000-misnumbered.md
+fi
+if make docs/adr/9997-unlisted.md "$(adr_body proposed)"; then
+  expect_check adr-index red "ADR the index does not name"
+  rm -f docs/adr/9997-unlisted.md
+fi
+
+# The rule that a gate edit must ship a fixture, tested against itself.
+printf '\n# probe\n' >> scripts/check.sh
+stage scripts/check.sh
+expect_check gate-proof red "check.sh changed with no selftest.sh change"
+unstage scripts/check.sh; git checkout -q -- scripts/check.sh
+
 # A pin line is rewritten, not deleted, and by a portable edit: the line has to actually change,
 # because a no-op edit on the wrong platform would look like a passing probe.
+
 if grep -q '^node = ' mise.toml; then
   awk 'BEGIN{done=0} /^node = /{print "# pin removed"; done=1; next} {print}' mise.toml > mise.toml.tmp \
     && mv mise.toml.tmp mise.toml

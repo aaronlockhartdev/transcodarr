@@ -16,9 +16,20 @@ warn() { printf '  WARN  %s\n' "$1"; warned=$((warned + 1)); }
 printf 'check.sh  %s\n' "$(git rev-parse --short HEAD 2>/dev/null || echo 'no commits')"
 
 # --- ADR corpus: shape, status, and the one-decision-written-twice rule ----------------------
+# Scope is every .md in docs/adr except the index. A four-digit glob made a mistyped name
+# (001-x.md, adr-0006-x.md) invisible to every ADR check, and an empty glob reported PASS.
+adr_files=()
+while IFS= read -r f; do adr_files+=("$f"); done \
+  < <(find docs/adr -maxdepth 1 -name '*.md' ! -name 'README.md' 2>/dev/null | sort)
 adr_bad=0
-for f in docs/adr/[0-9][0-9][0-9][0-9]-*.md; do
-  [ -e "$f" ] || continue
+if [ ${#adr_files[@]} -eq 0 ]; then
+  echo "        docs/adr holds no ADR files: a green here would mean nothing"; adr_bad=1
+fi
+for f in "${adr_files[@]}"; do
+  case ${f##*/} in
+    [0-9][0-9][0-9][0-9]-[a-z0-9]*.md) ;;
+    *) echo "        $f: name is not NNNN-title.md, so no ADR check can see it"; adr_bad=1 ;;
+  esac
   num=${f##*/}
   num=${num%%-*}
   grep -q '^Status: \(proposed\|accepted\)' "$f" || { echo "        $f: no 'Status: proposed' or 'Status: accepted' line"; adr_bad=1; }
@@ -37,10 +48,11 @@ if [ "$adr_bad" -eq 0 ]; then pass "adr-structure"; else fail "adr-structure"; f
 # --- ADR index: every ADR listed, every listing real -----------------------------------------
 # The measured failure: 167 ADRs, an index that showed 30, and 29 live decisions invisible.
 idx_bad=0
-for f in docs/adr/[0-9][0-9][0-9][0-9]-*.md; do
-  [ -e "$f" ] || continue
-  num=${f##*/}
-  grep -q "${num%%-*}" docs/adr/README.md || { echo "        README index does not list $num"; idx_bad=1; }
+# Key on the filename, not the bare number. The old test matched any prose mention of "ADR-0002",
+# and index rows written without a filename left the README-to-file direction checking nothing.
+for f in "${adr_files[@]}"; do
+  fname=${f##*/}
+  grep -q -- "$fname" docs/adr/README.md || { echo "        README index does not name $fname"; idx_bad=1; }
 done
 for ref in $(grep -oE '[0-9]{4}-[a-z0-9-]+\.md' docs/adr/README.md | sort -u); do
   [ -e "docs/adr/$ref" ] || { echo "        README index points at docs/adr/$ref, which does not exist"; idx_bad=1; }
@@ -170,6 +182,17 @@ if [ ${#scope[@]} -gt 0 ]; then
     warn "diff budget ($lines lines, $files files: past the 50-line soft target)"
   else
     pass "diff budget ($lines lines, $files files)"
+  fi
+
+  # --- Gate edits must ship their proof (ADR-0001) ---------------------------------------------
+  # A check.sh edit with no selftest.sh change is an unproven claim about the gate, which is how a
+  # broken exclusion shipped reporting PASS. Pairs with `just selftest`.
+  if git diff --name-only "${scope[@]}" -- | grep -qx 'scripts/check.sh' \
+     && ! git diff --name-only "${scope[@]}" -- | grep -qx 'scripts/selftest.sh'; then
+    echo "        scripts/check.sh changed and scripts/selftest.sh did not: add the fixture that bites."
+    fail "gate-proof"
+  else
+    pass "gate-proof"
   fi
 
   # --- In-code suppressions (AGENTS.md rule 2) -------------------------------------------------
