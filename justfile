@@ -10,6 +10,13 @@ setup:
     mise install
     rustup show
 
+# Regenerate the tracked contract's TypeScript client. Until the Rust binary emits the
+# contract (ADR-0003), contracts/openapi.json is authored here; this recipe is what the
+# drift gate compares against.
+
+gen:
+    npm --prefix apps/web run gen
+
 # The whole gate. The pre-commit hook and CI both call only this.
 check:
     bash scripts/check.sh

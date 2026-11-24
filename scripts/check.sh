@@ -143,7 +143,7 @@ else
 fi
 
 # --- Contract drift (ADR-0003) ---------------------------------------------------------------
-if ! grep -qxq 'gen' <(just --list 2>/dev/null | sed 's/ *#.*//'); then
+if ! just --summary 2>/dev/null | grep -qw gen; then
   skip drift "no just gen recipe yet"
 elif ! just gen; then
   fail drift

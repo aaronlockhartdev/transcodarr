@@ -1,0 +1,29 @@
+{
+	"name": "web",
+	"private": true,
+	"type": "module",
+	"devDependencies": {
+		"@sveltejs/adapter-static": "4.0.1",
+		"@sveltejs/kit": "3.4.0",
+		"@sveltejs/vite-plugin-svelte": "7.3.2",
+		"openapi-fetch": "0.17.0",
+		"openapi-typescript": "7.13.0",
+		"svelte": "5.59.1",
+		"svelte-check": "4.7.8",
+		"typescript": "6.0.3",
+		"vite": "8.3.8"
+	},
+	"overrides": {
+		"openapi-typescript": {
+			"typescript": "$typescript"
+		}
+	},
+	"scripts": {
+		"gen": "openapi-typescript ../../contracts/openapi.json -o src/lib/api/schema.ts",
+		"check": "svelte-kit sync && svelte-check --threshold error",
+		"build": "vite build"
+	},
+	"imports": {
+		"#lib/*": "./src/lib/*"
+	}
+}
