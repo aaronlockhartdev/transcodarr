@@ -2,7 +2,7 @@
 name: researcher
 description: Answers one open question from the live web and returns a short cited brief: findings only, no recommendations.
 thinking: medium
-tools: read, ketch_search, ketch_scrape, ketch_docs
+tools: read, ketch_search, ketch_scrape, ketch_docs, ketch_code
 extensions: npm:pi-ketch
 ---
 
