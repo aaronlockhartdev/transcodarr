@@ -7,10 +7,11 @@ set -uo pipefail
 root=$(git rev-parse --show-toplevel 2>/dev/null) || { echo "check.sh: not a git repository"; exit 1; }
 cd "$root" || exit 1
 
-ran=0 skipped=0 failed=0
+ran=0 skipped=0 failed=0 warned=0
 pass() { printf '  PASS  %s\n' "$1"; ran=$((ran + 1)); }
 skip() { printf '  SKIP  %s — %s\n' "$1" "$2"; skipped=$((skipped + 1)); }
 fail() { printf '  FAIL  %s\n' "$1"; failed=$((failed + 1)); }
+warn() { printf '  WARN  %s\n' "$1"; warned=$((warned + 1)); }
 
 printf 'check.sh  %s\n' "$(git rev-parse --short HEAD 2>/dev/null || echo 'no commits')"
 
@@ -50,10 +51,12 @@ if [ "$idx_bad" -eq 0 ]; then pass "adr-index"; else fail "adr-index"; fi
 pin_bad=0
 want_node=$(sed -n 's/^node *= *"\([^"]*\)".*/\1/p' mise.toml | head -1)
 got_node=$(node --version 2>/dev/null | tr -d v)
-[ -n "$want_node" ] && [ "$want_node" != "$got_node" ] && { echo "        node $got_node, mise.toml pins $want_node ($(command -v node))"; pin_bad=1; }
+if [ -z "$want_node" ]; then echo "        mise.toml has no node = \"…\" pin to compare against"; pin_bad=1
+elif [ "$want_node" != "$got_node" ]; then echo "        node $got_node, mise.toml pins $want_node ($(command -v node))"; pin_bad=1; fi
 want_rust=$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' rust-toolchain.toml | head -1)
 got_rust=$(rustc --version 2>/dev/null | awk '{print $2}')
-[ -n "$want_rust" ] && [ "$want_rust" != "$got_rust" ] && { echo "        rustc $got_rust, rust-toolchain.toml pins $want_rust ($(command -v rustc))"; pin_bad=1; }
+if [ -z "$want_rust" ]; then echo "        rust-toolchain.toml has no channel = \"…\" pin to compare against"; pin_bad=1
+elif [ "$want_rust" != "$got_rust" ]; then echo "        rustc $got_rust, rust-toolchain.toml pins $want_rust ($(command -v rustc))"; pin_bad=1; fi
 if [ "$pin_bad" -eq 0 ]; then pass "toolchain-pins (node $got_node, rustc $got_rust)"; else fail "toolchain-pins"; fi
 
 # --- Generated and cache files must stay tracked --------------------------------------------
@@ -62,6 +65,8 @@ ign_bad=0
 for p in contracts/openapi.json apps/web/src/lib/api/schema.ts Cargo.lock .sqlx; do
   if git check-ignore -q "$p" 2>/dev/null; then
     echo "        $p is gitignored — the drift gate and sqlx offline checks cannot function"; ign_bad=1
+  elif [ -e "$p" ] && ! git ls-files --error-unmatch -- "$p" >/dev/null 2>&1; then
+    echo "        $p is on disk but untracked — the drift gate would compare nothing"; ign_bad=1
   fi
 done
 if [ "$ign_bad" -eq 0 ]; then pass "generated-paths-tracked"; else fail "generated-paths-tracked"; fi
@@ -138,7 +143,47 @@ else
   pass "drift (regenerated, diff empty)"
 fi
 
-printf 'check: %d ran, %d skipped, %d failed\n' "$ran" "$skipped" "$failed"
+# --- Diff budget (ADR-0001: 50 lines soft, 200 hard, 10 files) --------------------------------
+# ADR-0001 claimed this was machine-enforced and nothing implemented it. Lines and files are
+# countable, so it is a gate now. Excluded: lockfiles, and the paths ADR-0003 declares generated.
+scope=()
+if ! git diff --quiet --cached 2>/dev/null; then
+  scope=(--cached)                              # pre-commit: what is about to be committed
+elif base=$(git merge-base HEAD origin/main 2>/dev/null) && [ "$base" != "$(git rev-parse HEAD)" ]; then
+  scope=("$base..HEAD")                         # CI on a branch: the whole task diff
+elif git rev-parse -q --verify HEAD^ >/dev/null 2>&1; then
+  scope=("HEAD^..HEAD")                         # CI on main: the commit that just landed
+else
+  skip "diff budget" "root commit, nothing to compare against"
+fi
+if [ ${#scope[@]} -gt 0 ]; then
+  read -r lines files < <(git diff --numstat "${scope[@]}" -- \
+    | grep -vE '(package-lock\.json|Cargo\.lock|\.lock)$|^apps/web/src/lib/api/|^contracts/|^\.sqlx/' \
+    | awk '{a += $1 + $2; n++} END {print a + 0, n + 0}')
+  if [ "$lines" -gt 200 ] || [ "$files" -gt 10 ]; then
+    echo "        $lines lines across $files files; ADR-0001 allows 200 lines and 10 files. Split it."
+    fail "diff budget"
+  elif [ "$lines" -gt 50 ]; then
+    warn "diff budget ($lines lines, $files files: past the 50-line soft target)"
+  else
+    pass "diff budget ($lines lines, $files files)"
+  fi
+
+  # --- In-code suppressions (AGENTS.md rule 2) -------------------------------------------------
+  # A suppression edits the check instead of the code, so the added lines are themselves the
+  # evidence. Rust and TOML only: this script's own patterns must not match themselves.
+  supp=$(git diff "${scope[@]}" -- '*.rs' '*.toml' | grep '^+' | grep -v '^+++' \
+    | grep -nE '#\[(allow|expect)|--cap-lints|gitleaks:allow' | head -5)
+  if [ -n "$supp" ]; then
+    printf '%s\n' "$supp" | sed 's/^/        /'
+    echo "        Remove the attribute and fix the lint, or report the lint instead (AGENTS.md rule 2)."
+    fail "suppressions"
+  else
+    pass "suppressions"
+  fi
+fi
+
+printf 'check: %d ran, %d skipped, %d warned, %d failed\n' "$ran" "$skipped" "$warned" "$failed"
 if [ "$failed" -gt 0 ]; then exit 1; fi
 if [ "$ran" -eq 0 ]; then echo "check: nothing ran. This green means nothing."; exit 1; fi
 exit 0
