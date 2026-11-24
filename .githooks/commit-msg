@@ -18,6 +18,18 @@ if [ -n "$missing" ]; then
   exit 1
 fi
 
+# A trailer that looks like provenance but asserts nothing is worse than none: `Task: banana`
+# pointed at no issue and still produced a green hook.
+task=$(printf '%s\n' "$msg" | grep '^Task: ' | head -1)
+task=${task#Task: }
+case "$task" in
+  '#'[0-9]*) ;;
+  bootstrap*) ;;
+  *)
+    echo "commit-msg: Task: must be '#<issue number>' or 'bootstrap', got: $task" >&2
+    exit 1 ;;
+esac
+
 # The Agent trailer must name the model that actually ran. An author cannot be trusted to
 # remember it — the first one of these was written from assumption and got it wrong.
 # Convention: `Agent: <harness> / <model>[, notes]`. The model may be human-readable, so every
