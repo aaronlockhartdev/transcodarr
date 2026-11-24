@@ -20,9 +20,25 @@ fi
 
 # The Agent trailer must name the model that actually ran. An author cannot be trusted to
 # remember it — the first one of these was written from assumption and got it wrong.
+# Convention: `Agent: <harness> / <model>[, notes]`. The model may be human-readable, so every
+# token of it must appear inside $PI_MODEL, and at least one must be substantive. That admits
+# "Qwen 3.8 Flash Next" and refuses an invented family. Skipped when $PI_MODEL is unset
+# (a human shell or CI), where there is nothing to compare against.
 if [ -n "${PI_MODEL:-}" ]; then
-  if ! printf '%s\n' "$msg" | grep "^Agent: " | grep -qF -- "$PI_MODEL"; then
-    echo "commit-msg: Agent: must name \$PI_MODEL = $PI_MODEL" >&2
+  agent=$(printf '%s\n' "$msg" | grep '^Agent: ' | head -1)
+  model=$(printf '%s' "${agent##*/}" | sed -E 's/[,;(].*//' | tr 'A-Z' 'a-z' | tr -c 'a-z0-9' ' ')
+  norm=$(printf ' %s ' "$PI_MODEL" | tr 'A-Z' 'a-z' | tr -c 'a-z0-9' ' ')
+  substantive=0
+  for tok in $model; do
+    case "$norm" in
+      *"$tok"*) [ "${#tok}" -ge 4 ] && substantive=1 ;;
+      *) echo "commit-msg: Agent: names '$tok', which is not in \$PI_MODEL ($PI_MODEL)" >&2
+         echo "  form: Agent: <harness> / <model>[, notes]" >&2
+         exit 1 ;;
+    esac
+  done
+  if [ "$substantive" -eq 0 ]; then
+    echo "commit-msg: Agent: must name the model, not just noise ($PI_MODEL)" >&2
     exit 1
   fi
 fi
