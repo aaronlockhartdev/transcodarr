@@ -134,8 +134,10 @@ fi
 # --- Frontend --------------------------------------------------------------------------------
 if [ ! -f apps/web/package.json ]; then
   skip web "no apps/web/package.json (ADR-0003 unit 2)"
-elif [ ! -d apps/web/node_modules ]; then
-  skip web "apps/web/node_modules missing — run npm ci in apps/web"
+# shortcut: a cached node_modules is not re-verified locally; CI has none, so CI installs
+# from the lockfile and is the authority on lock/package agreement.
+elif [ ! -d apps/web/node_modules ] && ! npm --prefix apps/web ci --no-audit --no-fund; then
+  fail web "npm ci from apps/web/package-lock.json failed"
 elif ! npm --prefix apps/web run check; then
   fail web
 else
