@@ -17,3 +17,12 @@ if [ -n "$missing" ]; then
   echo "  Verified: <the command you ran, with its result>" >&2
   exit 1
 fi
+
+# The Agent trailer must name the model that actually ran. An author cannot be trusted to
+# remember it — the first one of these was written from assumption and got it wrong.
+if [ -n "${PI_MODEL:-}" ]; then
+  if ! printf '%s\n' "$msg" | grep "^Agent: " | grep -qF -- "$PI_MODEL"; then
+    echo "commit-msg: Agent: must name \$PI_MODEL = $PI_MODEL" >&2
+    exit 1
+  fi
+fi
