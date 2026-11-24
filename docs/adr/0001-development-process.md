@@ -213,11 +213,17 @@ context window holding only the diff is the only independence we have.
 
 1. Default to Lane B (worktree, branch, PR); Lane A only while the human watches every diff.
    Enforcer: none is possible. No tool records attendance, so this one stays prose.
-2. Never edit a FLAG path to get a check to pass; report it. Enforcer: path gate in
-   `scripts/check.sh` plus CODEOWNERS once CI exists. The list is in the Decision section.
+2. Never edit a FLAG path to get a check to pass; report it. Enforcer: none, and no longer
+   claimed. Nothing inspects diff paths, review approval is not available on this plan, and no
+   tool can tell a fix from a cover-up, so this stays prose enforced by Lane B. The motive is
+   gated instead: the two things a widened check buys you, budget and suppressions, now fail.
 
-Machine-enforced, therefore not `AGENTS.md` material: the diff budget (`just check`, from
-`git diff --shortstat`); worktree isolation (`just check`: `--git-dir` ≠ `--git-common-dir`);
-`--ff-only`, no squash, no force-push, no push to `main` (GitHub branch protection plus the
-`commit-msg` hook, which also checks trailer presence); "land same day" and at most 3 branches
-are maintainer hygiene, and not agent rules.
+Machine-enforced by `just check`: the diff budget (`git diff --numstat` over the staged commit in
+the hook, the branch range in CI; lockfiles and the ADR-0003 generated paths excluded; warns past
+50 lines, fails past 200 lines or 10 files); the ban on in-code suppressions (grep of added lines
+in `*.rs` and `*.toml`); toolchain pins compared against the installed binaries, with a missing
+pin line as a failure. Enforced by platform settings rather than repo files: `--ff-only`, no
+squash, no force-push, no push to `main`. Enforced by `commit-msg`: trailer presence, and an
+`Agent:` model name whose words appear in `$PI_MODEL`. No enforcer, and the file no longer claims
+one: worktree isolation, FLAG path detection. "Land same day" and at most 3 branches are
+maintainer hygiene, not agent rules.
