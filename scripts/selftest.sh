@@ -32,7 +32,15 @@ export GIT_CEILING_DIRECTORIES="$work"
 # harness replaced hand-rolled init-db with a helper that commits.
 mkdir -p "$work/scripts"
 cp "$repo/scripts/check.sh" "$work/scripts/check.sh"
-cp "$repo/justfile" "$work/justfile"
+# A scratch recipe list rather than the real one, deliberately: `gen` has to be absent so check.sh
+# skips drift in here. Running the real generator would need the installed frontend, and a suite
+# that requires an install is a suite that cannot run before CI has installed anything. Drift's
+# behaviour is proven by hand instead: hand-edit a generated file, stage it, `just check` goes red;
+# regenerate and stage, it goes green.
+cat > "$work/justfile" <<'JUSTFILE'
+# Seeded by scripts/selftest.sh. Not the real recipe list, on purpose: no `gen` recipe, so the drift
+# check skips instead of shelling out to a toolchain that is not installed in here.
+JUSTFILE
 cp "$repo/mise.toml" "$repo/rust-toolchain.toml" "$work/"
 cp -r "$repo/docs" "$work/docs"
 [ -f "$repo/.gitignore" ] && cp "$repo/.gitignore" "$work/"
