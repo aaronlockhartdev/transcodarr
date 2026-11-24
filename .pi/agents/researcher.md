@@ -1,6 +1,6 @@
 ---
 name: researcher
-description: Answers one open question from the live web and returns a short cited brief: findings only, no recommendations.
+description: Answers one open question from the live web and returns a short cited brief.
 thinking: medium
 tools: read, ketch_search, ketch_scrape, ketch_docs, ketch_code
 extensions: npm:pi-ketch
@@ -25,4 +25,5 @@ mean.
 
 ## Output
 
-One line per finding, most decision-relevant first, at most 40 lines, written to the output file.
+One line per finding, most decision-relevant first, written to the output file. Stop when the
+question is answered.
