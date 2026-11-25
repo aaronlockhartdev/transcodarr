@@ -135,6 +135,7 @@ else
   skipping "path exists" "generated and lockfile output excluded"
 fi
 
+
 # The .md gates, both directions. Each line below is a live misfire found by auditing the corpus
 # checks against a scratch tree: a mistyped filename was invisible to every ADR check, and an index
 # row that named no file made the README-to-file direction check nothing. The status vocabulary and
@@ -240,6 +241,90 @@ rm -rf Cargo.toml Cargo.lock src target
 # run before CI has installed anything. Proven by hand on the branch that added it; the measured
 # commands and their output are in that PR body.
 skipping "needs the installed frontend; proven by hand" "web build"
+
+# --- Which diff a budget number describes (#16) ---------------------------------------------------
+# With nothing staged and HEAD at origin/main's tip the dispatch falls through to HEAD^..HEAD, so a
+# local run printed the commit below HEAD as if it were the task's budget: `WARN diff budget (118
+# lines, 1 files ...)` for a commit that had already merged. The gate's own `scope` array is what it
+# measured, so each arm is pinned by that value *and* by the numbers it produced. A hand-written
+# label survives an arm that measures nothing and cannot be read off the WARN and FAIL lines at all;
+# a range and its numbers cannot. `scope_probes` is asserted because a fixture that never ran looks
+# exactly like a fixture that passed.
+budget_scope() {
+  # The last bracket group on a budget line, and only on one: a `.*\[.*\]` here picks up
+  # `[staged and history]` from the gitleaks line two lines above and reports that as the scope.
+  grep -E 'diff budget|lines across' "$log" \
+    | sed -n 's/.*) \[\([^]]*\)\]$/\1/p;s/.*files \[\([^]]*\)\];.*/\1/p' | head -1
+}
+budget_numbers() {
+  # Both budget line shapes, each pattern anchored to its own punctuation and none of them greedy:
+  # `.*` before `lines across` let one pattern match inside the PASS line and return "1 1" for it.
+  grep -E 'diff budget|lines across' "$log" \
+    | sed -n 's/.*(\([0-9][0-9]*\) lines, \([0-9][0-9]*\) files.*/\1 \2/p
+              s/ *\([0-9][0-9]*\) lines across \([0-9][0-9]*\) files.*/\1 \2/p' | head -1
+}
+scope_probes=0
+scope_report() { scope_probes=$((scope_probes + 1)); report "$3" "$1" "$2"; }   # want got name
+scope_base=$(git rev-parse HEAD)   # the tail resets here, so no probe of mine is in anyone's baseline
+printf 'a = 1\nb = 2\n' > scope_a.py                                        # 2 added lines
+printf 'c = 1\nd = 2\ne = 3\nf = 4\ng = 5\n' > scope_b.py                   # 5 added lines
+printf 'h = 1\n' > scope_c.py
+if stage scope_c.py; then
+  run_gate
+  scope_report "--cached" "$(budget_scope)" "staged: the scope measured"
+  unstage scope_c.py && rm -f scope_c.py
+else
+  skipping "stage a probe file" "staged: the scope measured"
+fi
+if stage scope_a.py && git commit -q -m scope_a -- scope_a.py \
+   && stage scope_b.py && git commit -q -m scope_b -- scope_b.py; then
+  run_gate
+  scope_report "HEAD^..HEAD" "$(budget_scope)" "no origin: scope"
+  scope_report "5 1" "$(budget_numbers)" "no origin: last commit only"
+  # Issue #16's literal state: origin/main resolves and equals HEAD, so arm 2 declines it.
+  if git update-ref refs/remotes/origin/main HEAD; then
+    run_gate
+    scope_report "HEAD^..HEAD" "$(budget_scope)" "origin/main == HEAD: scope"
+    scope_report "5 1" "$(budget_numbers)" "origin/main == HEAD: numbers"
+    git update-ref -d refs/remotes/origin/main
+  else
+    skipping "origin/main ref" "origin/main == HEAD: scope"
+    skipping "origin/main ref" "origin/main == HEAD: numbers"
+  fi
+  # Two commits ahead: HEAD~2..HEAD is 7 lines across 2 files where HEAD^..HEAD is 5 across 1, so no
+  # arm can quietly measure the other and still print its scope.
+  if git update-ref refs/remotes/origin/main "$scope_base"; then
+    run_gate
+    scope_report "$(git merge-base HEAD refs/remotes/origin/main)..HEAD" "$(budget_scope)" \
+      "branch ahead: scope"
+    scope_report "7 2" "$(budget_numbers)" "branch ahead: whole diff"
+    git update-ref -d refs/remotes/origin/main
+  else
+    skipping "origin/main ref" "branch ahead: scope"
+    skipping "origin/main ref" "branch ahead: whole diff"
+  fi
+  # The WARN and FAIL lines carry it too. A reader of the PASS line alone cannot see those two, and
+  # that is the fixture shape that let an unlabelled fall-through ship once already.
+  python3 -c "print('\n'.join('w%d = %d' % (i, i) for i in range(60)))" > scope_w.py
+  if git add scope_w.py && git commit -q -m scope_w -- scope_w.py; then
+    run_gate
+    scope_report "HEAD^..HEAD" "$(budget_scope)" "WARN line carries the scope"
+    python3 -c "print('\n'.join('f%d = %d' % (i, i) for i in range(300)))" > scope_f.py
+    if git add scope_f.py && git commit -q -m scope_f -- scope_f.py; then
+      run_gate
+      scope_report "HEAD^..HEAD" "$(budget_scope)" "FAIL line carries the scope"
+    else
+      skipping "commit 300 lines" "FAIL line carries the scope"
+    fi
+  else
+    skipping "commit 60 lines" "WARN line carries the scope"
+  fi
+else
+  skipping "two commits in scratch repo" "budget arm fixtures"
+fi
+git reset -q --hard "$scope_base" 2>/dev/null
+rm -f scope_*.py
+report "all budget fixtures ran" "9" "$scope_probes"
 
 run_gate; report "restored to baseline" "$base" "$(verdict)"
 printf 'selftest: %d broken, %d skipped\n' "$bad" "$skipped"
