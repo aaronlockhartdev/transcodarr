@@ -71,6 +71,66 @@ async fn api_paths_are_refused_and_app_paths_are_served() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// A request target that is not in normal form gets the same empty 404 as `/api`, before any layer
+/// decides what the path means (#22). Refusing it inside `ServeDir` instead would leave the answer to
+/// whichever layer happened to notice, and that is why a literal `..` and a `%2e%2e` used to disagree.
+#[tokio::test]
+async fn non_normal_request_targets_are_refused() {
+    let dir = std::env::temp_dir().join(format!("transcodarr-targets-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("index.html"),
+        b"<!doctype html>\n<html lang=\"en\">the app</html>",
+    )
+    .unwrap();
+    std::fs::write(dir.join("movie.2024.mkv"), b"dotted").unwrap();
+    let app = transcodarr::app(dir.clone());
+
+    // Structure, spelled wrong. `//` is an empty segment, `%2f` and `%5c` are separators, and the dot
+    // forms are a segment that *is* `.` or `..`.
+    for path in [
+        "/a/../b",
+        "/x/./y",
+        "/..",
+        "/%2e%2e/etc/passwd",
+        "/%2E%2E/api",
+        "/x/%2e%2e/api",
+        "//api/x",
+        "/api%2f",
+        "/api%5cx",
+    ] {
+        let res = call(&app, path).await;
+        assert_eq!(
+            res.status(),
+            StatusCode::NOT_FOUND,
+            "{path} must be refused"
+        );
+        let body = to_bytes(res.into_body(), 64 * 1024).await.unwrap();
+        assert!(
+            body.is_empty(),
+            "{path} returned a body, not an empty 404: {body:?}"
+        );
+    }
+
+    // Names, not structure. A dot inside a filename is part of the name, in either spelling, and a
+    // deep link with a trailing slash is a route the app router decides on, not a defect.
+    for path in [
+        "/movie.2024.mkv",
+        "/movie%2e2024.mkv",
+        "/a/path/with/no/file/",
+    ] {
+        let res = call(&app, path).await;
+        assert_eq!(
+            res.status(),
+            StatusCode::OK,
+            "{path} is a name, not a defect"
+        );
+        std::mem::drop(to_bytes(res.into_body(), 64 * 1024).await.unwrap());
+    }
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 async fn call(app: &Router, path: &str) -> Response {
     app.clone()
         .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
