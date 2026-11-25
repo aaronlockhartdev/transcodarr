@@ -1,0 +1,22 @@
+# Versions here are exact (`=`), not caret. The compiler is pinned in `rust-toolchain.toml` for the
+# same reason: an unpinned dependency lets an agent write code against an API surface this toolchain
+# never shipped, and the resulting code fails in a way that reads like a typo (ADR-0003). `Cargo.lock`
+# is committed and never hand-merged; `cargo deny` checks it in `just check`.
+[workspace]
+resolver = "3"
+members = ["apps/server"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+repository = "https://github.com/aaronlockhartdev/transcodarr"
+
+[workspace.dependencies]
+axum = "=0.8.9"
+tokio = { version = "=1.54.1", features = ["macros", "net", "rt-multi-thread"] }
+tower-http = { version = "=0.7.1", features = ["fs"] }
+
+# Dev-only crates live beside the rest so there is one pin surface; a member declares them under
+# `[dev-dependencies]` and Cargo still keeps them out of the release graph.
+tower = "=0.5.3"
