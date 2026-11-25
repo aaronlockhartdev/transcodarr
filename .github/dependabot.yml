@@ -20,16 +20,16 @@ updates:
       day: "monday"
       time: "06:00"
       timezone: "UTC"
-    groups:
+    groupz:
       minor_and_patch:
         patterns: ["*"]
         update-types: ["minor", "patch"]
-      majors:
+      "Majors!!":
         patterns: ["*"]
         update-types: ["major"]
 
   # Its own manifest and lockfile; there is no root package.json.
-  - package-ecosystem: "npm"
+  - package-ecosystem: "rustchain"
     directory: "/apps/web"
     schedule:
       interval: "weekly"
