@@ -192,6 +192,7 @@ if make docs/adr/9995-long.md "$({ adr_body proposed; awk 'BEGIN{for(i=0;i<250;i
 fi
 expect_check adr-length green "the corpus inside the cap"
 
+
 # The rule that a gate edit must ship a fixture, tested against itself.
 printf '\n# probe\n' >> scripts/check.sh
 stage scripts/check.sh
@@ -458,45 +459,53 @@ report "all budget fixtures ran" "9" "$scope_probes"
 
 # --- Secrets, in both scans and both directions (#37) ---------------------------------------------
 # ADR-0001 claims a both-directions fixture for every rule it enforces, and for secret scanning that
-# claim was false: every probe ran `gitleaks` and reported green, so `elif false` in that branch would
-# have shipped as a passing suite. Both scans get a fixture because they are different code paths —
-# `--staged` reads the index, the unguarded call reads history from HEAD.
+# claim was false: the branch at check.sh:112-128 ran on every probe and always said green, so a gate
+# whose fail arm was never taken would have shipped as a passing suite. Both scans are pinned because
+# they are different code paths — `--staged` reads the index (and prints "0 commits scanned"), the
+# unguarded call walks history from HEAD.
 #
-# The secret is assembled from three adjacent quoted runs on purpose. This file is in the real repo,
-# which gitleaks scans on every commit; split this way it holds no match itself, and only the scratch
-# repo's index and history do. The path is tracked-by-default rather than `probe.env`, because
-# `.gitignore` ignores `*.env` by design ("secrets live in the config file, not in git", ADR-0002): a
-# file git will never stage cannot reach gitleaks in the repo or in here, so ignoring it would have
-# made this fixture report a green it never tested. Hence the guard below, which skips loudly.
+# The history probe commits a second, clean commit on purpose. With the secret as the tip commit,
+# "the last commit" and "all of history" are the same question: `gl_cmd --log-opts=-1` then passes a
+# suite whose history scan sees nothing. Measured on a repo holding the secret two commits back: full
+# history 1 finding, `--log-opts=-1` 0 findings.
 #
-# The value is measured against the pinned gitleaks 8.30.1, in both scans. Two shapes that look
-# plausible are not flagged at all: an AWS access key *id* on its own (`AKIA` + 16 chars), and the
-# AWS documentation's own secret key, which gitleaks allowlists. A 32-character value assigned to a
-# name containing `aws_secret` is flagged staged and in history, so that is what the fixture uses.
+# Each red probe also asserts the sentence the gate prints, because a verdict word alone cannot say
+# which scan fired: with the fixture's own commit failing, both red probes stay satisfied by the
+# staged scan and the history probe measures nothing. Measured against pinned gitleaks 8.30.1: this
+# value trips `generic-api-key` (an entropy rule), not an AWS one; the AWS docs secret key is
+# allowlisted upstream; and an AWS access-key-id is flagged only inside the rule's `[A-Z2-7]` base32
+# class, which is why two plausible AKIA values here measure clean. The value is split across four
+# quoted runs so this file is not itself a finding. No `probe.env`: `.gitignore` ignores `*.env` by
+# design (ADR-0002), and an ignored path fails the two red probes loudly — that is the signal, so
+# there is no guard to skip quietly instead of asserting.
 gl_probes=0
-expect_gl() { gl_probes=$((gl_probes + 1)); expect_check "$@"; }
-gl_base=$(git rev-parse HEAD)
-gl_secret_value="hR3nQpLd""Kf8sVtYb""NwCzXmJq""AeGdUiOo" # split so this file is no finding
+expect_gl() { # check want label [the reason the gate must print]
+  expect_check "$1" "$2" "$3"; gl_probes=$((gl_probes + 1))
+  if [ -n "${4:-}" ]; then
+    if grep -qF "$4" "$log"; then printf '  ok    %-42s %s\n' "and names it: $4" "red"
+    else printf '  BROKE %-42s wanted the gate to print it\n' "and names it: $4"; bad=$((bad + 1)); fi
+    gl_probes=$((gl_probes + 1))
+  fi
+}
+gl_base=$(git rev-parse HEAD) # the reset below returns here, so no probe of mine is in anyone's baseline
+gl_secret_value="hR3nQpLd""Kf8sVtYb""NwCzXmJq""AeGdUiOo"
 if make probe_aws_config.toml "aws_secret_access_key = \"$gl_secret_value\""; then
   stage probe_aws_config.toml
-  if git diff --cached --quiet -- probe_aws_config.toml; then
-    skipping "an ignore rule now covers this path" "gitleaks fixtures"
-    rm -f probe_aws_config.toml
-  else
-    expect_gl gitleaks red "a secret sitting in the index"
-    unstage probe_aws_config.toml
-    expect_gl gitleaks green "the same bytes, present but not staged"
-    stage probe_aws_config.toml
-    git commit -q -m "fixture: a secret that has landed"
-    expect_gl gitleaks red "a secret already in history"
-    git reset -q --hard "$gl_base"
-    expect_gl gitleaks green "the commit gone, the scan clean again"
-    rm -f probe_aws_config.toml
-    report "all gitleaks fixtures ran" "4" "$gl_probes"
-  fi
+  expect_gl gitleaks red "a secret sitting in the index" "staged changes contain a secret"
+  unstage probe_aws_config.toml
+  expect_gl gitleaks green "the same bytes, present but not staged"
+  stage probe_aws_config.toml
+  git commit -q -m "fixture: a secret that has landed"
+  printf 'clean\n' > gl_after.txt && stage gl_after.txt && git commit -q -m "a clean commit after the secret"
+  expect_gl gitleaks red "a secret two commits back in history" "history contains a secret"
+  git reset -q --hard "$gl_base"
+  expect_gl gitleaks green "the commits gone, the scan clean again"
 else
-  skipping "make probe_aws_config.toml" "gitleaks fixtures"
+  skipping "make probe_aws_config.toml" "gitleaks assertions"
 fi
+# Outside the guard above on purpose: a block that never runs reports 0 against 6 and breaks the run,
+# which is what keeps a precondition from shedding these probes silently.
+report "all gitleaks assertions ran" "6" "$gl_probes"
 
 run_gate; report "restored to baseline" "$base" "$(verdict)"
 printf 'selftest: %d broken, %d skipped\n' "$bad" "$skipped"
