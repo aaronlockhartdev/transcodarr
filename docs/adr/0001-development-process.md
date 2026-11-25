@@ -21,8 +21,7 @@ Default is Lane B.
 |trigger|human drove it, reading each diff|dispatched and walked away|
 |isolation|main checkout acceptable|own `git worktree`, always|
 |diff budget|~50 changed lines|~200 changed lines, else split|
-|adversarial review|none|one reviewer, pre-PR (loop below, no ADR: `docs/adr/README.md`)|
-|handoff|none|PR|
+|adversarial review|none|one reviewer, pre-PR (the loop below)|
 |landing|rebase, then `git merge --ff-only`, then push|CI green, human reads the diff, rebase, `--ff-only`|
 |gate|the human (`--no-verify` is accepted here, by design)|CI plus branch protection|
 
@@ -31,9 +30,8 @@ PR.* No memory of attendance is required, because the default is the safe lane.
 
 ### Task brief: the issue body is the spec of intent
 
-One scoped task per issue; `Task: #N` in the
-commit trailers, so requirement, branch and commit are linked by data instead of by a document.
-Body shape:
+One scoped task per issue, `Task: #N` in the commit trailers, so requirement, branch and commit are
+linked by data and not by a document. Body shape:
 
 ```text
 Wanted:     behaviour, from the user's side, and not a solution
@@ -44,16 +42,14 @@ Verify:     just check
 Stop and ask if: a schema change, a new dependency, a check that will not pass, data that looks wrong
 ```
 
-### Branching
+### Branching and history
 
-`agent/<slug>` cut from `main` when the task starts and never reused for a second
-task. `migrations/` is single-writer: at most one open task may touch it.
+`agent/<slug>`, cut from `main` at task start, never reused for a second task. `migrations/` is
+single-writer: at most one open task may touch it.
 
-### History
-
-`git rebase` plus `git merge --ff-only`. No squash merges. Atomic commits carrying
-`Task:`/`Agent:`/`Verified:` trailers, checked for presence by the `commit-msg` hook. Trailers are
-for humans and CI. They are never fed to a reviewer (see Review).
+`git rebase` plus `git merge --ff-only`, no squash merges. Atomic commits carrying
+`Task:`/`Agent:`/`Verified:` trailers, presence checked by the `commit-msg` hook. Trailers are for
+humans and CI and are never fed to a reviewer (see Review).
 
 ### Diff budget
 
@@ -63,14 +59,12 @@ Lane B regardless of size.
 
 ### FLAG paths
 
-An agent may not edit these in a feature PR: `.github/workflows/**`,
-`scripts/check.sh`, `.githooks/**`, `justfile`, `deny.toml`, `.gitleaks.toml`,
-`.cargo/config.toml`, `build.rs`, `.pi/**`. The last entry covers the agent's own capability
-surface: reviewer definition, installed packages, MCP servers. The list includes the gate itself,
-because an agent blocked by a check must not be able to edit that check and pass `--no-verify`. The
-ban extends inside the code: no `#[allow]`, `#[allow(clippy::all)]`, `--cap-lints`, or
-`#[gitleaks:allow]` to get a gate green, because those change the result without changing the check
-file.
+An agent may not edit these in a feature PR: `.github/workflows/**`, `scripts/check.sh`,
+`.githooks/**`, `justfile`, `deny.toml`, `.gitleaks.toml`, `.cargo/config.toml`, `build.rs`, `.pi/**`
+(the agent's own capability surface: reviewer definition, installed packages, MCP servers). The list
+includes the gate itself: an agent blocked by a check must not be able to edit that check and pass
+`--no-verify`. The ban extends inside the code: no `#[allow]`, `#[allow(clippy::all)]`, `--cap-lints`,
+or `#[gitleaks:allow]`, because those change the result without changing the check file.
 
 ### Review
 
@@ -86,68 +80,59 @@ measured failure mode is amplifying speculative concerns into out-of-scope edits
 |`GAP`|a check that does not exist, or a behaviour nothing can observe|`scripts/check.sh`, a FLAG path, so you approve it, or a new issue|
 |`HUNCH`|judgement with no evidence|you, verbatim, at most 5 one-liners|
 
-A fix round driven by judgement hands the implementer nothing it did not already have. "LLMs
-struggle to self-correct their responses without external feedback, and at times, their performance
-even degrades after self-correction" (Huang et al., ICLR 2024, arXiv:2310.01798), so judgement is
-never a fix instruction. Style lands in `GAP` for the same reason: if `just check` is green and the
-finding stands, the missing thing is the check. The fix for a contradicted comment is deletion. A
-rewrite is unverified
-prose inheriting the author's authority.
+A fix round driven by judgement hands the implementer nothing it did not already have: LLMs struggle
+to self-correct without external feedback and performance can degrade after self-correction (Huang et
+al., ICLR 2024, arXiv:2310.01798), so judgement is never a fix instruction. Style lands in `GAP` for
+the same reason: if `just check` is green and the finding stands, the missing thing is the check. The
+fix for a contradicted comment is deletion, because a rewrite is unverified prose inheriting the
+author's authority.
 
 ### Red tests
 
-For a behavioural defect the best `REPRO` is a failing test. The reviewer writes it
-in its scratch directory, runs it, and pastes command, failing output and test body. Never into the
-tree: the author must start from the tree that was audited, and a reviewer-committed test would be a
-second unverified authority (79–82% of generated tests compile, arXiv:2601.09695; wrong assertions
-cause 15.6% of generated-test failures, arXiv:2610.32548). The implementer commits that test with
-its fix so CI owns it, and may not weaken, `#[ignore]`, or delete it, because benchmark harnesses
-are hardened against exactly that behaviour (arXiv:2610.24206). Disputing an assertion is a
-stop-and-ask, and not a licence. A green suite afterwards proves the assertion and not correctness
-(arXiv:2503.15223), which is why the test is in the diff you read. If no cheap harness can make it
-red, that absence is the `GAP`, and it is worth more than the test, because it closes the class
-instead of the instance.
+For a behavioural defect the best `REPRO` is a failing test. The reviewer writes it in its scratch
+directory, runs it, and pastes command, failing output and test body. Never into the tree: the author
+must start from the tree that was audited, and a reviewer-committed test is a second unverified
+authority (79–82% of generated tests compile, arXiv:2601.09695; wrong assertions cause 15.6% of
+generated-test failures, arXiv:2610.32548). The implementer commits that test with its fix so CI owns
+it, and may not weaken, `#[ignore]`, or delete it, which is what benchmark harnesses harden against
+(arXiv:2610.24206). Disputing an assertion is a stop-and-ask, not a licence. A green suite proves the
+assertion and not correctness (arXiv:2503.15223), which is why the test is in the diff you read. If no
+cheap harness can make it red, that absence is the `GAP`, and it closes the class and not the instance.
 
-What reaches you is at most 3 lines in the PR body: `Review: N found, M fixed, K unresolved` plus
-the `HUNCH`es. Never the review itself. Most posted bot comments are rejected or left unactioned,
-and the one feature that predicts a comment being acted on is a concrete inline fix
-(arXiv:2607.21997).
+What reaches you is at most 3 lines in the PR body: `Review: N found, M fixed, K unresolved` plus the
+`HUNCH`es, never the review itself. Most posted bot comments are rejected or left unactioned, and the
+one feature that predicts a comment being acted on is a concrete inline fix (arXiv:2607.21997).
 
 ### The loop, and who runs it
 
-Lane B is closed-loop, and not one-shot: the PR should arrive already
-revised. The orchestrator is the session that dispatched the task, and never the implementer. Every
-transition is a commit or a file, and never a memory.
+Lane B is closed-loop, and not one-shot: the PR should arrive already revised. The orchestrator is the
+session that dispatched the task, and never the implementer. Every transition is a commit or a file,
+and never a memory.
 
 1. Implement: brief, code, `just check` green, commit. A red build is never reviewed, because the
    reviewer's competence starts where the deterministic check stops.
-2. Review: fresh `killer` session. It is handed diff, brief and gate output, and fetches the rest of
-   the repo itself. An exploring reviewer beats a fixed-context one on this exact task (agentic
-   review versus single-turn review, arXiv:2607.06065).
+2. Review: fresh `killer` session handed diff, brief and gate output. An exploring reviewer beats a
+   fixed-context one on this task (arXiv:2607.06065).
 3. Fix: exactly one round, in a **fresh implementer session** handed only the evidence-backed
-   findings. A long session has decayed by then, and a fresh one has no commitment to the plan
-   under review.
+   findings. A long session has decayed, and a fresh one has no commitment to the plan under review.
 4. Verify with the gate and not with another model: `just check` green and the diff budget still
-   holding. An unverified LLM repair loop that oscillates does not converge with more rounds; it
-   corrupts more code than it repairs (`extrapolator.ai`, 2026-09-10, "If It's Not Buggy, Don't Fix
-   It", unread at source, no paper id found: the weakest citation in this file).
+   holding. An unverified repair loop that oscillates does not converge with more rounds; it corrupts
+   more code than it repairs (extrapolator.ai, 2026-09-10, "If It's Not Buggy, Don't Fix It", no paper
+   id: the weakest cite here).
 5. Re-review only when the fix landed on a boundary path. At most two reviewer calls per PR.
 6. Push, open the PR, write the `Review:` line. **The loop can revise; only the human approves.**
 
 Escalate instead of iterating on: a gate that stays red, oscillation, a disputed assertion, a fix
 that would breach the budget, or reviewer and implementer reading the brief differently.
 
-Trigger: a FLAG or boundary path, or you asking. Review an ordinary diff now and then so the flag
-list grows from findings and so you get a read on how often the gates miss. The loop is worth most when the implementer is weakest. The same
-generate-review-revise loop
-moved resolve rate from 27.5% to 56.9% on a 30B model and from 72.2% to 75.4% on a frontier one
-(arXiv:2607.06065), so a cheap model plus this loop is a rational dispatch and a frontier model
-plus it mostly is not. Measure both, and do not assume either.
+Trigger: a FLAG or boundary path, or you asking. Review an ordinary diff now and then, so the flag
+list grows from findings and you get a read on how often the gates miss. The loop is worth most when
+the implementer is weakest: the same generate-review-revise loop moved resolve rate from 27.5% to
+56.9% on a 30B model and from 72.2% to 75.4% on a frontier one (arXiv:2607.06065). Measure both.
 
 ### Revert-first
 
-Anything suspected of breaking is reverted, then fixed forward. No heroic
-debugging on `main`.
+Anything suspected of breaking is reverted, then fixed forward. No heroic debugging on `main`.
 
 ## Rejected alternatives
 
@@ -162,34 +147,20 @@ debugging on `main`.
 
 ## Evidence
 
-Primary source for the diff budget, reachable and quoted verbatim
-(`https://storage.googleapis.com/gweb-research2023-media/pubtools/4476.pdf`, Sadowski et al.,
-*Modern Code Review: A Case Study at Google*, ICSE SEIP 2018; the analysis of review logs for
-9 million reviewed changes):
+Primary source for the diff budget: Sadowski et al., *Modern Code Review: A Case Study at Google*
+(ICSE SEIP 2018, `https://storage.googleapis.com/gweb-research2023-media/pubtools/4476.pdf`), an
+analysis of review logs for 9 million changes. The clause leaned on is the distribution: median 24
+lines modified, 90% of changes under 10 files. 50/200 sits above that median on purpose and is still
+judgement, most likely to be revised here. The study's latency numbers are not used: a queue statistic
+from an org with thousands of reviewers, and this project has one human and no queue.
 
-> "At Google, over 35% of the changes under consideration modify only a single file and about 90%
-> modify fewer than 10 files. Over 10% of changes modify only a single line of code, and the median
-> number of lines modified is 24."
->
-> "developers have to wait for initial feedback on their change a median time of under an hour for
-> small changes and about 5 hours for very large changes. The overall (all code sizes) median
-> latency for the entire review process is under 4 hours."
+Also: `git interpret-trailers` validates presence and syntax and not truth, so an agent can write
+`Verified: just check` without running it. Hence the human is the only approver, and hence FLAG paths.
 
-Caveat: that is a queue statistic from an org with thousands of reviewers. This project has one
-human and no queue, so the analogy is directional, not exact. The 50/200 numbers are judgement,
-anchored on that median, and are the soft spot most likely to be revised.
-
-Also: `git interpret-trailers` validates *presence and syntax*, and not truth. An agent can write
-`Verified: just check` without running it. Hence "the human is the only approver" and hence FLAG
-paths.
-
-Why the brief is complete up front instead of clarified mid-run. Laban et al. (Microsoft Research
-and Salesforce Research), over 200,000 simulated conversations, a fully specified instruction
-instead revealed piece by piece across turns:
-
-> "Performance fell by an average of 39% across six generation tasks … Models commit to an
-> assumption early, build a full solution on it, then keep leaning on it … when a model takes a
-> wrong turn, it gets lost and does not recover."
+Why the brief is complete up front instead of clarified mid-run: Laban et al. (Microsoft Research and
+Salesforce Research), 200,000 simulated conversations, one clause leaned on. Performance fell an
+average of 39% across six generation tasks when a fully specified instruction was instead revealed
+piece by piece, because models commit to an assumption early and do not recover from a wrong turn.
 
 Agentic runs are that experiment with nobody in the room, so the wrong turn at turn 3 gets 37 tool
 calls built on top of it. One behaviour per acceptance line is EARS (`WHEN <trigger> the system
@@ -198,16 +169,15 @@ requirement is already the shape of a test. The stop condition is the field agen
 without it the failure modes are halting at the first ambiguity for a sleeping human, or continuing
 well past the point where asking was right.
 
-Cited, and not quoted, for the review section: comment/code contradictions raise bug-introduction
-odds about 1.5× and the effect peaks immediately after the inconsistency is introduced
-(arXiv:2409.10781), which in this repo means the next reader is the next agent. 45% of merged agent
-PRs needed changes, concentrated in "bug fixes, documentation, and adherence to project-specific
-standards", reviewers hand-fixing what a lint flag would catch (arXiv:2509.14745). 50.8% of 7,357
-static-analysis suppressions were inert, introduced largely over false positives and unreadable
-messages, hence "fix the lint, never allow it" (doi:10.1145/3715729). And LLM evaluators recognise
-and favour their own output, the bias tracking recognition ability while human annotators judged
-the texts equal (arXiv:2404.13076). Author and reviewer here share a model family, so the separate
-context window holding only the diff is the only independence we have.
+Cited, not quoted, for the review section: comment/code contradictions raise bug-introduction odds
+about 1.5× and the effect peaks immediately after the inconsistency is introduced (arXiv:2409.10781),
+which here means the next reader is the next agent. 45% of merged agent PRs needed changes,
+concentrated in bug fixes, documentation and adherence to project-specific standards, reviewers
+hand-fixing what a lint flag would catch (arXiv:2509.14745). 50.8% of 7,357 static-analysis
+suppressions were inert, introduced largely over false positives and unreadable messages, hence "fix
+the lint, never allow it" (doi:10.1145/3715729). LLM evaluators recognise and favour their own output
+while human annotators judge the texts equal (arXiv:2404.13076), so the separate context window
+holding only the diff is the only independence we have.
 
 ## Binding summary for AGENTS.md
 
@@ -218,12 +188,11 @@ context window holding only the diff is the only independence we have.
    tool can tell a fix from a cover-up, so this stays prose enforced by Lane B. The motive is
    gated instead: the two things a widened check buys you, budget and suppressions, now fail.
 
-Machine-enforced by `just check`: the diff budget (`git diff --numstat` over the staged commit in
-the hook, the branch range in CI; lockfiles and the ADR-0003 generated paths excluded; warns past
-50 lines, fails past 200 lines or 10 files); the ban on in-code suppressions (grep of added lines
-in `*.rs` and `*.toml`); toolchain pins compared against the installed binaries, with a missing
-pin line as a failure. Enforced by platform settings rather than repo files: `--ff-only`, no
-squash, no force-push, no push to `main`. Enforced by `commit-msg`: trailer presence, and an
-`Agent:` model name whose words appear in `$PI_MODEL`. No enforcer, and the file no longer claims
-one: worktree isolation, FLAG path detection. "Land same day" and at most 3 branches are
-maintainer hygiene, not agent rules.
+Machine-enforced by `just check`: the diff budget, the suppression ban, toolchain pins with a missing
+pin line as a failure, ADR filename and index consistency, generated-path tracked-ness, and secret
+scanning. `just selftest` holds a both-directions fixture for each of those except secret scanning and
+the `superseded by` rule, which the gate runs and no fixture has ever seen fail. The ADR length cap
+warns and does not block, which is the whole of its power. Platform settings enforce `--ff-only`, no
+squash, no force-push, no push to `main`; `commit-msg` enforces trailer presence and an `Agent:` model
+name whose words appear in `$PI_MODEL`. Nothing enforces worktree isolation or FLAG path detection, and
+the file claims none. "Land same day" and at most 3 branches are maintainer hygiene, not agent rules.
