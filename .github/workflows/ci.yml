@@ -26,11 +26,16 @@ jobs:
     # So 15 minutes means hung, not slow. Without it a wedged run burns the
     # monthly free-minute allowance while nothing is being decided.
     #
-    # No dependency caching, deliberately: the ceiling is the 32 s `check` step,
-    # Actions' cache costs restore and save time against that, and a restored
-    # target dir whose mtimes make cargo consider artifacts fresh is the exact
-    # failure this job exists to catch - `serving` boots whatever binary is in
-    # target, so a cached artifact is a green for a build nobody made.
+    # No dependency caching yet. A cold `cargo build --workspace` is 4.1 s
+    # locally (55 crates) and `npm ci` 0.6 s with a warm ~/.npm, so the whole
+    # ceiling sits inside the 31 s `check` step. When the graph grows, add in
+    # this order: ~/.npm and ~/.cargo/registry (download caches - `npm ci`
+    # wipes node_modules and cargo re-resolves per Cargo.lock, so neither can
+    # fake a verdict), then sccache, which keys on hashed compiler inputs.
+    # Raw target/ last: cargo skips a source file whose content changed if its
+    # mtime is older than the recorded fingerprint (measured). Checkout gives
+    # every source a fresh mtime, which is the only reason a restored target
+    # dir rebuilds instead of lying - do not rely on that for anything else.
     timeout-minutes: 15
     steps:
       # Pinned by SHA: this runs on PRs and is a FLAG path (ADR-0001).
