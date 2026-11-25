@@ -1,0 +1,95 @@
+# Every version this repo pins that a public registry publishes. The pins in
+# mise.toml (node, gitleaks, just, cargo:cargo-deny), .pi/settings.json and
+# skills-lock.json have no Dependabot ecosystem and stay manual. Three of them
+# are also asserted by `just check`'s toolchain-pins (node, rustc, cargo-deny);
+# gitleaks and just are watched by neither, which is issue #43.
+#
+# Batched by semver bump, so a red batch on a major does not hide which patch
+# inside it was fine. Security updates stay ungrouped on purpose, because
+# groups.applies-to defaults to version-updates: a bundle of fixes that fails
+# `just check` blocks every fix in it, and each advisory wants its own verdict.
+#
+# open-pull-requests-limit is set per entry because the docs give the default (5
+# for version updates) without ever saying whether it counts per entry or per
+# repository, and four entries with two groups each can want 8. 10 clears the
+# worst case either way, so nothing below depends on that being answered.
+#
+# Nothing merges anything: the gate decides and a human lands it.
+version: 2
+updates:
+  # Cargo.toml plus Cargo.lock for every member of the workspace.
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 10
+    groups:
+      minor_and_patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+      majors:
+        patterns: ["*"]
+        update-types: ["major"]
+
+  # Its own manifest and lockfile; there is no root package.json.
+  - package-ecosystem: "npm"
+    directory: "/apps/web"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 10
+    groups:
+      minor_and_patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+      majors:
+        patterns: ["*"]
+        update-types: ["major"]
+    ignore:
+      # @sveltejs/kit@3.4.0 declares peerOptional typescript@"^6.0.0" and
+      # apps/web overrides the compiler to 6.0.3, so the newest compiler
+      # (7.0.2) cannot be installed: `npm ci` exits 1 with ERESOLVE. A TS
+      # major PR is red on arrival every week it exists, and because majors
+      # are grouped it would also decide every other npm major in the PR.
+      # TS 6.x minor and patch bumps still arrive. Drop this when Kit's
+      # peer range opens.
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
+
+  # Both refs are pinned by full SHA, and jdx/mise-action is third party:
+  # it installs the toolchain the gate asserts, so a stale one is a gate
+  # failure no agent can fix from inside the repo.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 10
+    groups:
+      minor_and_patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+      majors:
+        patterns: ["*"]
+        update-types: ["major"]
+
+  # The channel that toolchain-pins compares `rustc --version` against, so a
+  # bump here moves what the gate asserts. No majors to split out for years.
+  - package-ecosystem: "rust-toolchain"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 10
+    groups:
+      all_updates:
+        patterns: ["*"]
