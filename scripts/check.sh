@@ -32,15 +32,37 @@ for f in "${adr_files[@]}"; do
   esac
   num=${f##*/}
   num=${num%%-*}
-  grep -q '^Status: \(proposed\|accepted\)' "$f" || { echo "        $f: no 'Status: proposed' or 'Status: accepted' line"; adr_bad=1; }
+  # The state is the line's first word, and the guard after it is load-bearing: `proposed|accepted`
+  # unanchored lets `Status: proposedly` and `proposed-legacy` read as valid states, which is the
+  # defect #3 names by name, measured still passing on main and on this PR's first draft. But the state
+  # may still carry a sentence, because that is how this corpus annotates the line -- all four shipped
+  # ADRs read `Status: proposed. Human owner: Aaron; ...` -- and README gives that line to the human
+  # alone, so the gate takes the first word rather than rewriting four people's Status lines to suit a
+  # regex. The supersession value is exact, because the gate reads a number out of it.
+  grep -qE '^Status: (proposed|accepted)([[:space:].]|$)|^Status: superseded by ADR-[0-9]{4}$' "$f" \
+    || { echo "        $f: Status line neither begins with 'proposed'/'accepted' nor reads 'superseded by ADR-NNNN'"; adr_bad=1; }
   for h in '## Context' '## Decision' '## Rejected alternatives' '## Evidence' '## Binding summary for AGENTS.md'; do
     grep -qx "$h" "$f" || { echo "        $f: missing section '$h'"; adr_bad=1; }
   done
-  # README Format: adding ADR-NNNN while superseding NNNN in one diff is one decision twice.
-  # shortcut: prose that spells the pattern verbatim would trip this; narrow it to the file's own
-  # Status/Decision block if that ever happens.
-  if grep -qi "superseded by ADR-$num\b" "$f"; then
-    echo "        $f: declares itself superseded by its own number"; adr_bad=1
+  # Supersession, read off the Status line and nowhere else: the old record says `superseded by
+  # ADR-NNNN`, that record exists, and it points back with `Supersedes ADR-NNNN`. Both directions are
+  # required because the failure is silent otherwise -- Equinor audited its own corpus for exactly this
+  # after finding "informal/undeclared supersession", and the only CI enforcement of it found anywhere
+  # (plecture's check-adr-lifecycle.sh) fails the build on a one-directional pair. Anchoring to the
+  # Status line is what makes prose safe: this rule used to grep the whole file for the pattern, and
+  # apology for tripping on an unrelated mention by number, and a dangling target passed it.
+  sup=$(sed -n 's/^Status: superseded by ADR-\([0-9][0-9][0-9][0-9]\)$/\1/p' "$f" | head -1)
+  if [ -n "$sup" ]; then
+    if [ "$sup" = "$num" ]; then
+      echo "        $f: Status supersedes its own record"; adr_bad=1
+    else
+      tgt=$(find docs/adr -maxdepth 1 -name "$sup-*.md" | head -1)
+      if [ -z "$tgt" ]; then
+        echo "        $f: Status names ADR-$sup and no docs/adr/$sup-*.md exists"; adr_bad=1
+      elif ! grep -qiE 'supersed[a-z]*[[:space:]:]+\[?ADR-'"$num" "$tgt"; then
+        echo "        $f: ADR-$sup does not state 'Supersedes ADR-$num'"; adr_bad=1
+      fi
+    fi
   fi
 done
 if [ "$adr_bad" -eq 0 ]; then pass "adr-structure"; else fail "adr-structure"; fi
