@@ -464,20 +464,28 @@ report "all budget fixtures ran" "9" "$scope_probes"
 # they are different code paths — `--staged` reads the index (and prints "0 commits scanned"), the
 # unguarded call walks history from HEAD.
 #
-# The history probe commits a second, clean commit on purpose. With the secret as the tip commit,
-# "the last commit" and "all of history" are the same question: `gl_cmd --log-opts=-1` then passes a
-# suite whose history scan sees nothing. Measured on a repo holding the secret two commits back: full
-# history 1 finding, `--log-opts=-1` 0 findings.
+# The history's shape is the point of this block, so it is asserted rather than assumed. The secret
+# lands three commits under the tip and two probes check the depth and that the tip tree is clean of
+# the file, because both failure modes a reviewer measured pass while looking right: `--log-opts=-N`
+# for any N ≥ 2 sees nothing and every probe still passed with the secret one commit back, and when
+# the secret's own commit fails (a held `index.lock` is the plausible one) the next commit lands it at
+# the tip, where the label says three back and the printed reason still matches because it names the
+# call, not the range. shortcut: depth 3 pins any scan reaching 4+ commits back; a window wider than
+# the whole fixture is not distinguished from a full walk, and no narrower mutation is expected.
 #
-# Each red probe also asserts the sentence the gate prints, because a verdict word alone cannot say
-# which scan fired: with the fixture's own commit failing, both red probes stay satisfied by the
-# staged scan and the history probe measures nothing. Measured against pinned gitleaks 8.30.1: this
-# value trips `generic-api-key` (an entropy rule), not an AWS one; the AWS docs secret key is
-# allowlisted upstream; and an AWS access-key-id is flagged only inside the rule's `[A-Z2-7]` base32
-# class, which is why two plausible AKIA values here measure clean. The value is split across four
-# quoted runs so this file is not itself a finding. No `probe.env`: `.gitignore` ignores `*.env` by
-# design (ADR-0002), and an ignored path fails the two red probes loudly — that is the signal, so
-# there is no guard to skip quietly instead of asserting.
+# The config probe exists because these scans read the repo's config and the scratch repo had none, so
+# every probe ran on gitleaks' embedded defaults while `just check` runs on whatever config sits in the
+# worktree — the #12 class this block's first draft cited and did not fix. An untracked `.gitleaks.toml`
+# in the worktree disarms both scans for real secrets and the suite cannot see it. Measured on the
+# pinned binary, same tree and same history both ways: no config `leaks found: 1`, with `[allowlist]
+# paths` naming this file `no leaks found`. Nothing is tracked at any `*gitleaks*` path (#51, #55).
+#
+# Measured against pinned gitleaks 8.30.1: this value trips `generic-api-key` (an entropy rule), not an
+# AWS one; the AWS docs secret key is allowlisted upstream; `AKIA`+16 is flagged only inside that rule's
+# `[A-Z2-7]` base32 class, and wrapped in a name containing `aws_secret` even an out-of-class value comes
+# back flagged by the entropy rule. The value is split across four quoted runs so this file is not
+# itself a finding. No `probe.env`: `.gitignore` ignores `*.env` by design (ADR-0002), and an ignored
+# path fails the red probes loudly — that is the signal, so no guard skips quietly.
 gl_probes=0
 expect_gl() { # check want label [the reason the gate must print]
   expect_check "$1" "$2" "$3"; gl_probes=$((gl_probes + 1))
@@ -487,6 +495,7 @@ expect_gl() { # check want label [the reason the gate must print]
     gl_probes=$((gl_probes + 1))
   fi
 }
+expect_shape() { gl_probes=$((gl_probes + 1)); report "$1" "$2" "$3"; }
 gl_base=$(git rev-parse HEAD) # the reset below returns here, so no probe of mine is in anyone's baseline
 gl_secret_value="hR3nQpLd""Kf8sVtYb""NwCzXmJq""AeGdUiOo"
 if make probe_aws_config.toml "aws_secret_access_key = \"$gl_secret_value\""; then
@@ -496,16 +505,30 @@ if make probe_aws_config.toml "aws_secret_access_key = \"$gl_secret_value\""; th
   expect_gl gitleaks green "the same bytes, present but not staged"
   stage probe_aws_config.toml
   git commit -q -m "fixture: a secret that has landed"
-  printf 'clean\n' > gl_after.txt && stage gl_after.txt && git commit -q -m "a clean commit after the secret"
-  expect_gl gitleaks red "a secret two commits back in history" "history contains a secret"
+  for gl_n in 1 2 3; do
+    printf 'clean\n' > "gl_after$gl_n.txt" && stage "gl_after$gl_n.txt" && git commit -q -m "clean commit $gl_n"
+  done
+  expect_shape "the secret sits 3 commits under the tip" "3" \
+    "$(git rev-list --count "$(git log -1 --format=%H -- probe_aws_config.toml)"..HEAD)"
+  expect_shape "and the tip tree does not hold it" "0" \
+    "$(git show --name-only --format= HEAD | grep -c probe_aws_config.toml)"
+  expect_gl gitleaks red "a secret three commits back in history" "history contains a secret"
+  if make .gitleaks.toml "[extend]
+useDefault = true
+
+[allowlist]
+paths = ['''probe_aws_config.toml''']"; then
+    expect_gl gitleaks green "the same history, allowed by the repo's own config"
+    rm -f .gitleaks.toml
+  fi
   git reset -q --hard "$gl_base"
   expect_gl gitleaks green "the commits gone, the scan clean again"
 else
   skipping "make probe_aws_config.toml" "gitleaks assertions"
 fi
-# Outside the guard above on purpose: a block that never runs reports 0 against 6 and breaks the run,
+# Outside the guard above on purpose: a block that never runs reports 0 against 9 and breaks the run,
 # which is what keeps a precondition from shedding these probes silently.
-report "all gitleaks assertions ran" "6" "$gl_probes"
+report "all gitleaks assertions ran" "9" "$gl_probes"
 
 run_gate; report "restored to baseline" "$base" "$(verdict)"
 printf 'selftest: %d broken, %d skipped\n' "$bad" "$skipped"

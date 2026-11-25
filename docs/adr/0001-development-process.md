@@ -190,8 +190,9 @@ holding only the diff is the only independence we have.
 
 Machine-enforced by `just check`: the diff budget, the suppression ban, toolchain pins with a missing
 pin line as a failure, ADR filename and index consistency, generated-path tracked-ness, and secret
-scanning. `just selftest` pins both directions by check name for the diff budget, the pins, secret
-scanning; the other three have red fixtures only, and `drift` none at all. The ADR length cap
+scanning. Coverage is uneven and stated as measured: the pins and secret scanning are pinned in both
+directions by check name, the rest at rule level (not arm level) are asserted red or skipped, and
+`drift` has no fixture at all. The ADR length cap
 warns and does not block, which is the whole of its power. Platform settings enforce `--ff-only`, no
 squash, no force-push, no push to `main`; `commit-msg` enforces trailer presence and an `Agent:` model
 name whose words appear in `$PI_MODEL`. Nothing enforces worktree isolation or FLAG path detection, and
