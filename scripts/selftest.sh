@@ -159,9 +159,9 @@ fi
 
 # The .md gates, both directions. Each line below is a live misfire found by auditing the corpus
 # checks against a scratch tree: a mistyped filename was invisible to every ADR check, and an index
-# row that named no file made the README-to-file direction check nothing. The status vocabulary and
-# the required-section list are deliberately absent here, because the Vale unit lands them as config
-# and carries their fixtures instead.
+# row that named no file made the README-to-file direction check nothing. The status vocabulary, the
+# required headings and the supersession lifecycle are pinned here too, in both directions. The plan to move
+# them into a Vale config was deferred and never ran, so nothing else enforces them but these probes.
 adr_body() { printf 'Status: %s\n\n# T\n\n## Context\n\nb\n\n## Decision\n\nd\n\n## Rejected alternatives\n\nr\n\n## Evidence\n\ne\n\n## Binding summary for AGENTS.md\n\nz\n' "$1"; }
 expect_check() { run_gate; # check want name
   local line got
@@ -169,7 +169,9 @@ expect_check() { run_gate; # check want name
   case "$line" in
     *FAIL*) got=red ;; *WARN*) got=warn ;; *SKIP*) got=skip ;; *PASS*) got=green ;; *) got=absent ;;
   esac
-  if [ "$got" = "$2" ]; then printf '  ok    %-42s %s\n' "$3" "$got"
+  # 4th arg, optional: a string the gate must have printed. A verdict alone can be satisfied by any
+  # unrelated failure inside the same check, which is how a probe passes while proving nothing.
+  if [ "$got" = "$2" ] && { [ -z "${4:-}" ] || grep -qF "$4" "$log"; }; then printf '  ok    %-42s %s\n' "$3" "$got"
   else printf '  BROKE %-42s wanted %s, gate said %s\n' "$3" "$2" "$got"; bad=$((bad + 1)); fi
 }
 
@@ -185,13 +187,55 @@ fi
 # The length cap, both directions, pinned to the documented number. The fixture has to land at 201
 # lines as `wc -l` counts them, and command substitution eats the final newline, hence head -202. With
 # it that way, widening the cap past 200 breaks this probe and narrowing it breaks the other one,
-# because the real corpus's longest file is 198. A fixture 32 lines over the bar pins nothing.
+# because the real corpus's longest file now sits at the cap (ADR-0001, 200 lines). A fixture 32 lines over the bar pins nothing.
 if make docs/adr/9995-long.md "$({ adr_body proposed; awk 'BEGIN{for(i=0;i<250;i++)print "filler " i}'; } | head -202)"; then
   expect_check adr-length warn "an ADR past the 200-line cap"
   rm -f docs/adr/9995-long.md
 fi
 expect_check adr-length green "the corpus inside the cap"
 
+# The supersession lifecycle, both directions. This rule used to grep the whole file for the pattern
+# and to look only for the record's own number, which got both the directions wrong: the prose
+# spelling below failed the build, and a supersession whose target did not exist, or whose target never
+# pointed back, passed it. The three files stay out of the index on purpose -- `expect_check` names
+# adr-structure, so an unrelated adr-index red cannot stand in for a real verdict here.
+sup_probes=0
+expect_sup() { sup_probes=$((sup_probes + 1)); expect_check "$@"; }
+sup_back() { adr_body accepted | sed 's|^## Decision|## Decision\n\nSupersedes ADR-9992|'; }
+if make docs/adr/9991-new.md "$(sup_back)" \
+   && make docs/adr/9992-old.md "$(adr_body 'superseded by ADR-9991')" \
+   && make docs/adr/9993-prose.md "$(adr_body proposed)"; then
+  expect_sup adr-structure green "supersession pair, both pointers present"
+  printf '%s' "$(adr_body accepted)" > docs/adr/9991-new.md
+  expect_sup adr-structure red "supersession the replacement does not return" \
+    "ADR-9991 does not state 'Supersedes ADR-9992'"
+  printf '%s' "$(adr_body 'superseded by ADR-9990')" > docs/adr/9992-old.md
+  expect_sup adr-structure red "supersession naming a record that does not exist" \
+    "no docs/adr/9990-*.md exists"
+  printf '%s' "$(adr_body 'superseded by ADR-9992')" > docs/adr/9992-old.md
+  expect_sup adr-structure red "a record that supersedes itself" "supersedes its own record"
+  # The vocabulary is an enum, so a value that merely starts with a legal word is not legal. Main
+  # matched the prefix, and `proposedly` and `proposed-legacy` are the values #3 names by name.
+  for bad_status in retired proposedly proposed-legacy; do
+    printf '%s' "$(adr_body "$bad_status")" > docs/adr/9992-old.md
+    expect_sup adr-structure red "Status '$bad_status' is not a state" "begins with 'proposed'"
+  done
+  # Green side of the same line: this corpus puts a sentence on the Status line (all four shipped ADRs
+  # read `Status: proposed. Human owner: Aaron; ...`), so an over-anchored regex fails the real corpus.
+  # That is how the first draft of this rule was caught, by `just check` going red on four untouched ADRs.
+  printf '%s' "$(adr_body 'proposed. Human owner: Aaron; stamped accepted (date) at the merge')" \
+    > docs/adr/9992-old.md
+  expect_sup adr-structure green "the Status sentence the shipped corpus carries"
+  # Main's rule fails this last probe: it greps the file for "superseded by ADR-9993", finds the phrase
+  # inside a sentence, and calls a legal record a decision written twice.
+  printf '%s' "$(sup_back)" > docs/adr/9991-new.md
+  printf '%s' "$(adr_body 'superseded by ADR-9991')" > docs/adr/9992-old.md
+  printf '%s' "$({ adr_body proposed; printf '\nWriting `superseded by ADR-9993` in a sentence is prose.\n'; })" \
+    > docs/adr/9993-prose.md
+  expect_sup adr-structure green "the pattern spelled out in prose"
+  rm -f docs/adr/9991-new.md docs/adr/9992-old.md docs/adr/9993-prose.md
+fi
+report "all supersession probes ran" "9" "$sup_probes"
 
 # The rule that a gate edit must ship a fixture, tested against itself.
 printf '\n# probe\n' >> scripts/check.sh

@@ -37,12 +37,19 @@ a second ADR.
 Status lifecycle: an agent writes `proposed`; the human stamps `accepted (date)` at the merge that
 lands it, and that line belongs to the human alone. Before merge an ADR is a draft: edit it on its
 own branch, do not supersede it. After merge it may be **shortened** (prune evidence, fix dead
-links, correct wording) but never **reversed**; a change of course is `superseded by ADR-00NN`.
+links, correct wording) but never **reversed**; a change of course is two lines that name each other.
+`ADR-0010` supersedes `ADR-0009` by making 0009's `Status:` line read `superseded by ADR-0010` and 0010
+state `Supersedes ADR-0009` where its body explains the change. Both pointers or neither: the `Status:`
+line is the only place a supersession is read, so the same phrase inside a sentence is prose, not a
+state.
 Evidence means a quote or a command transcript. A citation to a page nobody can reach is not
 evidence. Shape to copy: `0004-license.md`.
 
-Gate (`adr-structure` in `scripts/check.sh`): an ADR that declares itself `superseded by ADR-NNNN` with
-its own number fails. That is one decision written twice.
+Gate (`adr-structure` in `scripts/check.sh`): the `Status:` line begins with `proposed` or `accepted`,
+or reads exactly `superseded by ADR-NNNN`, and a supersession fails unless the record it names exists
+and names the file back. Naming yourself is one decision written twice; a pointer at a record that does
+not exist, or at one that never mentions you, is the same claim made quietly. All four are gate failures,
+not advice.
 
 Sourcing rule: cite by id (`arXiv:NNNN.NNNNN`, `doi:…`) plus the one clause leaned on. Quote verbatim
 only when the exact wording is the rule. Every blockquote is a second text to keep true, and this
