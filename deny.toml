@@ -24,6 +24,11 @@ allow = [
     "ISC",
     "MIT",
     "MPL-2.0",
+    # Unicode License v3: permissive, OSI-approved; gnu.org's list calls it "compatible with all
+    # versions of the GNU GPL". Its one condition is preserving the copyright notice on distribution,
+    # which nothing here serves yet. Added for `unicode-ident` on the human's decision (#11); the
+    # fixture matrix lives in the body of #17, not here, so this line does not rot.
+    "Unicode-3.0",
     "Unicode-DFS-2016",
     "Zlib",
 ]
