@@ -59,6 +59,19 @@ for ref in $(grep -oE '[0-9]{4}-[a-z0-9-]+\.md' docs/adr/README.md | sort -u); d
 done
 if [ "$idx_bad" -eq 0 ]; then pass "adr-index"; else fail "adr-index"; fi
 
+# --- ADR length: the README asks for one page, so one page has to be a number ------------------
+# The cap is 200 lines: the bar, not today's maximum. The longest ADR was 229 when the rule was
+# written, so a limit set at the maximum could never fire on the file that motivated it.
+adr_len=0
+for f in "${adr_files[@]}"; do
+  n=$(wc -l < "$f")
+  if [ "$n" -gt 200 ]; then
+    echo "        $f: $n lines, past the 200-line cap; prune evidence, split only if there is a second decision"
+    warn "adr-length"; adr_len=1
+  fi
+done
+[ "$adr_len" -eq 0 ] && pass "adr-length (${#adr_files[@]} ADRs measured, all within 200 lines)"
+
 # --- Toolchain pins: a shadowed binary must not look like success ----------------------------
 pin_bad=0
 want_node=$(sed -n 's/^node *= *"\([^"]*\)".*/\1/p' mise.toml | head -1)

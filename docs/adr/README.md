@@ -26,11 +26,13 @@ investigation); anything with no rejected alternative.
 
 ## Format
 
-One page, `NNNN-title.md`, sections: Context · Decision · Rejected alternatives (with the reason
-that kills each) · Evidence · Binding summary for AGENTS.md. Every binding line names its enforcer:
-a `just` recipe, a lint, a hook, or a platform setting. A line with no enforcer is advice, and
-advice decays. File structure has no measurable effect on compliance, and adherence falls as the
-amount a session has already generated grows (arXiv:2605.10039).
+At most 200 lines (`adr-length` in `scripts/check.sh`), `NNNN-title.md`, sections: Context · Decision ·
+Rejected alternatives (with the reason that kills each) · Evidence · Binding summary for AGENTS.md.
+Every binding line names its enforcer: a `just` recipe, a lint, a hook, or a platform setting. A line
+with no enforcer is advice, and advice decays. The cap warns rather than fails because file structure
+has no measurable effect on compliance, and adherence falls as the amount a session has already
+generated grows (arXiv:2605.10039). The fix for a long ADR is pruning evidence; a second decision means
+a second ADR.
 
 Status lifecycle: an agent writes `proposed`; the human stamps `accepted (date)` at the merge that
 lands it, and that line belongs to the human alone. Before merge an ADR is a draft: edit it on its
@@ -39,8 +41,8 @@ links, correct wording) but never **reversed**; a change of course is `supersede
 Evidence means a quote or a command transcript. A citation to a page nobody can reach is not
 evidence. Shape to copy: `0004-license.md`.
 
-Gate, once `just check` exists: a PR that adds `docs/adr/NNNN-*.md` and supersedes `NNNN` in the
-same diff fails. That is one decision written twice.
+Gate (`adr-structure` in `scripts/check.sh`): an ADR that declares itself `superseded by ADR-NNNN` with
+its own number fails. That is one decision written twice.
 
 Sourcing rule: cite by id (`arXiv:NNNN.NNNNN`, `doi:…`) plus the one clause leaned on. Quote verbatim
 only when the exact wording is the rule. Every blockquote is a second text to keep true, and this

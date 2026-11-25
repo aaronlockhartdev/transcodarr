@@ -160,6 +160,16 @@ if make docs/adr/9997-unlisted.md "$(adr_body proposed)"; then
   rm -f docs/adr/9997-unlisted.md
 fi
 
+# The length cap, both directions, pinned to the documented number. The fixture has to land at 201
+# lines as `wc -l` counts them, and command substitution eats the final newline, hence head -202. With
+# it that way, widening the cap past 200 breaks this probe and narrowing it breaks the other one,
+# because the real corpus's longest file is 198. A fixture 32 lines over the bar pins nothing.
+if make docs/adr/9995-long.md "$({ adr_body proposed; awk 'BEGIN{for(i=0;i<250;i++)print "filler " i}'; } | head -202)"; then
+  expect_check adr-length warn "an ADR past the 200-line cap"
+  rm -f docs/adr/9995-long.md
+fi
+expect_check adr-length green "the corpus inside the cap"
+
 # The rule that a gate edit must ship a fixture, tested against itself.
 printf '\n# probe\n' >> scripts/check.sh
 stage scripts/check.sh
