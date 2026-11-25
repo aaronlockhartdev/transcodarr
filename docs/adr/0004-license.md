@@ -13,8 +13,8 @@ unmodified or lightly modified copy as a paid service and never publishes their 
 ### AGPL-3.0-only
 
 Enforced mechanically, because a license an agent doesn't know about is not
-real: `deny.toml` carries an allow-list, and `cargo deny check licenses` runs in `just check` and
-CI, so an AGPL-incompatible dependency fails the build. It does not wait for a reviewer to notice.
+real: `deny.toml` carries the allow list, and `cargo deny check licenses` runs in `just check`
+and CI, so an AGPL-incompatible dependency fails the build. It does not wait for a reviewer to notice.
 Neither gate stops an agent from deciding the ban is the bug and adding an allow entry, so that
 decision is banned in prose.
 
@@ -41,16 +41,22 @@ switched **from MIT to AGPLv3** in February 2024 (discussion #7023) explicitly t
 hosted wrappers.
 
 Compatibility direction we depend on: MIT / Apache-2.0 / BSD / ISC / MPL-2.0 crates are usable in an
-AGPL-3.0 project (Apache-2.0 → AGPLv3 is one-way compatible). GPL-2.0-only is the exclusion, and it
-is a `cargo deny` ban entry.
+AGPL-3.0 project (Apache-2.0 to AGPLv3 is one-way compatible). GPL-2.0-only is the exclusion, and the
+pinned cargo-deny has no license ban table, so the exclusion is carried by its absence from the allow
+list. The semantics are SPDX's: a dependency that offers a compatible side (`MIT OR GPL-2.0-only`) is
+satisfied by that side and passes, which is correct, since you may take it. The door that would re-admit
+GPL-2.0-only alone is `[[licenses.exceptions]]`, and rule 1 bans reaching for it.
 
 Text relied on: AGPL-3.0 §13, "Remote Network Interaction; Use of Source Code", i.e. network use
 counts as conveying.
 
 ## Binding summary for AGENTS.md
 
-1. Never widen `deny.toml`. No "temporary" allow entry to unblock a build; report it to the human.
-   Enforcer: the path is a FLAG path and `cargo deny` runs in `just check` and CI.
+1. Never widen `deny.toml`. No "temporary" allow entry and no `[[licenses.exceptions]]` entry to
+   unblock a build; report it to the human. Enforcer: the path is a FLAG path and `cargo deny` runs in
+   `just check` and CI.
 
-Machine-enforced, so out of `AGENTS.md`: the licence is `LICENSE` (AGPL-3.0-only) and the
-GPL-2.0-only exclusion is a `deny.toml` ban entry.
+Machine-enforced for dependencies, so out of `AGENTS.md`: the licence is `LICENSE` (AGPL-3.0-only), and
+the GPL-2.0-only exclusion is the absence of an allow entry in `deny.toml`, which cargo-deny reports as
+`license is not explicitly allowed`. Workspace crates are skipped rather than checked (`private`), so
+the licence of this repo's own crate is a file on disk and not a gate result (#14).

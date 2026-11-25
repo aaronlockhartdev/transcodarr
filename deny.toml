@@ -3,17 +3,23 @@
 # Widening this file to unblock a build is banned, and so is `cargo deny` config you found by
 # searching for the error message. If a dependency fails here, report it; the fix is a different
 # dependency, not a new entry below.
+#
+# Schema: cargo-deny 0.22, the version pinned in `mise.toml`. Upstream deprecated the `[licenses]`
+# keys `unlicensed`, `copyleft` and `deny` in 0.14.12 (cargo-deny#606, #611) and made using them an
+# error in 0.16.0 (#681), so the pinned binary refuses all three and the allow list below carries the
+# whole licence policy.
 
 [licenses]
 version = 2
-unlicensed = "deny"
-copyleft = "warn"
+# `copyleft` was a lint level here; the pinned binary refuses the key now. An unlisted license, copyleft
+# included, is rejected rather than warned. `[[licenses.exceptions]]` can still re-admit one license for
+# one crate, and ADR-0004 rule 1 bans reaching for it.
 confidence-threshold = 0.93
 allow = [
     "0BSD",
     "Apache-2.0",
-    "BSD-2-clause",
-    "BSD-3-clause",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
     "CC0-1.0",
     "ISC",
     "MIT",
@@ -21,12 +27,15 @@ allow = [
     "Unicode-DFS-2016",
     "Zlib",
 ]
+# Skips, rather than checks, unpublished workspace crates, so this repo's own AGPL-3.0-only crate is
+# outside the gate and the skip prints only under `-W skipped-private-workspace-crate` (#14).
 private = { ignore = true }
 
-# The one entry the ADR names by hand: AGPL-incompatible, and easy to pull in transitively.
-deny = [
-    { expression = "GPL-2.0-only", reason = "incompatible with AGPL-3.0-only; see ADR-0004" },
-]
+# GPL-2.0-only stays excluded (ADR-0004): it is absent from the allow list, and the pinned binary
+# refuses a license ban table, so there is no expression-level entry to keep current. The semantics are
+# SPDX's, and they are permissive in one case worth knowing: a dependency that offers a compatible side
+# ("MIT OR GPL-2.0-only") is satisfied by that side and passes, which is right, since you may take it.
+# What would re-admit GPL-2.0-only alone is `[[licenses.exceptions]]`, banned by ADR-0004 rule 1.
 
 [bans]
 multiple-versions = "warn"
