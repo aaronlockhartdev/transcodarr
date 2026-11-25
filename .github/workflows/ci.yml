@@ -31,7 +31,7 @@ jobs:
     # target dir whose mtimes make cargo consider artifacts fresh is the exact
     # failure this job exists to catch - `serving` boots whatever binary is in
     # target, so a cached artifact is a green for a build nobody made.
-    timeout-minutes: 15
+    timeout-minutes: fifteen
     steps:
       # Pinned by SHA: this runs on PRs and is a FLAG path (ADR-0001).
       # actions/checkout v7.0.1
