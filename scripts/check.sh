@@ -126,10 +126,14 @@ elif ! cargo fmt --all --check; then
   fail cargo
 elif ! cargo clippy --workspace --all-targets -- -D warnings; then
   fail cargo
-elif ! cargo check --workspace --all-targets; then
+elif ! cargo build --workspace; then
+  echo "        cargo build --workspace: the shipped binary did not build."
+  fail cargo
+elif ! cargo test --workspace --quiet; then
+  echo "        cargo test --workspace failed. CI compiled this suite and never ran it until #26."
   fail cargo
 else
-  pass "cargo (fmt, clippy -D warnings, check)"
+  pass "cargo (fmt, clippy -D warnings, build, test)"
 fi
 
 # --- License policy (ADR-0004) ---------------------------------------------------------------
@@ -155,6 +159,68 @@ elif ! npm --prefix apps/web run check; then
   fail web
 else
   pass "web (svelte-check + tsc)"
+fi
+
+# --- The build the shipped binary serves (#30) -------------------------------------------------
+# `npm run check` is svelte-check plus tsc: a type check that never bundles. Nothing in the gate,
+# in CI, or in any documented recipe produced apps/web/build, the directory this binary exists to
+# serve. adapter-static's fallback option, prerender config and the #lib import map are all
+# bundle-time, so a defect there stayed green and was visible only in a browser.
+if [ ! -f apps/web/package.json ]; then
+  skip "web build" "no apps/web/package.json (ADR-0003 unit 2)"
+elif ! just build-web; then
+  echo "        just build-web failed. The binary would serve a directory nothing built."
+  fail "web build"
+elif [ ! -f apps/web/build/index.html ]; then
+  echo "        just build-web reported success and left no apps/web/build/index.html."
+  fail "web build"
+else
+  pass "web build (apps/web/build/index.html)"
+fi
+
+# --- Boot the binary and ask it for what it ships (#24) ----------------------------------------
+# Everything above reads source; none of it started the process. A router built and never served,
+# an env var misspelled in main.rs, ServeDir's guard regressed: all green. This runs the real
+# binary against the real build directory, so it fails when either half stops fitting the other.
+if ! command -v curl >/dev/null 2>&1; then
+  skip serving "curl not on PATH"
+else
+  # Where cargo puts its binaries is cargo's business. Hardcoding target/debug would make this
+  # skip on any machine that shares a target directory between worktrees.
+  tgt=$(cargo metadata --no-deps --format-version 1 2>/dev/null \
+        | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])' 2>/dev/null)
+  [ -n "$tgt" ] || tgt=target        # no workspace in here: the conventional location
+  if [ ! -x "$tgt/debug/transcodarr" ]; then
+    skip serving "$tgt/debug/transcodarr is not built (the cargo check above did not run)"
+  elif [ ! -f apps/web/build/index.html ]; then
+    fail serving "apps/web/build/index.html missing: nothing for the binary to serve"
+  else
+    port=$((20000 + RANDOM % 20000))   # a fixed port would collide with another worktree's daemon
+    TRANSCODARR_ADDR="127.0.0.1:$port" TRANSCODARR_WEB_BUILD=apps/web/build \
+      "$tgt/debug/transcodarr" >/tmp/check-serving.log 2>&1 &
+    pid=$!
+    root_code=""
+    api_code=""
+    for _ in $(seq 1 40); do
+      root_code=$(curl -s -o /tmp/check-serving-root -w '%{http_code}' "http://127.0.0.1:$port/" 2>/dev/null)
+      case "$root_code" in ""|000) sleep 0.1 ;; *) break ;; esac
+    done
+    api_code=$(curl -s -o /tmp/check-serving-api -w '%{http_code}' "http://127.0.0.1:$port/api" 2>/dev/null)
+    kill "$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null
+    srv_bad=0
+    [ "$root_code" = 200 ] || { echo "        GET / answered '${root_code:-nothing}', wanted 200."; srv_bad=1; }
+    grep -qi '<!doctype html' /tmp/check-serving-root 2>/dev/null \
+      || { echo "        GET / answered ${root_code} without the app shell."; srv_bad=1; }
+    [ "$api_code" = 404 ] || { echo "        GET /api answered '${api_code:-nothing}', wanted 404."; srv_bad=1; }
+    if [ "$srv_bad" -ne 0 ]; then
+      echo "        --- what the binary said: ---"
+      sed 's/^/        /' /tmp/check-serving.log
+      fail serving
+    else
+      pass "serving (booted on :$port; / is the shell, /api is a 404)"
+    fi
+  fi
 fi
 
 # --- Contract drift (ADR-0003) ---------------------------------------------------------------

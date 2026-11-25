@@ -47,6 +47,27 @@ async fn api_paths_are_refused_and_app_paths_are_served() {
         );
     }
 
+    // Nothing outside the served directory may be readable through it, whatever the status code.
+    // An encoded `..` lands on the SPA fallback today and answers 200 with the shell (#22), so the
+    // invariant worth pinning is "no escape" rather than the status the fallback happens to return.
+    let secret = format!("transcodarr-secret-{}.txt", std::process::id());
+    std::fs::write(
+        dir.parent().unwrap().join(&secret),
+        b"this file is outside the served directory",
+    )
+    .unwrap();
+    for path in [format!("/../{secret}"), format!("/%2e%2e/{secret}")] {
+        let res = call(&app, &path).await;
+        let body = to_bytes(res.into_body(), 64 * 1024).await.unwrap();
+        assert!(
+            !std::str::from_utf8(&body)
+                .unwrap_or("")
+                .contains("outside the served directory"),
+            "{path} read a file outside the served directory: {body:?}"
+        );
+    }
+    std::fs::remove_file(dir.parent().unwrap().join(&secret)).ok();
+
     std::fs::remove_dir_all(&dir).ok();
 }
 

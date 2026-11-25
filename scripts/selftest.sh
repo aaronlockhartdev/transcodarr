@@ -186,6 +186,61 @@ if grep -q '^node = ' mise.toml; then
   git checkout -q -- mise.toml
 fi
 
+# The two checks that look at the shipped artifact instead of the sources, both directions.
+#
+# `serving` runs against a stub binary: a real HTTP server (python's) pointed at a fixture build
+# directory. What these probes pin is the check's wiring, not the binary's behaviour, which
+# apps/server/tests/serving.rs pins and `cargo test` only started running in CI with #26. The green
+# probe is the load-bearing one: a wrong binary path would make the check SKIP quietly forever.
+make target/debug/transcodarr '#!/bin/sh
+exec python3 -m http.server "${TRANSCODARR_ADDR##*:}" --bind "${TRANSCODARR_ADDR%:*}" --directory apps/web/build
+' && chmod +x target/debug/transcodarr
+make apps/web/build/index.html '<!doctype html><html>the app</html>
+'
+if [ -x target/debug/transcodarr ] && [ -f apps/web/build/index.html ]; then
+  rm -f apps/web/build/index.html
+  expect_check serving red "serving: no index.html for the binary to serve"
+  make apps/web/build/index.html '<!doctype html><html>the app</html>
+'
+  printf '#!/bin/sh\nexit 1\n' > target/debug/transcodarr
+  expect_check serving red "serving: the binary exits without ever listening"
+  printf '#!/bin/sh\nexec python3 -m http.server "${TRANSCODARR_ADDR##*:}" --bind "${TRANSCODARR_ADDR%%:*}" --directory apps/web/build\n' \
+    > target/debug/transcodarr && chmod +x target/debug/transcodarr
+  expect_check serving green "serving: a live process and a real build directory"
+  rm -f target/debug/transcodarr
+  expect_check serving skip "serving: no binary at all, so the check cannot report a pass"
+fi
+rm -rf target apps/web
+
+# `cargo test` has teeth, both directions. Before #26 the suite was compiled and never run, so a
+# failing test reported green: this fixture is exactly what the gate could not see. Kept to a
+# no-dependency crate so it costs seconds. Cargo.lock and target go afterwards, because an
+# untracked Cargo.lock would trip generated-paths-tracked in every probe that follows.
+if make Cargo.toml '[package]
+name = "probe"
+version = "0.0.0"
+edition = "2021"
+' && make src/lib.rs '#[cfg(test)]
+mod probes {
+    #[test]
+    fn red_fixture() {
+        let n = std::hint::black_box(1);
+        assert_eq!(n, 2, "fixture: a failing test the gate must run and report");
+    }
+}
+'; then
+  expect_check cargo red "a Rust test that fails"
+  printf '#[cfg(test)]\nmod probes {\n    #[test]\n    fn green_fixture() {\n        let n = std::hint::black_box(1);\n        assert_eq!(n, 1);\n    }\n}\n' > src/lib.rs
+  expect_check cargo green "the same crate's test passing"
+fi
+rm -rf Cargo.toml Cargo.lock src target
+
+# `web build` gets no fixture, and says so rather than going unmentioned like gitleaks did. It
+# needs apps/web with node_modules installed, and a suite that runs `npm ci` is a suite that cannot
+# run before CI has installed anything. Proven by hand on the branch that added it; the measured
+# commands and their output are in that PR body.
+skipping "needs the installed frontend; proven by hand" "web build"
+
 run_gate; report "restored to baseline" "$base" "$(verdict)"
 printf 'selftest: %d broken, %d skipped\n' "$bad" "$skipped"
 [ "$bad" -eq 0 ]

@@ -11,6 +11,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     println!("transcodarr listening on http://{addr}");
 
+    // The directory served is not produced by the command the gate runs, so a clone that never
+    // built the SPA answered every deep link with 404 and said nothing about why (#23).
+    let index = std::path::Path::new(&web_build).join("index.html");
+    if index.is_file() {
+        println!("transcodarr serving {web_build}");
+    } else {
+        eprintln!(
+            "transcodarr WARNING: {web_build} has no index.html. Run `just build-web`: every deep \
+             link will 404 and there is no shell to fall back to."
+        );
+    }
+
     axum::serve(
         listener,
         transcodarr::app(web_build.into()).into_make_service(),

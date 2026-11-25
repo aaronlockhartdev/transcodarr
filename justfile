@@ -17,6 +17,12 @@ setup:
 gen:
     npm --prefix apps/web run gen
 
+# Build the SPA the shipped binary serves. `just check` type-checks the frontend; only this
+# produces apps/web/build, so before it no documented command created the directory the binary
+# exists to serve.
+build-web:
+    npm --prefix apps/web run build
+
 # The whole gate. The pre-commit hook and CI both call only this.
 check:
     bash scripts/check.sh
