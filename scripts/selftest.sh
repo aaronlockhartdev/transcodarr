@@ -456,6 +456,48 @@ git reset -q --hard "$scope_base" 2>/dev/null
 rm -f scope_*.py
 report "all budget fixtures ran" "9" "$scope_probes"
 
+# --- Secrets, in both scans and both directions (#37) ---------------------------------------------
+# ADR-0001 claims a both-directions fixture for every rule it enforces, and for secret scanning that
+# claim was false: every probe ran `gitleaks` and reported green, so `elif false` in that branch would
+# have shipped as a passing suite. Both scans get a fixture because they are different code paths —
+# `--staged` reads the index, the unguarded call reads history from HEAD.
+#
+# The secret is assembled from three adjacent quoted runs on purpose. This file is in the real repo,
+# which gitleaks scans on every commit; split this way it holds no match itself, and only the scratch
+# repo's index and history do. The path is tracked-by-default rather than `probe.env`, because
+# `.gitignore` ignores `*.env` by design ("secrets live in the config file, not in git", ADR-0002): a
+# file git will never stage cannot reach gitleaks in the repo or in here, so ignoring it would have
+# made this fixture report a green it never tested. Hence the guard below, which skips loudly.
+#
+# The value is measured against the pinned gitleaks 8.30.1, in both scans. Two shapes that look
+# plausible are not flagged at all: an AWS access key *id* on its own (`AKIA` + 16 chars), and the
+# AWS documentation's own secret key, which gitleaks allowlists. A 32-character value assigned to a
+# name containing `aws_secret` is flagged staged and in history, so that is what the fixture uses.
+gl_probes=0
+expect_gl() { gl_probes=$((gl_probes + 1)); expect_check "$@"; }
+gl_base=$(git rev-parse HEAD)
+gl_secret_value="hR3nQpLd""Kf8sVtYb""NwCzXmJq""AeGdUiOo" # split so this file is no finding
+if make probe_aws_config.toml "aws_secret_access_key = \"$gl_secret_value\""; then
+  stage probe_aws_config.toml
+  if git diff --cached --quiet -- probe_aws_config.toml; then
+    skipping "an ignore rule now covers this path" "gitleaks fixtures"
+    rm -f probe_aws_config.toml
+  else
+    expect_gl gitleaks red "a secret sitting in the index"
+    unstage probe_aws_config.toml
+    expect_gl gitleaks green "the same bytes, present but not staged"
+    stage probe_aws_config.toml
+    git commit -q -m "fixture: a secret that has landed"
+    expect_gl gitleaks red "a secret already in history"
+    git reset -q --hard "$gl_base"
+    expect_gl gitleaks green "the commit gone, the scan clean again"
+    rm -f probe_aws_config.toml
+    report "all gitleaks fixtures ran" "4" "$gl_probes"
+  fi
+else
+  skipping "make probe_aws_config.toml" "gitleaks fixtures"
+fi
+
 run_gate; report "restored to baseline" "$base" "$(verdict)"
 printf 'selftest: %d broken, %d skipped\n' "$bad" "$skipped"
 [ "$bad" -eq 0 ]
