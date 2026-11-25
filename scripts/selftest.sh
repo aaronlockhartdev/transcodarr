@@ -73,7 +73,13 @@ clean_probes() {
 trap 'clean_probes; clean' EXIT
 
 bad=0; skipped=0
-log=/tmp/selftest-gate.log
+# Inside $work, so the path is per-run and dies with the run. A fixed path here is machine-wide: two
+# suites on one box — the normal shape of this project, one worktree per unit — resolve their
+# assertions against each other's gate output. Measured on main with two runs in flight: 4 and 8 fake
+# BROKEs, one reading `wanted /tmp/tmp.V2mNtTrkvB/shims/cargo-deny, gate said /tmp/tmp.oyNWJj75vN`,
+# which is another process's scratch tree answering this process's question. Nothing is lost for
+# post-mortems: `report` below already echoes the log's FAIL and WARN lines into the BROKE output.
+log="$work/selftest-gate.log"
 run_gate() { bash scripts/check.sh > "$log" 2>&1; }
 verdict() { local g=green; grep -q 'FAIL' "$log" && g=red; [ "$g" = green ] && grep -q 'WARN' "$log" && g=warn; printf '%s' "$g"; }
 report() { # name want got
@@ -85,6 +91,10 @@ expect() { run_gate; report "$2" "$1" "$(verdict)"; }
 skipping() { printf '  skip  %-42s %s\n' "$2" "$1"; skipped=$((skipped + 1)); }
 
 printf '=== gate selftest (scratch repo %s) ===\n' "$work"
+# Teeth for the fix above, not a description of it: revert this to a fixed path and the run breaks
+# before any probe can be resolved against a stranger's verdicts.
+report "gate log lives in this run's scratch dir" "ok" \
+  "$(case "$log" in "$work"/*) printf ok ;; *) printf shared ;; esac)"
 run_gate
 base=$(verdict)
 # Not "green": the baseline is whatever this branch's own diff earns, and demanding green here
