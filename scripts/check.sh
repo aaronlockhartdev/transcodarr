@@ -82,7 +82,11 @@ want_rust=$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' rust-toolchain.toml | hea
 got_rust=$(rustc --version 2>/dev/null | awk '{print $2}')
 if [ -z "$want_rust" ]; then echo "        rust-toolchain.toml has no channel = \"…\" pin to compare against"; pin_bad=1
 elif [ "$want_rust" != "$got_rust" ]; then echo "        rustc $got_rust, rust-toolchain.toml pins $want_rust ($(command -v rustc))"; pin_bad=1; fi
-if [ "$pin_bad" -eq 0 ]; then pass "toolchain-pins (node $got_node, rustc $got_rust)"; else fail "toolchain-pins"; fi
+want_deny=$(sed -n 's/^"cargo:cargo-deny" *= *"\([^"]*\)".*/\1/p' mise.toml | head -1)
+got_deny=$(cargo deny --version 2>/dev/null | awk '{print $2}')
+if [ -z "$want_deny" ]; then echo "        mise.toml has no \"cargo:cargo-deny\" pin to compare against"; pin_bad=1
+elif [ "$want_deny" != "$got_deny" ]; then echo "        cargo-deny $got_deny, mise.toml pins $want_deny ($(command -v cargo-deny))"; pin_bad=1; fi
+if [ "$pin_bad" -eq 0 ]; then pass "toolchain-pins (node $got_node, rustc $got_rust, cargo-deny $got_deny)"; else fail "toolchain-pins"; fi
 
 # --- Generated and cache files must stay tracked --------------------------------------------
 # If one goes untracked, the drift gate can never fire again and reports empty diffs forever.

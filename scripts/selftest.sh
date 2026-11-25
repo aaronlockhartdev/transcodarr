@@ -242,6 +242,51 @@ rm -rf Cargo.toml Cargo.lock src target
 # commands and their output are in that PR body.
 skipping "needs the installed frontend; proven by hand" "web build"
 
+# --- The pinned cargo-deny, and the config it reads (#12, #13) -------------------------------------
+# Nothing parsed deny.toml until a Cargo.lock existed, and the gate skips deny when there is none, so a
+# config the pinned binary refuses to load sat on main with `just check` reporting green. Both
+# directions, offline, under a second. `check licenses` only: a full `cargo deny check` fetches the
+# advisory database over the network, which a fixture must not need. The stub crate declares
+# license = "MIT" deliberately: a licence-free stub fails with error[unlicensed] and the green
+# direction would then prove nothing. Run before any Cargo.lock exists here, or the gate's own deny
+# branch fires on every run_gate below and reaches for the network.
+deny_verdict() { cargo-deny --config "$1" check licenses >"$log" 2>&1 && echo green || echo red; }
+expect_check "toolchain-pins" green "the installed cargo-deny matches the pin"
+if make shims/cargo-deny '#!/bin/sh
+echo "cargo-deny 0.15.1"
+'; then
+  chmod +x shims/cargo-deny
+  PATH="$work/shims:$PATH" bash scripts/check.sh > "$log" 2>&1
+  # Not expect_check: it re-runs the gate with the ambient PATH and would report the real binary.
+  pins=$(grep -E '^  (PASS|FAIL|SKIP|WARN)  toolchain-pins' "$log" | head -1)
+  case "$pins" in *FAIL*) pins=red ;; *WARN*) pins=warn ;; *SKIP*) pins=skip ;; *PASS*) pins=green ;; *) pins=absent ;; esac
+  report "a cargo-deny that disagrees with mise.toml" "red" "$pins"
+  rm -rf shims
+else
+  skipping "create a shim binary" "a cargo-deny that disagrees with mise.toml"
+fi
+cp "$repo/deny.toml" deny.toml
+if make Cargo.toml '[package]
+name = "denypin"
+version = "0.0.0"
+edition = "2021"
+license = "MIT"
+' && make src/lib.rs 'pub fn f() {}
+' && make Cargo.lock 'version = 3
+
+[[package]]
+name = "denypin"
+version = "0.0.0"
+'; then
+  report "deny.toml loads under the pinned binary" "green" "$(deny_verdict deny.toml)"
+  printf '\ncopylleft = "warn"\n' >> deny.toml      # the key class behind #12: older read it, 0.22 refuses
+  deny_got=$(deny_verdict deny.toml)
+  [ "$deny_got" = red ] && ! grep -q 'unexpected keys\|failed to parse config' "$log" \
+    && deny_got="red, wrong reason"
+  report "a key the pinned binary refuses" "red" "$deny_got"
+fi
+rm -f Cargo.toml Cargo.lock deny.toml && rm -rf src target
+
 # --- Which diff a budget number describes (#16) ---------------------------------------------------
 # With nothing staged and HEAD at origin/main's tip the dispatch falls through to HEAD^..HEAD, so a
 # local run printed the commit below HEAD as if it were the task's budget: `WARN diff budget (118
