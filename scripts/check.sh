@@ -84,8 +84,12 @@ if [ -z "$want_rust" ]; then echo "        rust-toolchain.toml has no channel = 
 elif [ "$want_rust" != "$got_rust" ]; then echo "        rustc $got_rust, rust-toolchain.toml pins $want_rust ($(command -v rustc))"; pin_bad=1; fi
 want_deny=$(sed -n 's/^"cargo:cargo-deny" *= *"\([^"]*\)".*/\1/p' mise.toml | head -1)
 got_deny=$(cargo deny --version 2>/dev/null | awk '{print $2}')
+# `cargo deny` resolves from $CARGO_HOME/bin before PATH, so a plain PATH lookup would name a different
+# binary than the one whose version was just read.
+deny_bin="${CARGO_HOME:-$HOME/.cargo}/bin/cargo-deny"
+[ -x "$deny_bin" ] || deny_bin=$(command -v cargo-deny || echo "no cargo-deny found")
 if [ -z "$want_deny" ]; then echo "        mise.toml has no \"cargo:cargo-deny\" pin to compare against"; pin_bad=1
-elif [ "$want_deny" != "$got_deny" ]; then echo "        cargo-deny $got_deny, mise.toml pins $want_deny ($(command -v cargo-deny))"; pin_bad=1; fi
+elif [ "$want_deny" != "$got_deny" ]; then echo "        cargo-deny $got_deny, mise.toml pins $want_deny ($deny_bin)"; pin_bad=1; fi
 if [ "$pin_bad" -eq 0 ]; then pass "toolchain-pins (node $got_node, rustc $got_rust, cargo-deny $got_deny)"; else fail "toolchain-pins"; fi
 
 # --- Generated and cache files must stay tracked --------------------------------------------
@@ -149,7 +153,9 @@ elif ! cargo deny check; then
   echo "        Widening deny.toml to clear this is banned (ADR-0004). Report the failure."
   fail deny
 else
-  pass "cargo deny (licenses, bans, advisories)"
+  # Name first, detail in parentheses, as every other check prints: a PASS line reading `cargo deny`
+  # while the FAIL line reads `deny` makes the green side unfindable by check name.
+  pass "deny (cargo deny: licenses, bans, advisories)"
 fi
 
 # --- Frontend --------------------------------------------------------------------------------
