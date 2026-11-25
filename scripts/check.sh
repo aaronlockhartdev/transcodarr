@@ -245,7 +245,7 @@ if ! git diff --quiet --cached 2>/dev/null; then
 elif base=$(git merge-base HEAD origin/main 2>/dev/null) && [ "$base" != "$(git rev-parse HEAD)" ]; then
   scope=("$base..HEAD")                         # CI on a branch: the whole task diff
 elif git rev-parse -q --verify HEAD^ >/dev/null 2>&1; then
-  scope=("HEAD^..HEAD")                         # CI on main: the commit that just landed
+  scope=("HEAD^..HEAD")                         # nothing of ours: numbers the commit below HEAD (#16)
 else
   skip "diff budget" "root commit, nothing to compare against"
 fi
@@ -257,12 +257,12 @@ if [ ${#scope[@]} -gt 0 ]; then
               && $3 !~ /^(apps\/web\/src\/lib\/api|contracts|\.sqlx)\// {a += $1 + $2; n++} \
               END {print a + 0, n + 0}')
   if [ "$lines" -gt 200 ] || [ "$files" -gt 10 ]; then
-    echo "        $lines lines across $files files; ADR-0001 allows 200 lines and 10 files. Split it."
+    echo "        $lines lines across $files files [${scope[0]}]; ADR-0001 allows 200 lines and 10 files. Split it."
     fail "diff budget"
   elif [ "$lines" -gt 50 ]; then
-    warn "diff budget ($lines lines, $files files: past the 50-line soft target)"
+    warn "diff budget ($lines lines, $files files: past the 50-line soft target) [${scope[0]}]"
   else
-    pass "diff budget ($lines lines, $files files)"
+    pass "diff budget ($lines lines, $files files) [${scope[0]}]"
   fi
 
   # --- Gate edits must ship their proof (ADR-0001) ---------------------------------------------
