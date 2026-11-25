@@ -1,0 +1,74 @@
+# Every version this repo pins that a public registry publishes. Pins in
+# mise.toml (node, gitleaks, just, cargo:cargo-deny), .pi/settings.json and
+# skills-lock.json have no Dependabot ecosystem and stay manual; the
+# toolchain-pins check in scripts/check.sh is what makes a stale one loud.
+#
+# Batched by semver bump, so a red batch on a major does not hide which patch
+# inside it was fine. Security updates stay ungrouped on purpose, because
+# groups.applies-to defaults to version-updates: a bundle of fixes that fails
+# `just check` blocks every fix in it, and each advisory wants its own verdict.
+# Grouping holds an ecosystem to two open version PRs, so the default cap of 5
+# never bites and is not set here. Nothing merges anything: the gate decides
+# and a human lands it.
+version: 2
+updates:
+  # Cargo.toml plus Cargo.lock for every member of the workspace.
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "UTC"
+    groups:
+      minor_and_patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+      majors:
+        patterns: ["*"]
+        update-types: ["major"]
+
+  # Its own manifest and lockfile; there is no root package.json.
+  - package-ecosystem: "npm"
+    directory: "/apps/web"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "UTC"
+    groups:
+      minor_and_patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+      majors:
+        patterns: ["*"]
+        update-types: ["major"]
+
+  # Actions run with a repo token, and rhysd/actionlint is someone else's code.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "UTC"
+    groups:
+      minor_and_patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+      majors:
+        patterns: ["*"]
+        update-types: ["major"]
+
+  # The channel that toolchain-pins compares `rustc --version` against, so a
+  # bump here moves what the gate asserts. No majors to split out for years.
+  - package-ecosystem: "rust-toolchain"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "UTC"
+    groups:
+      all_updates:
+        patterns: ["*"]
