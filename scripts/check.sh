@@ -87,9 +87,10 @@ got_deny=$(cargo deny --version 2>/dev/null | awk '{print $2}')
 # `cargo deny` resolves from $CARGO_HOME/bin before PATH, so a plain PATH lookup would name a different
 # binary than the one whose version was just read.
 deny_bin="${CARGO_HOME:-$HOME/.cargo}/bin/cargo-deny"
-[ -x "$deny_bin" ] || deny_bin=$(command -v cargo-deny || echo "no cargo-deny found")
+# `[ -x ]` is true for a directory and cargo falls through one, so a plain -x can name a path that never ran.
+{ [ -x "$deny_bin" ] && [ ! -d "$deny_bin" ]; } || deny_bin=$(command -v cargo-deny || echo "no cargo-deny found")
 if [ -z "$want_deny" ]; then echo "        mise.toml has no \"cargo:cargo-deny\" pin to compare against"; pin_bad=1
-elif [ "$want_deny" != "$got_deny" ]; then echo "        cargo-deny $got_deny, mise.toml pins $want_deny ($deny_bin)"; pin_bad=1; fi
+elif [ "$want_deny" != "$got_deny" ]; then echo "        cargo-deny ${got_deny:-none}, mise.toml pins $want_deny ($deny_bin)"; pin_bad=1; fi
 if [ "$pin_bad" -eq 0 ]; then pass "toolchain-pins (node $got_node, rustc $got_rust, cargo-deny $got_deny)"; else fail "toolchain-pins"; fi
 
 # --- Generated and cache files must stay tracked --------------------------------------------

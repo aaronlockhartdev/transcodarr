@@ -242,9 +242,17 @@ mod probes {
     }
 }
 '; then
+  # The gate's own `cargo build` creates a Cargo.lock, and an untracked one trips
+  # generated-paths-tracked inside these very probes, which is how a green probe came to sit on a red
+  # line nobody read. Make it first, stage it, and it is tracked for the whole fixture.
+  cargo generate-lockfile >/dev/null 2>&1 && stage Cargo.toml Cargo.lock src/lib.rs
   expect_check cargo red "a Rust test that fails"
   printf '#[cfg(test)]\nmod probes {\n    #[test]\n    fn green_fixture() {\n        let n = std::hint::black_box(1);\n        assert_eq!(n, 1);\n    }\n}\n' > src/lib.rs
   expect_check cargo green "the same crate's test passing"
+  # Not hygiene for its own sake: this is what makes the staging above fail loudly instead of silently
+  # putting a red line nobody reads into the log of a probe that passed.
+  expect_check generated-paths-tracked green "no unrelated red inside the cargo fixture"
+  unstage Cargo.toml Cargo.lock src/lib.rs
 fi
 rm -rf Cargo.toml Cargo.lock src target
 
@@ -259,30 +267,41 @@ skipping "needs the installed frontend; proven by hand" "web build"
 # The config it reads was never loaded by that binary (#12). And the gate's own `deny` line had no
 # fixture, so `elif false` there reported green (#12 again).
 #
-# The committed `deny.toml` gets its green side from the gate itself: CI runs `cargo deny check` over the
-# real graph, and since #14 an allow entry no crate declares fails that run, so the list and the graph
-# are held equal in both directions. No fixture can be that green side, because a scratch graph of one
-# crate cannot encounter five licences, hence the seeded fixture config above and the licence on the
-# crate in the `cargo test` fixture.
+# The shipped `deny.toml` is proven two ways. The gate proves it over the real graph in CI, and since #14
+# that run fails if the allow list and the graph disagree in either direction. A fixture can also load it
+# directly and offline: `check licenses` reads manifests from the registry cache and never touches the
+# advisory database (measured with the network cut: `check licenses` exits 0, a full `check` exits 1 on
+# `failed to fetch advisory database`, warm cache included).
 #
-# Nothing here touches the network: cargo-deny reads the advisory database only for graphs with registry
-# packages, and these graphs are local crates (measured 0.23 s, no fetch).
+# Network, stated once because the two `deny`-branch probes cannot avoid it: the gate runs a full
+# `cargo deny check`, which updates the RustSec advisory database on every run, so the suite needs
+# network whenever a `Cargo.lock` is in play. `just check` runs before this in CI and has already cloned
+# the database by then; each probe's update measures 0.27 s.
 deny_probes=0
 expect_deny() { deny_probes=$((deny_probes + 1)); expect_check "$@"; }
+# Every assertion here is counted, including the ones that call the binary directly rather than the gate.
+# A fixture that disappears looks exactly like a fixture that passed.
+deny_said() { deny_probes=$((deny_probes + 1)); report "$@"; }
+# config dir -> green|red, with the binary's own output left in $log for the reason checks below.
+deny_verdict() { ( cd "$2" && cargo-deny --config "$1" check licenses ) >"$log" 2>&1 && echo green || echo red; }
 expect_deny "toolchain-pins" green "the installed cargo-deny matches the pin"
 # CARGO_HOME is redirected as well as PATH shadowed, because `cargo deny` prefers $CARGO_HOME/bin over
-# PATH: on a machine with a cargo-installed cargo-deny the shim below would be shadowed and the probe
-# would report green about the wrong binary.
+# PATH. The `bin/cargo-deny` entry is a directory on purpose: cargo falls through it, and `[ -x ]` alone
+# is true for a directory, so the diagnostic used to name a file that never ran.
 if make shims/cargo-deny '#!/bin/sh
 echo "cargo-deny 0.15.1"
 '; then
   chmod +x shims/cargo-deny
-  mkdir -p nohome
+  mkdir -p nohome/bin/cargo-deny
   CARGO_HOME="$work/nohome" PATH="$work/shims:$PATH" bash scripts/check.sh > "$log" 2>&1
   # Not expect_check: it re-runs the gate with the ambient PATH and would report the real binary.
   pins=$(grep -E '^  (PASS|FAIL|SKIP|WARN)  toolchain-pins' "$log" | head -1)
   case "$pins" in *FAIL*) pins=red ;; *WARN*) pins=warn ;; *SKIP*) pins=skip ;; *PASS*) pins=green ;; *) pins=absent ;; esac
-  report "a cargo-deny that disagrees with mise.toml" "red" "$pins"
+  deny_said "a cargo-deny that disagrees with mise.toml" "red" "$pins"
+  # The line says which binary refused. A PATH lookup can name a different file than cargo ran, and a
+  # directory is not a file, so both are asserted against the shim this run actually used.
+  deny_said "and it names the binary that refused" "$work/shims/cargo-deny" \
+    "$(grep -E '^ +cargo-deny ' "$log" | sed -n 's/.*(\(.*\))$/\1/p' | head -1)"
   rm -rf shims nohome
 else
   skipping "create a shim binary" "a cargo-deny that disagrees with mise.toml"
@@ -295,10 +314,21 @@ if grep -q '^"cargo:cargo-deny" = ' mise.toml; then
   git checkout -q -- mise.toml
 fi
 
+# The shipped config against the shipped graph, both directions. Green is what the deleted probe used to
+# claim without measuring; red is #14's rule, an allow entry no crate declares, and it has to be an error
+# rather than a warning, which is the only thing keeping the list equal to the graph.
+deny_said "the shipped deny.toml loads under the pinned binary" "green" \
+  "$(deny_verdict "$repo/deny.toml" "$repo")"
+if awk '{print} /^allow = \[$/{print "    \"0BSD\",  # fixture: an entry no crate declares"}' \
+     "$repo/deny.toml" > deny-shipped-plus.toml; then
+  got=$(deny_verdict "$work/deny-shipped-plus.toml" "$repo")
+  { [ "$got" = red ] && grep -q 'error\[license-not-encountered\]' "$log"; } || got="$got for another reason: $(grep -oE '^error\[[a-z-]+\]' "$log" | head -1)"
+  deny_said "an unused allow entry is an error, shipped config" "red" "$got"
+fi
+
 # The `deny` line, both directions, with a graph of one local crate. Red is the key class behind #12:
-# older cargo-deny read `copyleft`, the pinned one refuses it. Asserting the diagnostic as well as the
-# verdict keeps an unrelated red from passing for it. Cargo.lock is staged because an untracked one trips
-# generated-paths-tracked, which would bury the probe in someone else's failure.
+# older cargo-deny read `copyleft`, the pinned one refuses it. Cargo.lock is staged because an untracked
+# one trips generated-paths-tracked, which would bury the probe in someone else's failure.
 if make Cargo.toml '[package]
 name = "denyfixture"
 version = "0.0.0"
@@ -313,15 +343,24 @@ version = "0.0.0"
 '; then
   stage Cargo.toml Cargo.lock src/lib.rs
   expect_deny "deny" green "cargo deny accepts a graph the config matches"
+  # Same rule, seeded config: deleting `unused-allowed-license = "deny"` from the fixture's own policy
+  # would otherwise be caught by nobody, because every other probe here passes either way.
+  sed 's/^allow = \["MIT"\]$/allow = ["MIT", "0BSD"]/' deny.toml > deny-seeded-plus.toml
+  got=$(deny_verdict "$work/deny-seeded-plus.toml" "$work")
+  { [ "$got" = red ] && grep -q 'error\[license-not-encountered\]' "$log"; } || got="$got for another reason: $(grep -oE '^error\[[a-z-]+\]' "$log" | head -1)"
+  deny_said "an unused allow entry is an error, seeded config" "red" "$got"
   printf 'copyleft = "warn"\n' >> deny.toml
   expect_deny "deny" red "a key the pinned binary refuses"
-  grep -q 'error\[deprecated\]' "$log" \
-    || report "and that red is the removed key's own diagnostic" "error[deprecated]" "absent"
+  # The code alone is not enough: a removed key in `[advisories]` prints the same `error[deprecated]`,
+  # so the assertion demands the key name too, which the binary echoes from the offending line.
+  got=$(grep -oE 'error\[deprecated\]|copyleft' "$log" | sort -u | paste -sd' ')
+  deny_said "and that red names the [licenses] key" "copyleft error[deprecated]" "$got"
   unstage Cargo.toml Cargo.lock src/lib.rs
   git checkout -q -- deny.toml
 fi
-report "all deny probes ran" "4" "$deny_probes"
-rm -f Cargo.toml Cargo.lock src/lib.rs && rm -rf src target
+report "all deny probes ran" "10" "$deny_probes"
+rm -f Cargo.toml Cargo.lock src/lib.rs deny-shipped-plus.toml deny-seeded-plus.toml
+rm -rf src target
 
 # --- Which diff a budget number describes (#16) ---------------------------------------------------
 # With nothing staged and HEAD at origin/main's tip the dispatch falls through to HEAD^..HEAD, so a
