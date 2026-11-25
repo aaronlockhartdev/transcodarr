@@ -15,26 +15,27 @@ version = 2
 # included, is rejected rather than warned. `[[licenses.exceptions]]` can still re-admit one license for
 # one crate, and ADR-0004 rule 1 bans reaching for it.
 confidence-threshold = 0.93
+# An entry no crate declares is policy nobody tests, so every entry here is one a crate in the graph
+# actually declares. cargo-deny calls the unused ones `warning[license-not-encountered]` by default.
+unused-allowed-license = "deny"
 allow = [
-    "0BSD",
+    # This repo's own licence, named so workspace crates are checked rather than skipped (#14). It is
+    # a list-wide entry, so a dependency under AGPL-3.0-only passes too, which is the same copyleft
+    # this project ships under. Added on the human's decision in session.
+    "AGPL-3.0-only",
     "Apache-2.0",
-    "BSD-2-Clause",
-    "BSD-3-Clause",
-    "CC0-1.0",
-    "ISC",
     "MIT",
-    "MPL-2.0",
+    # Load-bearing on an AND side, not just an OR one: a crate declaring "MIT AND BSD-3-Clause" needs
+    # both sides allowed, so this stays even though MIT is listed too.
+    "BSD-3-Clause",
     # Unicode License v3: permissive, OSI-approved; gnu.org's list calls it "compatible with all
     # versions of the GNU GPL". Its one condition is preserving the copyright notice on distribution,
     # which nothing here serves yet. Added for `unicode-ident` on the human's decision (#11); the
     # fixture matrix lives in the body of #17, not here, so this line does not rot.
     "Unicode-3.0",
-    "Unicode-DFS-2016",
-    "Zlib",
 ]
-# Skips, rather than checks, unpublished workspace crates, so this repo's own AGPL-3.0-only crate is
-# outside the gate and the skip prints only under `-W skipped-private-workspace-crate` (#14).
-private = { ignore = true }
+# No `private` skip: workspace crates are checked, which is what makes the AGPL entry above load-
+# bearing. `private = { ignore = true }` was the shape of the skip that hid this repo's own crate.
 
 # GPL-2.0-only stays excluded (ADR-0004): it is absent from the allow list, and the pinned binary
 # refuses a license ban table, so there is no expression-level entry to keep current. The semantics are

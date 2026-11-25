@@ -58,5 +58,6 @@ counts as conveying.
 
 Machine-enforced for dependencies, so out of `AGENTS.md`: the licence is `LICENSE` (AGPL-3.0-only), and
 the GPL-2.0-only exclusion is the absence of an allow entry in `deny.toml`, which cargo-deny reports as
-`license is not explicitly allowed`. Workspace crates are skipped rather than checked (`private`), so
-the licence of this repo's own crate is a file on disk and not a gate result (#14).
+`license is not explicitly allowed`. Workspace crates are checked, not skipped, so this repo's own crate
+passes the gate on the `AGPL-3.0-only` allow entry; that entry is list-wide, so a dependency under
+AGPL-3.0-only passes too (#14).
