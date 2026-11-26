@@ -76,34 +76,38 @@ if [ "$adr_bad" -eq 0 ]; then pass "adr-structure"; else fail "adr-structure"; f
 # `--config` names the tracked file rather than letting lychee pick up whatever sits in the working
 # directory -- the lesson `.gitleaks.toml` taught in #55. `include_fragments = "full"` makes a link
 # to a heading that no longer exists a failure, which is the rot a prose corpus actually produces.
-# The count is printed because lychee exits 0 whether it read 0 links or 100, so a green that
-# cannot name what it read is not a green; the empty scope has a probe in scripts/selftest.sh.
+# lychee exits 0 whether it read 0 links or 100, and its `Total` counts links it only excluded, so the
+# guard reads the links it resolved. Measured on the pinned binary: a tree whose only links are external
+# prints `2 Total ... 0 OK ... 2 Excluded` under `offline = true`, which is a green that checked none.
 link_out=$(lychee --config lychee.toml --no-progress docs 2>&1); link_code=$?
-link_n=$(printf '%s\n' "$link_out" | sed -n 's/.*🔍[[:space:]]*\([0-9][0-9]*\)[[:space:]]*Total.*/\1/p' | head -1)
+link_ok=$(printf '%s\n' "$link_out" | sed -n 's/.*✅[[:space:]]*\([0-9][0-9]*\)[[:space:]]*OK.*/\1/p' | head -1)
+link_ex=$(printf '%s\n' "$link_out" | sed -n 's/.*👻[[:space:]]*\([0-9][0-9]*\)[[:space:]]*Excluded.*/\1/p' | head -1)
+# lychee prints no `Excluded` token when nothing was excluded (measured), so an absent count is zero.
+link_ex=${link_ex:-0}
 case "$link_code" in
-  0) if [ -z "$link_n" ]; then
+  0) if [ -z "$link_ok" ]; then
        printf '%s\n' "$link_out" | sed 's/^/        /'
-       fail "md-links (no link count in lychee's output, so nothing was proved)"
-     elif [ "$link_n" -eq 0 ]; then
-       fail "md-links (lychee found no links in docs, so a green here would mean nothing)"
-     else pass "md-links (lychee: $link_n links, offline, fragments checked)"; fi ;;
+       fail "md-links (no resolved-link count in lychee's output, so nothing was proved)"
+     elif [ "$link_ok" -eq 0 ]; then
+       fail "md-links (lychee resolved 0 links, $link_ex excluded, so a green here would mean nothing)"
+     else pass "md-links (lychee: $link_ok resolved, $link_ex excluded, offline, fragments checked)"; fi ;;
   2) printf '%s\n' "$link_out" | grep -E '^\[ERROR\]' | sed 's/^/        /'
      fail "md-links (lychee: $(printf '%s\n' "$link_out" | grep -cE '^\[ERROR\]') links do not resolve)" ;;
   *) printf '%s\n' "$link_out" | sed 's/^/        /'
      fail "md-links (lychee exited $link_code without a verdict; check lychee.toml and the pins)" ;;
 esac
 
-# --- ADR index: every ADR listed, every listing real -----------------------------------------
-# The measured failure: 167 ADRs, an index that showed 30, and 29 live decisions invisible.
+# --- ADR index: whether the index names every ADR, and only that --------------------------------
+# The measured failure: 167 ADRs, an index that showed 30, and 29 live decisions invisible. That is
+# the file-to-index direction, and it is the one a link resolver cannot see: lychee reads the links
+# that exist, so an ADR with no link to it produces nothing to fail. Whether a listing resolves is
+# md-links' job; the `-e` loop here was a hand-rolled copy of a resolver added two lines above it.
 idx_bad=0
-# Key on the filename, not the bare number. The old test matched any prose mention of "ADR-0002",
-# and index rows written without a filename left the README-to-file direction checking nothing.
+# Key on the filename, not the bare number: matching a prose mention of "ADR-0002" let an index row
+# that named no file pass the direction this arm is left holding.
 for f in "${adr_files[@]}"; do
   fname=${f##*/}
   grep -q -- "$fname" docs/adr/README.md || { echo "        README index does not name $fname"; idx_bad=1; }
-done
-for ref in $(grep -oE '[0-9]{4}-[a-z0-9-]+\.md' docs/adr/README.md | sort -u); do
-  [ -e "docs/adr/$ref" ] || { echo "        README index points at docs/adr/$ref, which does not exist"; idx_bad=1; }
 done
 if [ "$idx_bad" -eq 0 ]; then pass "adr-index"; else fail "adr-index"; fi
 

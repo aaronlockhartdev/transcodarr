@@ -258,9 +258,12 @@ if make docs/adr/9991-new.md "$(sup_back)" \
 fi
 report "all supersession probes ran" "10" "$sup_probes"
 
-# The link arm, both directions. What must break is named, not counted: a target that is not a
-# file, a fragment that is not a heading, and the one green the tool withholds on its own -- an
-# empty scope, which prints `0 Total` and exits 0. Measured on the pinned binary.
+# The link arm, both directions. What must break is named, not counted: a target that is not a file,
+# a fragment that is not a heading, a pointer in the index to a file that is not there -- the direction
+# the shell used to check with `-e` before the resolver took it over -- a scope whose links were all
+# excluded, an empty scope, which prints `0 OK` and exits 0, and a config the binary will not parse.
+# The red probes quote lychee's own words (`File not found`, `Cannot find fragment`), not the arm's
+# label, so an arm that stops passing the tool's evidence cannot keep them green. Measured on the pin.
 link_probes=0
 expect_link() { link_probes=$((link_probes + 1)); expect_check "$@"; }
 # A four-digit name the shell arms accept too, so the red cannot be blamed on a filename no glob
@@ -268,25 +271,45 @@ expect_link() { link_probes=$((link_probes + 1)); expect_check "$@"; }
 # red on its own line, and `expect_check` reads one arm's line.
 md_shaped() { printf '%s\n\nGoes nowhere: [nowhere](0000-nowhere.md).\n' "$(adr_body "$1")"; }
 if make docs/adr/9990-file.md "$(md_shaped proposed)"; then
-  expect_link md-links red "a link whose target is not a file" "do not resolve"
+  expect_link md-links red "a link whose target is not a file" "File not found"
   rm -f docs/adr/9990-file.md
 fi
 if make docs/adr/9990-frag.md "$(printf '%s\n\nGone heading: [heading](0001-development-process.md#no-such-heading).\n' "$(adr_body proposed)")"; then
-  expect_link md-links red "a link to a heading that is not there" "do not resolve"
+  expect_link md-links red "a link to a heading that is not there" "Cannot find fragment"
   rm -f docs/adr/9990-frag.md
 fi
 expect_link md-links green "the links as they stand, offline and fragment-checked" "fragments checked"
 
-# An empty scope is the one green the tool does not withhold on its own: `lychee` over no links prints
-# `0 Total` and exits 0, so the arm has to read the count and not just the code. A path it cannot open
-# at all exits 2 and prints no verdict line. Measured on the pinned binary.
+# The index itself pointing at nothing: the row still names a file the shell arms are happy with, so
+# only a resolver can see the target is gone. `adr-index` is left holding the other direction (an ADR
+# no row names), which no link check can express, so it stays green here and the red is the arm's.
+if cp docs/adr/README.md readme.bak \
+   && printf '\n[index row rewritten by a rename](0002-no-such-adr.md)\n' >> docs/adr/README.md; then
+  expect_link md-links red "the index points at a file that is not there" "File not found"
+  mv readme.bak docs/adr/README.md
+fi
+
+# Two greens the tool does not withhold on its own: an empty scope, and a scope whose every link it
+# skipped. Both print `0 OK` and exit 0, so the arm reads the resolved count and not just the code --
+# `Total` cannot be the guard because it counts excluded links too (measured: a tree with two external
+# links under `offline = true` prints `2 Total ... 0 OK ... 2 Excluded`). A path it cannot open at all
+# exits 2 and prints no verdict line.
 mv docs docs-empty && mkdir docs
-expect_link md-links red "no links for lychee to read" "found no links"
+expect_link md-links red "no links for lychee to read" "resolved 0 links, 0 excluded"
+printf 'External only: [a](https://example.com/x) and [b](https://example.org/y)\n' > docs/ext.md
+expect_link md-links red "every link excluded, none resolved" "resolved 0 links, 2 excluded"
 rm -r docs && mv docs-empty docs
+
+# `--config` naming the tracked file is the #55 lesson from `.gitleaks.toml`, so it gets a fixture and
+# not a comment: break that file and the arm's verdict has to move. A config the binary refuses to parse
+# exits 3 and prints no verdict line (measured), which lands in the arm's third branch.
+cp lychee.toml lychee.bak && sed -i 's/offline = true/offline = fasle/' lychee.toml
+expect_link md-links red "a config lychee refuses to load" "without a verdict"
+mv lychee.bak lychee.toml
 mv docs docs-gone
 expect_link md-links red "a path lychee refuses to read at all" "without a verdict"
 mv docs-gone docs
-report "all link probes ran" "5" "$link_probes"
+report "all link probes ran" "8" "$link_probes"
 
 # The rule that a gate edit must ship a fixture, tested against itself.
 printf '\n# probe\n' >> scripts/check.sh
@@ -316,26 +339,28 @@ if make shims/gitleaks '#!/bin/sh
 echo "gitleaks 8.20.0"
 ' && make shims/just '#!/bin/sh
 echo "just 1.20.0"
+' && make shims/lychee '#!/bin/sh
+echo "lychee 0.10.0"
 '; then
-  chmod +x shims/gitleaks shims/just
+  chmod +x shims/gitleaks shims/just shims/lychee
   # Not expect_check: it re-runs the gate with the ambient PATH and would report the real binaries.
   PATH="$work/shims:$PATH" bash scripts/check.sh > "$log" 2>&1
   pins=$(grep -E '^  (PASS|FAIL|SKIP|WARN)  toolchain-pins' "$log" | head -1)
   case "$pins" in *FAIL*) pins=red ;; *PASS*) pins=green ;; *) pins=absent ;; esac
-  pin_said "two shadowed tools, both refused" "red" "$pins"
-  for pin_tool in gitleaks just; do
+  pin_said "three shadowed tools, all refused" "red" "$pins"
+  for pin_tool in gitleaks just lychee; do
     pin_said "and it names the $pin_tool that ran" "$work/shims/$pin_tool" \
       "$(grep -E "^ +$pin_tool " "$log" | sed -n 's/.*(\(.*\))$/\1/p' | head -1)"
   done
   rm -rf shims
 else
-  skipping "create shim binaries" "the two extra pin probes"
+  skipping "create shim binaries" "the three extra pin probes"
 fi
 # Named on the PASS line as well as compared: a check that silently stops looking at a tool is the
 # failure mode #43 is about, and only the green side can see that.
 pin_probes=$((pin_probes + 1))
 expect_check toolchain-pins green "and the green line names the tools it checked" ", gitleaks "
-report "the pin probes ran" "4" "$pin_probes"
+report "the pin probes ran" "5" "$pin_probes"
 
 # #50's second half, pinned as a property rather than a behaviour: two gates racing over one
 # machine-wide log produce verdicts neither run earned, and the only cheap defence is to refuse the
