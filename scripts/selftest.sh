@@ -197,6 +197,14 @@ if make docs/adr/000-misnumbered.md "$(adr_body proposed)"; then
   expect_check adr-structure red "ADR filename no glob can see"
   rm -f docs/adr/000-misnumbered.md
 fi
+
+# Same body, H1 and one required section both gone. Today the shell's heading loop catches it; the point
+# of pinning it now is that `conditional` rules pair against a `# ` line, so the section checks cannot
+# move to Vale without this precondition already in place.
+if make docs/adr/9996-no-h1.md "$(adr_body proposed | grep -v '^# T$' | grep -v '^## Decision$')"; then
+  expect_check adr-structure red "a record with no level-1 heading" "no level-1 heading"
+  rm -f docs/adr/9996-no-h1.md
+fi
 if make docs/adr/9997-unlisted.md "$(adr_body proposed)"; then
   expect_check adr-index red "ADR the index does not name"
   rm -f docs/adr/9997-unlisted.md
