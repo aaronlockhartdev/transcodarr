@@ -19,6 +19,12 @@ repo=$(git -C "$(dirname "$0")" rev-parse --show-toplevel) || exit 1
 unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE GIT_NAMESPACE GIT_OBJECT_DIRECTORY \
       GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CONFIG
 export GIT_CONFIG_NOSYSTEM=1
+
+# CI names the base of the checkout it built. Every repo the suite builds below is a scratch repo with no
+# remote, so an inherited value makes the gate name a base that cannot exist -- which it did, 7 probes deep
+# in CI before this line (#70). A fixture must not read its expectations from ambient CI state; the probes
+# that want a named base export it themselves and unset it after.
+unset GITHUB_BASE_REF
 export GIT_AUTHOR_NAME=selftest GIT_AUTHOR_EMAIL=selftest@invalid
 export GIT_COMMITTER_NAME=selftest GIT_COMMITTER_EMAIL=selftest@invalid
 
@@ -654,6 +660,58 @@ if stage scope_a.py && git commit -q -m scope_a -- scope_a.py \
     skipping "origin/main ref" "branch ahead: scope"
     skipping "origin/main ref" "branch ahead: whole diff"
   fi
+  # The base the PR is proposed against (#70). Here origin/main sits 2 commits down (7 lines) and
+  # origin/pr-base 1 commit down (5 lines): a budget that ignores `$GITHUB_BASE_REF` reports 7 2 here
+  # and cannot do it quietly, because the scope it measured is printed next to the numbers.
+  if git update-ref refs/remotes/origin/pr-base HEAD~1; then
+    export GITHUB_BASE_REF=pr-base
+    run_gate
+    scope_report "$(git merge-base HEAD refs/remotes/origin/pr-base)..HEAD" "$(budget_scope)" \
+      "PR base: the scope names the base"
+    scope_report "5 1" "$(budget_numbers)" "PR base: the stacked parent is not charged"
+    unset GITHUB_BASE_REF
+    git update-ref -d refs/remotes/origin/pr-base
+  else
+    skipping "pr-base ref" "PR base: the scope names the base"
+    skipping "pr-base ref" "PR base: the stacked parent is not charged"
+  fi
+  # A base CI names and this clone lacks. Red on both arms that need a base, and not one verdict each
+  # too many: a skip here is exactly what `GITHUB_BASE_REF=nosuchbranch` would buy, and the budget would
+  # then shrink to the last commit and report it as the task's.
+  # What this variable does to the gate is pinned here, in a repo the fixture controls. The suite scrubs it
+  # at the top, so a fixture never inherits CI's value: an inherited one made the gate name a base no scratch
+  # repo has — and the suite went red 7 probes deep in CI before that line (#70). Failing instead of skipping
+  # was tried first, and it is also wrong: a clone with no `origin/main` is a normal local clone, not a
+  # finding.
+  # A base CI named that this clone cannot resolve to a commit: each arm skips with the fact, and neither
+  # one quietly measures `HEAD^..HEAD`. A ref that is not a committish at all (here, a tree object) is the
+  # same state, so the test the arm uses -- `git merge-base` -- is the only test the fixture needs.
+  export GITHUB_BASE_REF=tree
+  if git update-ref refs/remotes/origin/tree "$(git hash-object -t tree /dev/null)"; then
+    run_gate
+    scope_report "0" "$(grep -cE 'FAIL[[:space:]]+(diff budget|trailer)' "$log")" \
+      "named base, not a commit: neither arm red"
+    scope_report "2" "$(grep -cE 'SKIP[[:space:]]+(diff budget|trailer).*unknowable' "$log")" \
+      "and both arms say which base they could not read"
+    git update-ref -d refs/remotes/origin/tree
+  else
+    skipping "tree ref" "named base, not a commit: neither arm red"
+    skipping "tree ref" "and both arms say which base they could not read"
+  fi
+  unset GITHUB_BASE_REF
+  # The named base being HEAD's own tip is a third thing, and it used to be reported as the first one:
+  # a branch that has been pushed and pointed at itself has an empty task diff, not a root commit.
+  if git update-ref refs/remotes/origin/pr-base HEAD; then
+    export GITHUB_BASE_REF=pr-base
+    run_gate
+    scope_report "no commits of ours (HEAD is origin/pr-base's tip)" \
+      "$(grep -E 'SKIP.*diff budget' "$log" | sed 's/.*diff budget[^A-Za-z(]*//; s/[[:space:]]*$//')" \
+      "base equals HEAD: the reason says so"
+    unset GITHUB_BASE_REF
+    git update-ref -d refs/remotes/origin/pr-base
+  else
+    skipping "pr-base ref" "base equals HEAD: the reason says so"
+  fi
   # The WARN and FAIL lines carry it too. A reader of the PASS line alone cannot see those two, and
   # that is the fixture shape that let an unlabelled fall-through ship once already.
   python3 -c "print('\n'.join('w%d = %d' % (i, i) for i in range(60)))" > scope_w.py
@@ -675,7 +733,7 @@ else
 fi
 git reset -q --hard "$scope_base" 2>/dev/null
 rm -f scope_*.py
-report "all budget fixtures ran" "9" "$scope_probes"
+report "all budget fixtures ran" "14" "$scope_probes"
 
 # --- Trailers on the machine no hook runs on (#49) --------------------------------------------------
 # `commit-msg` enforces the shape only where `just setup` ran. Measured before-state: a fresh clone

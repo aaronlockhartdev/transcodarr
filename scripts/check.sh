@@ -361,6 +361,21 @@ else
 fi
 
 
+# --- Which commits and lines are ours (#70) ---------------------------------------------------------
+# Two arms need to know the base a change is proposed against: the budget, so it counts the task's own
+# diff, and the trailer audit, so it reads the task's own commits. CI names that base in
+# `$GITHUB_BASE_REF`; asking for `origin/main` regardless charges a stacked branch for its *parent
+# branch's* commits and then prints them as ours, which is how a 104-line docs PR measured 304 and went
+# red (#70).
+# shortcut: `$GITHUB_BASE_REF` is set only on GitHub Actions, so locally this is always `main` and only
+# the fixture below exercises the PR-base path; the next stacked PR is the live test of that line.
+base_ref=${GITHUB_BASE_REF:-main}
+# A base that CI named and this clone cannot resolve to a commit is skipped by both arms, with the fact
+# printed. It is not failed: an earlier revision failed both arms in that state, which turned CI red 7
+# probes deep — the suite's scratch repos and any half-fetched checkout legitimately have no `origin/main`
+# — and it handed the budget arm a FAIL plus a contradictory SKIP for one defect. What must not happen is
+# the silent version: falling through to `HEAD^..HEAD` and printing one commit as the task's whole budget.
+
 # --- Diff budget (ADR-0001: 50 lines soft, 200 hard, 10 files) --------------------------------
 # ADR-0001 claimed this was machine-enforced and nothing implemented it. Lines and files are
 # countable, so it is a gate now. Excluded: lockfiles and the generated client. Not excluded:
@@ -369,10 +384,19 @@ fi
 scope=()
 if ! git diff --quiet --cached 2>/dev/null; then
   scope=(--cached)                              # pre-commit: what is about to be committed
-elif base=$(git merge-base HEAD origin/main 2>/dev/null) && [ "$base" != "$(git rev-parse HEAD)" ]; then
+elif base=$(git merge-base HEAD "origin/$base_ref" 2>/dev/null) && [ "$base" != "$(git rev-parse HEAD)" ]; then
   scope=("$base..HEAD")                         # CI on a branch: the whole task diff
-elif git rev-parse -q --verify HEAD^ >/dev/null 2>&1; then
-  scope=("HEAD^..HEAD")                         # nothing of ours: numbers the commit below HEAD (#16)
+elif [ -n "${GITHUB_BASE_REF:-}" ] && ! git merge-base HEAD "origin/$base_ref" >/dev/null 2>&1; then
+  # CI named a base and this clone cannot resolve it to a commit. Skip, with a reason: the alternative was
+  # measuring `HEAD^..HEAD`, i.e. one commit printed as the task's whole budget, green. An *empty*
+  # `$GITHUB_BASE_REF` counts as unnamed here, so the local shape below is unchanged.
+  skip "diff budget" "no origin/$base_ref that resolves to a commit, so which lines are ours is unknowable"
+elif [ -z "${GITHUB_BASE_REF:-}" ] && git rev-parse -q --verify HEAD^ >/dev/null 2>&1; then
+  scope=("HEAD^..HEAD")                           # nothing of ours: the commit below HEAD (#16); not when CI named a base (#70)
+elif [ -n "${GITHUB_BASE_REF:-}" ] && [ "$base" = "$(git rev-parse HEAD)" ]; then
+  # The base CI named is HEAD's own tip, so the task diff really is empty. Said plainly rather than as a
+  # root commit, which is a different fact, and not charged as `HEAD^..HEAD`, which is #16's false green.
+  skip "diff budget" "no commits of ours (HEAD is origin/$base_ref's tip)"
 else
   skip "diff budget" "root commit, nothing to compare against"
 fi
@@ -422,18 +446,14 @@ fi
 # `core.hooksPath` unset and accepts a commit with no trailers at all, green. CI is the one machine no
 # `--no-verify` reaches, so it re-checks over the commits being proposed. Only commits of ours: main's
 # history predates the rule, so a run on the base tip audits nothing and says so rather than going red
-# on commits that were legal when written. The base is the one CI names in `$GITHUB_BASE_REF` when it
-# exists, because `merge-base HEAD origin/main` charges a stacked branch for its *parent branch's*
-# commits and then names them as ours (#70).
-# shortcut: `$GITHUB_BASE_REF` is set only on GitHub Actions, so locally this is always origin/main
-# and no fixture covers the PR-base path; the next stacked PR is the test of that line.
+# on commits that were legal when written. The base is `$base_ref`, defined once above with the reason
+# and the shortcut note (#70).
 # The block is read with `git interpret-trailers`, so a `Task:` inside a sentence and a `Task:`
 # written above the block are not trailers, which is what the hook's grep cannot tell; the hook stays
 # the looser of the two readers. A revert is exempt in the shape `git revert` writes (`Revert "…"`),
 # not in any subject that begins with the word, and an exempt commit is not counted, so the number
 # printed on green is the number of commits actually audited. The `Agent:` model cross-check needs
 # $PI_MODEL, which only a committing shell has, so that stays with the hook.
-base_ref=${GITHUB_BASE_REF:-main}
 if base=$(git merge-base HEAD "origin/$base_ref" 2>/dev/null); then
   if [ "$base" = "$(git rev-parse HEAD)" ]; then
     skip "trailer" "no commits of ours (HEAD is origin/$base_ref's tip)"
@@ -469,6 +489,8 @@ if base=$(git merge-base HEAD "origin/$base_ref" 2>/dev/null); then
     fi
   fi
 else
+  # No base resolved, so whose commits these are cannot be known. The reason is printed rather than the arm
+  # passing quietly, and the budget arm reports the same fact the same way.
   skip "trailer" "no origin/$base_ref, so which commits are ours is unknowable"
 fi
 
