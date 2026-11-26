@@ -29,22 +29,23 @@ investigation); anything with no rejected alternative.
 
 At most 200 lines (`adr-length` in `scripts/check.sh`), `NNNN-title.md`, sections: Context · Decision ·
 Rejected alternatives (with the reason that kills each) · Unenforced (the gate requires these four).
-Every binding line names its enforcer: a `just` recipe, a lint, a hook, or a platform setting. A line
-with no enforcer is advice, and advice decays. The cap warns rather than fails because file structure
-has no measurable effect on compliance, and adherence falls as the amount a session has already
-generated grows (arXiv:2605.10039). The fix for a long ADR is pruning evidence; a second decision means
-a second ADR.
+Every rule an ADR states that no machine enforces is listed under `## Unenforced`, with the issue that
+owes the gate. A rule with no enforcer and no such line is advice dressed up as a gate, and advice decays.
+The cap warns rather than fails because file structure has no measurable effect on compliance, and
+adherence falls as the amount a session has already generated grows (arXiv:2605.10039). The fix for a
+long ADR is pruning prose; a second decision means a second ADR.
 
 Status lifecycle: an agent writes `proposed`; the human stamps `accepted (date)` at the merge that
 lands it, and that line belongs to the human alone. Before merge an ADR is a draft: edit it on its
-own branch, do not supersede it. After merge it may be **shortened** (prune evidence, fix dead
+own branch, do not supersede it. After merge it may be **shortened** (prune prose, fix dead
 links, correct wording) but never **reversed**; a change of course is two lines that name each other.
 `ADR-0010` supersedes `ADR-0009` by making 0009's `Status:` line read `superseded by ADR-0010` and 0010
 state `Supersedes ADR-0009` where its body explains the change. Both pointers or neither: the `Status:`
 line is the only place a supersession is read, so the same phrase inside a sentence is prose, not a
 state.
-Evidence means a quote or a command transcript. A citation to a page nobody can reach is not
-evidence. Shape to copy: `0004-license.md`.
+Research is not a section: citations and command transcripts live in `docs/research.md`, one heading per
+ADR. Keep a quote or a transcript there, never a number resting on a blog summary, and never a link to a
+page nobody can reach -- that is not evidence, it is a claim with a link on it.
 
 Gate (`adr-structure` in `scripts/check.sh`): the `Status:` line begins with `proposed` or `accepted`,
 or reads exactly `superseded by ADR-NNNN`, and a supersession fails unless the record it names exists

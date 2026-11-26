@@ -33,23 +33,6 @@ Acceptable trade for a single-maintainer, network-exposed tool.
 |GPL-3.0|misses the case that matters: running a modified copy as a network service is not "distribution" under GPL|
 |GPL-2.0-only|the one licence that is actually hostile to us here. GPL-2.0-only dependencies are incompatible with AGPL-3.0, which is why Jellyfin is stuck on it|
 
-## Evidence
-
-Neighbour licences (GitHub API, 2026-11-24): Sonarr `GPL-3.0`, Radarr `GPL-3.0`, Jellyfin
-`GPL-2.0`, Immich `AGPL-3.0`. Immich is the direct precedent: a self-hosted media server that
-switched **from MIT to AGPLv3** in February 2024 (discussion #7023) explicitly to stop closed
-hosted wrappers.
-
-Compatibility direction we depend on: MIT / Apache-2.0 / BSD / ISC / MPL-2.0 crates are usable in an
-AGPL-3.0 project (Apache-2.0 to AGPLv3 is one-way compatible). GPL-2.0-only is the exclusion, and the
-pinned cargo-deny has no license ban table, so the exclusion is carried by its absence from the allow
-list. The semantics are SPDX's: a dependency that offers a compatible side (`MIT OR GPL-2.0-only`) is
-satisfied by that side and passes, which is correct, since you may take it. The door that would re-admit
-GPL-2.0-only alone is `[[licenses.exceptions]]`, and rule 1 bans reaching for it.
-
-Text relied on: AGPL-3.0 §13, "Remote Network Interaction; Use of Source Code", i.e. network use
-counts as conveying.
-
 ## Unenforced
 
 - **Never widen `deny.toml`.** `cargo deny` reads the worktree config, so the arm fails while an unallowed
