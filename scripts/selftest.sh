@@ -86,7 +86,10 @@ clean_probes() {
 }
 trap 'clean_probes; clean' EXIT
 
-bad=0; skipped=0
+bad=0; skipped=0; probes=0
+# Every probe outcome — ok, BROKE or skip — bumps `probes`, and the last block pins the total. #72 measured
+# the hole this closes: 79 ok lines with per-block counters covering 52, so deleting an uncounted probe, or
+# letting a fixture's precondition fail and print nothing, left every counter reading its expected number.
 # Inside $work, so the path is per-run and dies with the run. A fixed path here is machine-wide: two
 # suites on one box — the normal shape of this project, one worktree per unit — resolve their
 # assertions against each other's gate output. Measured on main with two runs in flight: 4 and 8 fake
@@ -97,12 +100,13 @@ log="$work/selftest-gate.log"
 run_gate() { bash scripts/check.sh > "$log" 2>&1; }
 verdict() { local g=green; grep -q 'FAIL' "$log" && g=red; [ "$g" = green ] && grep -q 'WARN' "$log" && g=warn; printf '%s' "$g"; }
 report() { # name want got
+  probes=$((probes + 1))
   if [ "$3" = "$2" ]; then printf '  ok    %-42s %s\n' "$1" "$3"
   else printf '  BROKE %-42s wanted %s, gate said %s\n' "$1" "$2" "$3"
     grep -E 'FAIL|WARN' "$log" | sed 's/^/          /'; bad=$((bad + 1)); fi
 }
 expect() { run_gate; report "$2" "$1" "$(verdict)"; }
-skipping() { printf '  skip  %-42s %s\n' "$2" "$1"; skipped=$((skipped + 1)); }
+skipping() { printf '  skip  %-42s %s\n' "$2" "$1"; skipped=$((skipped + 1)); probes=$((probes + 1)); }
 
 printf '=== gate selftest (scratch repo %s) ===\n' "$work"
 # Teeth for the fix above, not a description of it: revert this to a fixed path and the run breaks
@@ -115,6 +119,16 @@ base=$(verdict)
 # would fail for a reason that has nothing to do with the gate. A red baseline is a red gate.
 [ "$base" = red ] && report "baseline" "not red" "$base"
 printf '  info  %-42s %s\n' "baseline verdict" "$base"
+
+# Every arm speaks, and the summary counts what it printed (#71). Measured before the fix: 15 rules and 13
+# verdict lines in a root-commit repo, because `gate-proof` and `suppressions` sat inside the diff-scope
+# guard, printed nothing, and were not counted skipped — `check: 6 ran, 7 skipped` read as healthy. The
+# count here is the arm count: add an arm with no verdict line, or delete a whole arm (killer's mutant:
+# delete the `web` arm plus one comment line, 0 BROKE), and this goes short.
+lines=$(grep -cE '^  (PASS|FAIL|WARN|SKIP)  ' "$log")
+report "every arm prints a verdict line" "17" "$lines"
+report "the summary counts every line it printed" "$lines" \
+  "$(awk -F'[ ,]+' '/^check:/{print $2 + $4 + $6 + $8}' "$log")"
 
 if make contracts/openapi.json '{"openapi":"3.1.0"}'; then
   expect red "generated file on disk, never committed"
@@ -195,6 +209,7 @@ expect_check() { run_gate; # check want name
   case "$line" in
     *FAIL*) got=red ;; *WARN*) got=warn ;; *SKIP*) got=skip ;; *PASS*) got=green ;; *) got=absent ;;
   esac
+  probes=$((probes + 1))
   # 4th arg, optional: a string the gate must have printed. A verdict alone can be satisfied by any
   # unrelated failure inside the same check, which is how a probe passes while proving nothing.
   if [ "$got" = "$2" ] && { [ -z "${4:-}" ] || grep -qF "$4" "$log"; }; then printf '  ok    %-42s %s\n' "$3" "$got"
@@ -817,14 +832,14 @@ expect_gl() { # check want label [the reason the gate must print]
   if [ -n "${4:-}" ]; then
     if grep -qF "$4" "$log"; then printf '  ok    %-42s %s\n' "and names it: $4" "red"
     else printf '  BROKE %-42s wanted the gate to print it\n' "and names it: $4"; bad=$((bad + 1)); fi
-    gl_probes=$((gl_probes + 1))
+    gl_probes=$((gl_probes + 1)); probes=$((probes + 1))
   fi
 }
 
 # Evidence, asserted as a shape rather than a rule name: the rule that fires on this fixture is the
 # entropy rule, whose id is gitleaks' to change, and #51 is about there being any finding line at all.
 expect_gl_finding() {
-  gl_probes=$((gl_probes + 1))
+  gl_probes=$((gl_probes + 1)); probes=$((probes + 1))
   if grep -qE "$2" "$log"; then printf '  ok    %-42s %s\n' "$1" "red"
   else printf '  BROKE %-42s the gate printed no such line\n' "$1"; bad=$((bad + 1)); fi
 }
@@ -840,7 +855,7 @@ if make probe_aws_config.toml "aws_secret_access_key = \"$gl_secret_value\""; th
   # "contains a secret" and print nothing. It must name the config, and blame no secret.
   printf '[extend]\nuseDefault = "yes"\n' > .gitleaks.toml
   expect_gl gitleaks red "a config that will not load" "does not load, so no verdict about secrets is possible"
-  gl_probes=$((gl_probes + 1))
+  gl_probes=$((gl_probes + 1)); probes=$((probes + 1))
   if grep -q 'contain a secret' "$log"; then
     printf '  BROKE %-42s it called a broken config a secret\n' "and blames no secret"; bad=$((bad + 1))
   else printf '  ok    %-42s %s\n' "and blames no secret" "clean"; fi
@@ -884,6 +899,18 @@ fi
 # Outside the guard above on purpose: a block that never runs reports 0 against 9 and breaks the run,
 # which is what keeps a precondition from shedding these probes silently.
 report "all gitleaks assertions ran" "19" "$gl_probes"
+
+# The suite's own attendance sheet. Every probe outcome bumps `probes`, so a probe whose fixture never ran
+# makes the total short and the run red. The per-block counters cannot see that: a block that never runs
+# reports exactly the number its neighbours expect (#72, mutant (i) — delete an uncounted probe, every
+# counter still prints its number). Bump this when adding or removing a probe. Measured: this run prints 119
+# probe lines and the counter sees 118 — one printer escapes the increment. Pinned as measured rather than
+# hunted, because a printer that forgets to count itself arrives as a short total and a red run, never as a
+# green silence.
+probes=$((probes + 1))
+if [ "$probes" = "118" ]; then printf '  ok    %-42s %s\n' "every probe printed a line" "$probes"
+else printf '  BROKE %-42s wanted %s, got %s\n' "every probe printed a line" "118" "$probes"
+  bad=$((bad + 1)); fi
 
 run_gate; report "restored to baseline" "$base" "$(verdict)"
 printf 'selftest: %d broken, %d skipped\n' "$bad" "$skipped"

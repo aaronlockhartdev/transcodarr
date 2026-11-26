@@ -439,6 +439,12 @@ if [ ${#scope[@]} -gt 0 ]; then
   else
     pass "suppressions"
   fi
+else
+  # Both arms above measure the task diff, so with no scope they have nothing to read. They used to print
+  # *nothing at all* and not be counted skipped: #71 measured 13 verdict lines for 15 rules and a summary
+  # of `6 ran, 7 skipped` that looked healthy. Silence and green are now different states.
+  skip "gate-proof" "no scope measured, so no diff to pair check.sh with selftest.sh"
+  skip "suppressions" "no scope measured, so no added lines to read"
 fi
 
 # --- Commit trailers, where no hook can run (ADR-0001, issue #49) ---------------------------------
