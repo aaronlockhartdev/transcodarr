@@ -61,16 +61,16 @@ secondary blogs have been caught wrong once here already, before any gate existe
 
 |#|Title|Status|File|
 |---|---|---|---|
-|0001|Development process: lanes, branching, diff budget|proposed|0001-development-process.md|
-|0002|Database policy before 1.0|proposed|0002-database-policy.md|
-|0003|Typed contract between the Rust API and the Svelte frontend|proposed|0003-contract-pipeline.md|
-|0004|License: AGPL-3.0-only|proposed|0004-license.md|
+|0001|Development process: lanes, branching, diff budget|proposed|[0001-development-process.md](0001-development-process.md)|
+|0002|Database policy before 1.0|proposed|[0002-database-policy.md](0002-database-policy.md)|
+|0003|Typed contract between the Rust API and the Svelte frontend|proposed|[0003-contract-pipeline.md](0003-contract-pipeline.md)|
+|0004|License: AGPL-3.0-only|proposed|[0004-license.md](0004-license.md)|
 
 Deliberately absent:
 
 - **Adversarial review**: no ADR yet. It is cheap to delete and unproven. It earns the ADR once you
   have acted on a finding in 5 separate `Review:` lines, and it is deleted once 10 such lines show
-  you acted on fewer than a third. Interim mechanism: ADR-0001.
+  you acted on fewer than a third. Interim mechanism: [ADR-0001](0001-development-process.md).
 - **Toolchain provisioning (mise)**: self-documenting. `just setup` asserts the effective toolset and
   `just check` fails on a non-22 node. `mise.toml` is the only place a pin is written. Nothing here
   is silent, so `AGENTS.md` has no toolchain line.

@@ -58,7 +58,7 @@ is a `git diff` check on `migrations/**`.
 `build.rs` prints `cargo:rerun-if-changed=migrations` and `.gitattributes` pins `*.sql text
 eol=lf`; each belongs as one comment inside that file once it exists. A *missing* line is the
 silent failure, and the only reader who can cause it is standing on it. `migrations/` is
-single-writer (ADR-0001). The `sqlx prepare` note lives in the `justfile`: migrations are not the
+single-writer ([ADR-0001](0001-development-process.md)). The `sqlx prepare` note lives in the `justfile`: migrations are not the
 only path into the schema, and every agent writing SQL needs the same view.
 
 ## Rejected alternatives

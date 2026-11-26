@@ -1,10 +1,10 @@
 # Research behind the ADRs
 
 The references the decisions lean on. An ADR states a decision and links here; a measurement is never
-restated in a decision record, because nothing re-derives a number that lives in prose. Nothing checks
-this file -- no length cap, no heading rule, no link resolver -- and most citations here predate the gate.
+restated in a decision record, because nothing re-derives a number that lives in prose. A link resolver checks
+the targets here and nothing else: no length cap, no heading rule, and most citations predate the gate.
 
-## ADR-0001 — development process
+## [ADR-0001](adr/0001-development-process.md) — development process
 
 
 Primary source for the diff budget: Sadowski et al., *Modern Code Review: A Case Study at Google*

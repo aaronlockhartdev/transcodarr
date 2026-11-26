@@ -41,6 +41,9 @@ cat > "$work/justfile" <<'JUSTFILE'
 # gate never shells out to a toolchain that is not installed in here.
 JUSTFILE
 cp "$repo/mise.toml" "$repo/rust-toolchain.toml" "$work/"
+# The tracked link config, passed to lychee by name the way `.gitleaks.toml` is: a scratch tree
+# without it would prove the arm skips, not that the arm works.
+cp "$repo/lychee.toml" "$work/"
 cp -r "$repo/docs" "$work/docs"
 [ -f "$repo/.gitignore" ] && cp "$repo/.gitignore" "$work/"
 # The enforced secret ruleset, tracked since #55. Without it the gate refuses to scan at all rather
@@ -254,6 +257,36 @@ if make docs/adr/9991-new.md "$(sup_back)" \
   rm -f docs/adr/9991-new.md docs/adr/9992-old.md docs/adr/9993-prose.md
 fi
 report "all supersession probes ran" "10" "$sup_probes"
+
+# The link arm, both directions. What must break is named, not counted: a target that is not a
+# file, a fragment that is not a heading, and the one green the tool withholds on its own -- an
+# empty scope, which prints `0 Total` and exits 0. Measured on the pinned binary.
+link_probes=0
+expect_link() { link_probes=$((link_probes + 1)); expect_check "$@"; }
+# A four-digit name the shell arms accept too, so the red cannot be blamed on a filename no glob
+# can see: `9990-` is not in the index, which keeps adr-index out of these verdicts' way by being
+# red on its own line, and `expect_check` reads one arm's line.
+md_shaped() { printf '%s\n\nGoes nowhere: [nowhere](0000-nowhere.md).\n' "$(adr_body "$1")"; }
+if make docs/adr/9990-file.md "$(md_shaped proposed)"; then
+  expect_link md-links red "a link whose target is not a file" "do not resolve"
+  rm -f docs/adr/9990-file.md
+fi
+if make docs/adr/9990-frag.md "$(printf '%s\n\nGone heading: [heading](0001-development-process.md#no-such-heading).\n' "$(adr_body proposed)")"; then
+  expect_link md-links red "a link to a heading that is not there" "do not resolve"
+  rm -f docs/adr/9990-frag.md
+fi
+expect_link md-links green "the links as they stand, offline and fragment-checked" "fragments checked"
+
+# An empty scope is the one green the tool does not withhold on its own: `lychee` over no links prints
+# `0 Total` and exits 0, so the arm has to read the count and not just the code. A path it cannot open
+# at all exits 2 and prints no verdict line. Measured on the pinned binary.
+mv docs docs-empty && mkdir docs
+expect_link md-links red "no links for lychee to read" "found no links"
+rm -r docs && mv docs-empty docs
+mv docs docs-gone
+expect_link md-links red "a path lychee refuses to read at all" "without a verdict"
+mv docs-gone docs
+report "all link probes ran" "5" "$link_probes"
 
 # The rule that a gate edit must ship a fixture, tested against itself.
 printf '\n# probe\n' >> scripts/check.sh
