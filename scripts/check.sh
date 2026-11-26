@@ -7,6 +7,11 @@ set -uo pipefail
 root=$(git rev-parse --show-toplevel 2>/dev/null) || { echo "check.sh: not a git repository"; exit 1; }
 cd "$root" || exit 1
 
+# Per-run scratch. ADR-0001 rule 1 makes a worktree per unit, so two gates running at once is the
+# normal shape, not the exotic one; nothing here may use a machine-wide path (#50).
+run_dir=$(mktemp -d 2>/dev/null) || { echo "check.sh: cannot create a scratch dir"; exit 1; }
+trap 'rm -rf "$run_dir"' EXIT
+
 ran=0 skipped=0 failed=0 warned=0
 pass() { printf '  PASS  %s\n' "$1"; ran=$((ran + 1)); }
 skip() { printf '  SKIP  %s — %s\n' "$1" "$2"; skipped=$((skipped + 1)); }
@@ -113,7 +118,17 @@ deny_bin="${CARGO_HOME:-$HOME/.cargo}/bin/cargo-deny"
 { [ -x "$deny_bin" ] && [ ! -d "$deny_bin" ]; } || deny_bin=$(command -v cargo-deny || echo "no cargo-deny found")
 if [ -z "$want_deny" ]; then echo "        mise.toml has no \"cargo:cargo-deny\" pin to compare against"; pin_bad=1
 elif [ "$want_deny" != "$got_deny" ]; then echo "        cargo-deny ${got_deny:-none}, mise.toml pins $want_deny ($deny_bin)"; pin_bad=1; fi
-if [ "$pin_bad" -eq 0 ]; then pass "toolchain-pins (node $got_node, rustc $got_rust, cargo-deny $got_deny)"; else fail "toolchain-pins"; fi
+# The gate invokes gitleaks and just too, so a wrong version of either must not run quietly (#43):
+# gitleaks decides what counts as a secret, and just is what ran this script.
+want_gl=$(sed -n 's/^gitleaks *= *"\([^"]*\)".*/\1/p' mise.toml | head -1)
+got_gl=$(gitleaks --version 2>/dev/null | awk '{print $NF}')
+if [ -z "$want_gl" ]; then echo "        mise.toml has no gitleaks = \"…\" pin to compare against"; pin_bad=1
+elif [ "$want_gl" != "$got_gl" ]; then echo "        gitleaks ${got_gl:-none}, mise.toml pins $want_gl ($(command -v gitleaks || echo 'not on PATH'))"; pin_bad=1; fi
+want_just=$(sed -n 's/^just *= *"\([^"]*\)".*/\1/p' mise.toml | head -1)
+got_just=$(just --version 2>/dev/null | awk '{print $NF}')
+if [ -z "$want_just" ]; then echo "        mise.toml has no just = \"…\" pin to compare against"; pin_bad=1
+elif [ "$want_just" != "$got_just" ]; then echo "        just ${got_just:-none}, mise.toml pins $want_just ($(command -v just || echo 'not on PATH'))"; pin_bad=1; fi
+if [ "$pin_bad" -eq 0 ]; then pass "toolchain-pins (node $got_node, rustc $got_rust, cargo-deny $got_deny, gitleaks $got_gl, just $got_just)"; else fail "toolchain-pins"; fi
 
 # --- Generated and cache files must stay tracked --------------------------------------------
 # If one goes untracked, the drift gate can never fire again and reports empty diffs forever.
@@ -130,22 +145,53 @@ if [ "$ign_bad" -eq 0 ]; then pass "generated-paths-tracked"; else fail "generat
 # --- Secrets ---------------------------------------------------------------------------------
 # `--staged` is what is about to land (and the only scan possible before the first commit);
 # the history scan needs a HEAD. 8.30 renamed `detect` to `git`.
-gl_cmd() { gitleaks git "$@" --redact --exit-code 1 >>/tmp/check-gitleaks.log 2>&1; }
+# The enforced ruleset is the tracked `.gitleaks.toml`, passed with `--config`: that outranks
+# $GITLEAKS_CONFIG and gitleaks' auto-load of an untracked file of the same name, which is how a
+# three-line file left in a worktree came to report "no leaks found" over a real AWS key (#55).
+gl_config=".gitleaks.toml"
+gl_log="$run_dir/gitleaks.log"
+# Two things measured on 8.30.1, both fixtured in selftest.sh: a config without
+# `[extend] useDefault = true` replaces the embedded rules rather than adding to them, and a config
+# that fails to parse ALSO exits 1 -- so a broken config must never be reported as a found secret.
+gl_broken() { grep -qiE 'failed to load config|unable to load gitleaks config' "$gl_log"; }
+gl_cmd() { local rep="$1"; shift
+  gitleaks git "$@" --config "$gl_config" --report-format csv --report-path "$rep" \
+    --redact --exit-code 1 >>"$gl_log" 2>&1; }
+gl_reports=""
+gl_found() { gl_reports="$gl_reports $1"; gl_reason="${gl_reason:+$gl_reason; }$2"; }
 if ! command -v gitleaks >/dev/null 2>&1; then
   skip gitleaks "gitleaks not on PATH — run mise install"
+elif [ ! -f "$gl_config" ]; then
+  echo "        $gl_config is missing — the enforced ruleset has to be a tracked file (ADR-0001)"
+  fail gitleaks
 else
-  : >/tmp/check-gitleaks.log
+  : >"$gl_log"
   gl_reason=""
-  gl_cmd --staged || gl_reason="staged changes contain a secret"
+  gl_cmd "$run_dir/staged.csv" --staged \
+    || { gl_broken || gl_found "$run_dir/staged.csv" "staged changes contain a secret"; }
   if git rev-parse -q --verify HEAD >/dev/null 2>&1; then
-    gl_cmd || gl_reason="${gl_reason:+$gl_reason; }history contains a secret"
+    gl_cmd "$run_dir/history.csv" \
+      || { gl_broken || gl_found "$run_dir/history.csv" "history contains a secret"; }
   fi
-  if [ -n "$gl_reason" ]; then
+  if gl_broken; then
+    echo "        $gl_config does not load, so no verdict about secrets is possible"
+    grep -iE 'failed to load|unable to load' "$gl_log" | head -2 | sed 's/^/        /'
+    fail gitleaks
+  elif [ -n "$gl_reason" ]; then
     echo "        $gl_reason"
-    grep -E 'Secret|Finding|Location|RuleID|Commit' /tmp/check-gitleaks.log | head -12
+    # 8.30.1's own output carries no finding detail: a red run prints the banner, "N commits
+    # scanned." and "WRN leaks found: 1". The CSV report is the only thing naming rule, file and
+    # commit (#51). The columns holding the secret are not printed, and --redact blanks them anyway.
+    for rep in $gl_reports; do
+      if [ -s "$rep" ]; then
+        sed -n '2,13p' "$rep" | cut -d, -f1-3 | sed 's/^/        finding: /'
+      else
+        echo "        the report holds no rows, so the scan failed for a reason other than a leak"
+      fi
+    done
     fail gitleaks
   else
-    pass "gitleaks (staged + history)"
+    pass "gitleaks ($gl_config: staged + history)"
   fi
 fi
 
@@ -230,25 +276,25 @@ else
   else
     port=$((20000 + RANDOM % 20000))   # a fixed port would collide with another worktree's daemon
     TRANSCODARR_ADDR="127.0.0.1:$port" TRANSCODARR_WEB_BUILD=apps/web/build \
-      "$tgt/debug/transcodarr" >/tmp/check-serving.log 2>&1 &
+      "$tgt/debug/transcodarr" >"$run_dir/serving.log" 2>&1 &
     pid=$!
     root_code=""
     api_code=""
     for _ in $(seq 1 40); do
-      root_code=$(curl -s -o /tmp/check-serving-root -w '%{http_code}' "http://127.0.0.1:$port/" 2>/dev/null)
+      root_code=$(curl -s -o "$run_dir/root.html" -w '%{http_code}' "http://127.0.0.1:$port/" 2>/dev/null)
       case "$root_code" in ""|000) sleep 0.1 ;; *) break ;; esac
     done
-    api_code=$(curl -s -o /tmp/check-serving-api -w '%{http_code}' "http://127.0.0.1:$port/api" 2>/dev/null)
+    api_code=$(curl -s -o "$run_dir/api.html" -w '%{http_code}' "http://127.0.0.1:$port/api" 2>/dev/null)
     kill "$pid" 2>/dev/null
     wait "$pid" 2>/dev/null
     srv_bad=0
     [ "$root_code" = 200 ] || { echo "        GET / answered '${root_code:-nothing}', wanted 200."; srv_bad=1; }
-    grep -qi '<!doctype html' /tmp/check-serving-root 2>/dev/null \
+    grep -qi '<!doctype html' "$run_dir/root.html" 2>/dev/null \
       || { echo "        GET / answered ${root_code} without the app shell."; srv_bad=1; }
     [ "$api_code" = 404 ] || { echo "        GET /api answered '${api_code:-nothing}', wanted 404."; srv_bad=1; }
     if [ "$srv_bad" -ne 0 ]; then
       echo "        --- what the binary said: ---"
-      sed 's/^/        /' /tmp/check-serving.log
+      sed 's/^/        /' "$run_dir/serving.log"
       fail serving
     else
       pass "serving (booted on :$port; / is the shell, /api is a 404)"
