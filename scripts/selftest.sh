@@ -32,14 +32,13 @@ export GIT_CEILING_DIRECTORIES="$work"
 # harness replaced hand-rolled init-db with a helper that commits.
 mkdir -p "$work/scripts"
 cp "$repo/scripts/check.sh" "$work/scripts/check.sh"
-# A scratch recipe list rather than the real one, deliberately: `gen` has to be absent so check.sh
-# skips drift in here. Running the real generator would need the installed frontend, and a suite
-# that requires an install is a suite that cannot run before CI has installed anything. Drift's
-# behaviour is proven by hand instead: hand-edit a generated file, stage it, `just check` goes red;
-# regenerate and stage, it goes green.
+# A scratch recipe list rather than the real one, deliberately: the real `gen` would need the
+# installed frontend, and a suite that requires an install is a suite that cannot run before CI has
+# installed anything. The gate must not shell out to a toolchain that is absent here — a skip that
+# is really a missing dependency is how a green starts to mean nothing.
 cat > "$work/justfile" <<'JUSTFILE'
-# Seeded by scripts/selftest.sh. Not the real recipe list, on purpose: no `gen` recipe, so the drift
-# check skips instead of shelling out to a toolchain that is not installed in here.
+# Seeded by scripts/selftest.sh. Not the real recipe list, on purpose: no recipes at all, so the
+# gate never shells out to a toolchain that is not installed in here.
 JUSTFILE
 cp "$repo/mise.toml" "$repo/rust-toolchain.toml" "$work/"
 cp -r "$repo/docs" "$work/docs"
@@ -140,18 +139,26 @@ if make warn.py "$(python3 -c "print('\n'.join('b%d = %d' % (i, i) for i in rang
   unstage warn.py; rm -f warn.py
 fi
 
-# The exclusions, measured rather than trusted: 2,040 generated lines plus one 40-line source
-# file must report 40 lines across 1 file.
+# The exclusions, measured rather than trusted: 1,530 generated and lockfile lines plus one 40-line
+# source file must report 40 lines across 1 file. And `contracts/` must NOT be excluded: nothing
+# generates it yet, so a change there is hand-written work and pays into the budget (#75).
 gen_ok=1
-for p in contracts/openapi.json apps/web/src/lib/api/schema.ts .sqlx/q.json; do
+for p in apps/web/src/lib/api/schema.ts .sqlx/q.json; do
   make "$p" "$(python3 -c "print('\n'.join('x' * 60 for _ in range(510)))")" || gen_ok=0
 done
 make apps/web/package-lock.json "$(python3 -c "print('\n'.join('  \"k%d\": {}' % i for i in range(510)))")" || gen_ok=0
+make contracts/openapi.json "$(python3 -c "print('\n'.join('x' * 60 for _ in range(120)))")" || gen_ok=0
 if [ "$gen_ok" = 1 ] && make small.py "$(python3 -c "print('\n'.join('c%d = %d' % (i, i) for i in range(40)))")"; then
-  stage contracts apps/web .sqlx small.py
+  stage apps/web .sqlx small.py
   run_gate
   got=$(sed -n 's/.*diff budget (\([0-9]*\) lines, \([0-9]*\) files.*/\1 \2/p' "$log")
   report "generated and lockfile output excluded" "40 1" "$got"
+  # The same staged state plus the contract on top: the numbers must move by its 120 lines and one
+  # file, which is what an exclusion would otherwise hide.
+  stage contracts
+  run_gate
+  got=$(sed -n 's/.*diff budget (\([0-9]*\) lines, \([0-9]*\) files.*/\1 \2/p' "$log")
+  report "the authored contract pays into the budget" "160 2" "$got"
   unstage contracts apps/web .sqlx small.py
   rm -f contracts/openapi.json apps/web/src/lib/api/schema.ts apps/web/package-lock.json \
         .sqlx/q.json small.py

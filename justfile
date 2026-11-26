@@ -11,8 +11,8 @@ setup:
     rustup show
 
 # Regenerate the tracked contract's TypeScript client. Until the Rust binary emits the
-# contract (ADR-0003), contracts/openapi.json is authored here; this recipe is what the
-# drift gate compares against.
+# contract (ADR-0003), contracts/openapi.json is authored here, so this is the one direction
+# of the pipeline that exists. Nothing checks the client matches the contract; #75 holds that.
 
 gen:
     npm --prefix apps/web run gen
