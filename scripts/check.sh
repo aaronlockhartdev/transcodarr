@@ -369,6 +369,61 @@ if [ ${#scope[@]} -gt 0 ]; then
   fi
 fi
 
+# --- Commit trailers, where no hook can run (ADR-0001, issue #49) ---------------------------------
+# `commit-msg` checks this shape, but the hook only exists where `just setup` ran: a fresh clone has
+# `core.hooksPath` unset and accepts a commit with no trailers at all, green. CI is the one machine no
+# `--no-verify` reaches, so it re-checks over the commits being proposed. Only commits of ours: main's
+# history predates the rule, so a run on the base tip audits nothing and says so rather than going red
+# on commits that were legal when written. The base is the one CI names in `$GITHUB_BASE_REF` when it
+# exists, because `merge-base HEAD origin/main` charges a stacked branch for its *parent branch's*
+# commits and then names them as ours (#70).
+# shortcut: `$GITHUB_BASE_REF` is set only on GitHub Actions, so locally this is always origin/main
+# and no fixture covers the PR-base path; the next stacked PR is the test of that line.
+# The block is read with `git interpret-trailers`, so a `Task:` inside a sentence and a `Task:`
+# written above the block are not trailers, which is what the hook's grep cannot tell; the hook stays
+# the looser of the two readers. A revert is exempt in the shape `git revert` writes (`Revert "…"`),
+# not in any subject that begins with the word, and an exempt commit is not counted, so the number
+# printed on green is the number of commits actually audited. The `Agent:` model cross-check needs
+# $PI_MODEL, which only a committing shell has, so that stays with the hook.
+base_ref=${GITHUB_BASE_REF:-main}
+if base=$(git merge-base HEAD "origin/$base_ref" 2>/dev/null); then
+  if [ "$base" = "$(git rev-parse HEAD)" ]; then
+    skip "trailer" "no commits of ours (HEAD is origin/$base_ref's tip)"
+  else
+    untrailered="" checked=0 exempt=0
+    while IFS= read -r sha; do
+      case "$(git log -1 --format=%s "$sha")" in
+        'Revert "'*) exempt=$((exempt + 1)); continue ;;
+      esac
+      checked=$((checked + 1))
+      block=$(git log -1 --format=%B "$sha" | git interpret-trailers --parse)
+      missing=""
+      if printf '%s\n' "$block" | grep -q '^Task: '; then
+        task=$(printf '%s\n' "$block" | sed -n 's/^Task: //p' | head -1)
+        case "$task" in
+          '#'[0-9]* | bootstrap) ;;
+          *) missing=" Task-shape" ;;      # `Task: banana` pointed at no issue and still went green
+        esac
+      else
+        missing=" Task"
+      fi
+      for t in Agent Verified; do
+        printf '%s\n' "$block" | grep -q "^$t: " || missing="$missing $t"
+      done
+      [ -n "$missing" ] && untrailered+="$sha missing:$missing"$'\n'
+    done < <(git log --format=%h --no-merges "$base..HEAD")
+    if [ -n "$untrailered" ]; then
+      printf '%s' "$untrailered" | sed 's/^/        /'
+      echo "        ADR-0001: every commit carries Task:/Agent:/Verified: as a trailer block, Task: being '#<issue>' or 'bootstrap'."
+      fail "trailer"
+    else
+      pass "trailer ($checked commits checked, $exempt reverts exempt, all three trailers present)"
+    fi
+  fi
+else
+  skip "trailer" "no origin/$base_ref, so which commits are ours is unknowable"
+fi
+
 printf 'check: %d ran, %d skipped, %d warned, %d failed\n' "$ran" "$skipped" "$warned" "$failed"
 if [ "$failed" -gt 0 ]; then exit 1; fi
 if [ "$ran" -eq 0 ]; then echo "check: nothing ran. This green means nothing."; exit 1; fi
