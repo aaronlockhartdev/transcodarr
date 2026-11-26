@@ -38,5 +38,6 @@ Acceptable trade for a single-maintainer, network-exposed tool.
 - **Never widen `deny.toml`.** `cargo deny` reads the worktree config, so the arm fails while an unallowed
   licence sits in the graph and becomes a PASS byte-identical to a clean run the moment that licence is
   allow-listed. Nothing inspects diff paths, so a widening leaves no trace; what does fail is an allow
-  entry nobody declares (#14).
+  entry nobody declares (#14). `clarify.license` and `[graph] excludes` are the same class of door and
+  print the same `licenses ok`; the measurements are in `docs/research.md` (#18).
 - The `AGPL-3.0-only` entry is list-wide, so an `AGPL-3.0-only` dependency passes too (#14).

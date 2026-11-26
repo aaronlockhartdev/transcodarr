@@ -103,8 +103,11 @@ usable in an AGPL-3.0 project (Apache-2.0 to AGPLv3 is one-way compatible). GPL-
 exclusion, and the pinned cargo-deny has no license ban table, so the exclusion is carried by its absence
 from the allow list. The semantics are SPDX's: a dependency that offers a compatible side
 (`MIT OR GPL-2.0-only`) is satisfied by that side and passes, which is correct, since you may take it.
-The door that would re-admit GPL-2.0-only alone is `[[licenses.exceptions]]`, and ADR-0004 rule 1 bans
-reaching for it.
+Three per-crate doors change a licence verdict while the allow list stays untouched, all measured on the
+pinned cargo-deny 0.22.0 (#18): `[[licenses.exceptions]]` exempts a named crate, `clarify.license` re-admits
+one whose manifest declares it, and `[graph] excludes` drops it from the scan. Each prints `licenses ok`,
+byte-identical to a clean run, which is why ADR-0004 bans reaching for any of them in prose and why the arm
+cannot be the defence.
 
 Text relied on: AGPL-3.0 §13, "Remote Network Interaction; Use of Source Code", i.e. network use counts
 as conveying.
