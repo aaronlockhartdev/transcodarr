@@ -145,56 +145,25 @@ Anything suspected of breaking is reverted, then fixed forward. No heroic debugg
 |a long-lived `agent-work` branch|the named anti-pattern: a week old, touches everything, awaits "the big review"|
 |justifying budgets with the EASE "61% of agent PRs unreviewed" stat|that study's population is repos with 100 stars or more; this repo has none. It argues against ceremony here, so it is not used|
 
-## Evidence
+## Unenforced
 
-Primary source for the diff budget: Sadowski et al., *Modern Code Review: A Case Study at Google*
-(ICSE SEIP 2018, `https://storage.googleapis.com/gweb-research2023-media/pubtools/4476.pdf`), an
-analysis of review logs for 9 million changes. The clause leaned on is the distribution: median 24
-lines modified, 90% of changes under 10 files. 50/200 sits above that median on purpose and is still
-judgement, most likely to be revised here. The study's latency numbers are not used: a queue statistic
-from an org with thousands of reviewers, and this project has one human and no queue.
+What has no machine behind it, with the issue that owes the gate. Neither tool's output is a registry: an
+arm with an empty scope and a fixture whose precondition fails each print no line at all. #71 #72
 
-Also: `git interpret-trailers` validates presence and syntax and not truth, so an agent can write
-`Verified: just check` without running it. Hence the human is the only approver, and hence FLAG paths.
+- **Lane B has no attendance record.** Nothing records whether a human watched the diff, so the rule that
+  picks the lane cannot be checked by anything.
+- **FLAG paths have no detector.** Nothing inspects diff paths, and no tool tells a fix from a cover-up.
+  The motive is gated instead: a widened check buys budget or suppressions, and both of those fail.
+- **Trailers are presence, not truth.** `commit-msg` checks the three names, the `Task:` value shape, and
+  an `Agent:` whose words appear in `$PI_MODEL` -- a clause it skips when `$PI_MODEL` is unset, which is
+  every CI runner and every human shell. No gate arm and no CI step re-checks a trailer, so a clone that
+  never ran `just setup` commits freely (#61). Nothing verifies that a review ran, that `Verified:`
+  describes a real run, or that `Task: #N` names an issue (#63).
+- **Platform settings are configured, not observed.** `--ff-only`, no squash, no force-push, no push to
+  `main` and one required approval are GitHub settings; no check in this repo reads them, so a silent
+  flip leaves nothing in the history. #67
+- **The ADR length cap warns and does not block**, which is the whole of its power.
+- Worktree isolation, "land same day" and at most 3 open branches are maintainer hygiene, not agent rules.
 
-Why the brief is complete up front instead of clarified mid-run: Laban et al. (Microsoft Research and
-Salesforce Research), 200,000 simulated conversations, one clause leaned on. Performance fell an
-average of 39% across six generation tasks when a fully specified instruction was instead revealed
-piece by piece, because models commit to an assumption early and do not recover from a wrong turn.
-
-Agentic runs are that experiment with nobody in the room, so the wrong turn at turn 3 gets 37 tool
-calls built on top of it. One behaviour per acceptance line is EARS (`WHEN <trigger> the system
-shall <response>`; Mavin et al., RE'09, adopted by Amazon's Kiro), chosen because a single-clause
-requirement is already the shape of a test. The stop condition is the field agents most often lack:
-without it the failure modes are halting at the first ambiguity for a sleeping human, or continuing
-well past the point where asking was right.
-
-Cited, not quoted, for the review section: comment/code contradictions raise bug-introduction odds
-about 1.5× and the effect peaks immediately after the inconsistency is introduced (arXiv:2409.10781),
-which here means the next reader is the next agent. 45% of merged agent PRs needed changes,
-concentrated in bug fixes, documentation and adherence to project-specific standards, reviewers
-hand-fixing what a lint flag would catch (arXiv:2509.14745). 50.8% of 7,357 static-analysis
-suppressions were inert, introduced largely over false positives and unreadable messages, hence "fix
-the lint, never allow it" (doi:10.1145/3715729). LLM evaluators recognise and favour their own output
-while human annotators judge the texts equal (arXiv:2404.13076), so the separate context window
-holding only the diff is the only independence we have.
-
-## Binding summary for AGENTS.md
-
-1. Default to Lane B (worktree, branch, PR); Lane A only while the human watches every diff.
-   Enforcer: none is possible. No tool records attendance, so this one stays prose.
-2. Never edit a FLAG path to get a check to pass; report it. Enforcer: none, and no longer
-   claimed. Nothing inspects diff paths, review approval is not available on this plan, and no
-   tool can tell a fix from a cover-up, so this stays prose enforced by Lane B. The motive is
-   gated instead: the two things a widened check buys you, budget and suppressions, now fail.
-
-Machine-enforced by `just check`: the diff budget, the suppression ban, toolchain pins with a missing
-pin line as a failure, ADR filename, index consistency, the supersession lifecycle, generated-path
-tracked-ness, and secret scanning. Coverage is uneven and stated as measured: the pins, secret scanning
-and the supersession lifecycle are pinned in both directions by check name, supersession also asserting
-the reason the gate printed; the rest at rule level, not arm level, are asserted red or skipped; and
-`drift` has no fixture at all. The ADR length cap
-warns and does not block, which is the whole of its power. Platform settings enforce `--ff-only`, no
-squash, no force-push, no push to `main`; `commit-msg` enforces trailer presence and an `Agent:` model
-name whose words appear in `$PI_MODEL`. Nothing enforces worktree isolation or FLAG path detection, and
-the file claims none. "Land same day" and at most 3 branches are maintainer hygiene, not agent rules.
+Citations behind these decisions live in `docs/research.md`, outside every ADR arm: no length cap, no
+heading rule, nothing checking whether a link still resolves.

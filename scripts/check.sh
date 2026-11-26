@@ -46,7 +46,7 @@ for f in "${adr_files[@]}"; do
   # regex. The supersession value is exact, because the gate reads a number out of it.
   grep -qE '^Status: (proposed|accepted)([[:space:].]|$)|^Status: superseded by ADR-[0-9]{4}$' "$f" \
     || { echo "        $f: Status line neither begins with 'proposed'/'accepted' nor reads 'superseded by ADR-NNNN'"; adr_bad=1; }
-  for h in '## Context' '## Decision' '## Rejected alternatives' '## Evidence' '## Binding summary for AGENTS.md'; do
+  for h in '## Context' '## Decision' '## Rejected alternatives' '## Unenforced'; do
     grep -qx "$h" "$f" || { echo "        $f: missing section '$h'"; adr_bad=1; }
   done
   # Supersession, read off the Status line and nowhere else: the old record says `superseded by
