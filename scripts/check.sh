@@ -131,13 +131,15 @@ elif [ "$want_just" != "$got_just" ]; then echo "        just ${got_just:-none},
 if [ "$pin_bad" -eq 0 ]; then pass "toolchain-pins (node $got_node, rustc $got_rust, cargo-deny $got_deny, gitleaks $got_gl, just $got_just)"; else fail "toolchain-pins"; fi
 
 # --- Generated and cache files must stay tracked --------------------------------------------
-# If one goes untracked, the drift gate can never fire again and reports empty diffs forever.
+# These paths have to stay tracked or every check that reads them goes quietly green: the
+# generated client because it is what a drift arm will one day diff, the lockfile because it is
+# what `cargo deny` and `npm ci` resolve, `.sqlx` because it is what the offline builds need.
 ign_bad=0
 for p in contracts/openapi.json apps/web/src/lib/api/schema.ts Cargo.lock .sqlx; do
   if git check-ignore -q "$p" 2>/dev/null; then
-    echo "        $p is gitignored — the drift gate and sqlx offline checks cannot function"; ign_bad=1
+    echo "        $p is gitignored — an ignored path is invisible to every check"; ign_bad=1
   elif [ -e "$p" ] && ! git ls-files --error-unmatch -- "$p" >/dev/null 2>&1; then
-    echo "        $p is on disk but untracked — the drift gate would compare nothing"; ign_bad=1
+    echo "        $p is on disk but untracked — a file no commit carries is not a contract"; ign_bad=1
   fi
 done
 if [ "$ign_bad" -eq 0 ]; then pass "generated-paths-tracked"; else fail "generated-paths-tracked"; fi
@@ -302,22 +304,12 @@ else
   fi
 fi
 
-# --- Contract drift (ADR-0003) ---------------------------------------------------------------
-if ! just --summary 2>/dev/null | grep -qw gen; then
-  skip drift "no just gen recipe yet"
-elif ! just gen; then
-  fail drift
-elif ! git diff --exit-code -- contracts apps/web/src/lib/api; then
-  echo "        contracts/ or apps/web/src/lib/api changed after regeneration: these are generated."
-  echo "        Edit the Rust handler, then run just gen. Never hand-edit the output."
-  fail drift
-else
-  pass "drift (regenerated, diff empty)"
-fi
 
 # --- Diff budget (ADR-0001: 50 lines soft, 200 hard, 10 files) --------------------------------
 # ADR-0001 claimed this was machine-enforced and nothing implemented it. Lines and files are
-# countable, so it is a gate now. Excluded: lockfiles, and the paths ADR-0003 declares generated.
+# countable, so it is a gate now. Excluded: lockfiles and the generated client. Not excluded:
+# `contracts/`, which ADR-0003 still calls generated but nothing generates — while it is
+# hand-authored, changing it is work, so it counts.
 scope=()
 if ! git diff --quiet --cached 2>/dev/null; then
   scope=(--cached)                              # pre-commit: what is about to be committed
@@ -333,7 +325,7 @@ if [ ${#scope[@]} -gt 0 ]; then
   # `^contracts/` at the line start silently matched nothing and counted generated output as work.
   read -r lines files < <(git diff --numstat "${scope[@]}" -- \
     | awk -F'\t' '$3 !~ /(^|\/)(package-lock\.json|Cargo\.lock)$/ && $3 !~ /\.lock$/ \
-              && $3 !~ /^(apps\/web\/src\/lib\/api|contracts|\.sqlx)\// {a += $1 + $2; n++} \
+              && $3 !~ /^(apps\/web\/src\/lib\/api|\.sqlx)\// {a += $1 + $2; n++} \
               END {print a + 0, n + 0}')
   if [ "$lines" -gt 200 ] || [ "$files" -gt 10 ]; then
     echo "        $lines lines across $files files [${scope[0]}]; ADR-0001 allows 200 lines and 10 files. Split it."
