@@ -543,6 +543,49 @@ git reset -q --hard "$scope_base" 2>/dev/null
 rm -f scope_*.py
 report "all budget fixtures ran" "9" "$scope_probes"
 
+# --- Contract drift, arm by arm (#52) -----------------------------------------------------------------
+# The drift check has four arms: no `gen` recipe, the generator failed, the output changed after
+# regeneration, and clean. ADR-0001 said outright that no fixture had ever run any of them, and the
+# seeded justfile omitted `gen` on purpose, so every probe in this file resolved the skip arm without
+# ever asserting it. A stub recipe (`cat`, no toolchain) makes the other three reachable in here; the
+# recipe is then removed by restoring the seeded file, which is the skip arm asserted on purpose.
+drift_probes=0
+drift() { drift_probes=$((drift_probes + 1)); expect_check "$@"; }        # check want name [reason]
+cat >> justfile <<'GEN'
+gen:
+	@mkdir -p contracts && cat spec.json > contracts/openapi.json
+GEN
+printf '{"openapi":"3.1.0","info":{"title":"fixture"}}\n' > spec.json
+if just gen >/dev/null 2>&1 && stage spec.json contracts/openapi.json; then
+  # The four arms, and what the first run of this fixture taught me: an *unstaged* hand-edit never
+  # reaches the FAIL arm, because the gate regenerates before it diffs, so the edit is repaired and
+  # the arm goes green on the repaired output. That is correct behaviour (the tree ends up right) but
+  # it is not a report, so the red side needs the source to have moved, or the edit to be staged.
+  drift drift green "the generator reproduces what is staged" "drift (regenerated, diff empty)"
+  printf '{"openapi":"3.1.0","info":{"title":"fixture v2"}}\n' > spec.json
+  drift drift red "the source moved and nobody ran just gen" "changed after regeneration"
+  just gen >/dev/null 2>&1; stage contracts/openapi.json
+  drift drift green "regenerate and stage, and the arm goes green" "drift (regenerated, diff empty)"
+  printf 'hand edited, staged\n' > contracts/openapi.json; stage contracts/openapi.json
+  drift drift red "a staged hand-edit cannot be repaired away" "changed after regeneration"
+  rm -f spec.json
+  drift drift red "a generator that fails is a red gate"
+  printf '{"openapi":"3.1.0","info":{"title":"fixture v2"}}\n' > spec.json
+  just gen >/dev/null 2>&1; stage contracts/openapi.json
+  drift drift green "the green side comes from regenerating, not from nothing" "drift (regenerated, diff empty)"
+else
+  skipping "stub gen recipe" "contract drift arms"
+fi
+if git checkout -q -- justfile; then
+  drift drift skip "no gen recipe, and the gate says so" "no just gen recipe yet"
+else
+  skipping "restore the seeded justfile" "drift skip arm"
+fi
+unstage spec.json contracts/openapi.json 2>/dev/null
+rm -f spec.json contracts/openapi.json
+prunedirs
+report "all drift arms ran" "7" "$drift_probes"
+
 # --- Secrets, in both scans and both directions (#37) ---------------------------------------------
 # ADR-0001 claims a both-directions fixture for every rule it enforces, and for secret scanning that
 # claim was false: the branch at check.sh:112-128 ran on every probe and always said green, so a gate

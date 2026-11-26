@@ -192,8 +192,8 @@ Machine-enforced by `just check`: the diff budget, the suppression ban, toolchai
 pin line as a failure, ADR filename, index consistency, the supersession lifecycle, generated-path
 tracked-ness, and secret scanning. Coverage is uneven and stated as measured: the pins, secret scanning
 and the supersession lifecycle are pinned in both directions by check name, supersession also asserting
-the reason the gate printed; the rest at rule level, not arm level, are asserted red or skipped; and
-`drift` has no fixture at all. The ADR length cap
+the reason the gate printed; the rest at rule level, not arm level, are asserted red or skipped. All four
+drift arms have fixtures, and the one where the generator itself fails prints `FAIL drift` with no reason. The ADR length cap
 warns and does not block, which is the whole of its power. Platform settings enforce `--ff-only`, no
 squash, no force-push, no push to `main`; `commit-msg` enforces trailer presence and an `Agent:` model
 name whose words appear in `$PI_MODEL`. Nothing enforces worktree isolation or FLAG path detection, and
