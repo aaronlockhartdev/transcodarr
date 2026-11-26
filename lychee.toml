@@ -1,0 +1,5 @@
+# `offline` on purpose: a link arm that fetches turns CI red on someone else's outage, which is
+# the same failure cargo-deny's advisory fetch carries, and this corpus links local files. What is
+# checked is that every named target exists and every #fragment names a heading that is there.
+offline = true
+include_fragments = "full"

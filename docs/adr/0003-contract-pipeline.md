@@ -57,7 +57,7 @@ TypeScript cannot resolve them; `config.alias` is deprecated and unused.
 |`aide`|viable, materially less active|
 |`typescript 7.0.2` (npm `latest`)|Kit 3.4.0's own peer is `^6.0.0`, so 7.x conflicts with the framework and the generator|
 |dropping `openapi-typescript` to satisfy its `^5.x` peer|the peer is advisory for a type-only generator; one `overrides` entry keeps both tools|
-|SSR-capable SvelteKit behind the same binary|needs a JS runtime in the binary, contradicting single-process; SPA plus static embed is the design (ADR-0001 context)|
+|SSR-capable SvelteKit behind the same binary|needs a JS runtime in the binary, contradicting single-process; SPA plus static embed is the design ([ADR-0001](0001-development-process.md) context)|
 |`sppl` crate to embed and serve|0.0.5, single maintainer, and the job is ~30 lines of `rust-embed` plus a fallback handler|
 
 ## Evidence

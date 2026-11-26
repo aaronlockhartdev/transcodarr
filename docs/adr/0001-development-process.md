@@ -170,4 +170,4 @@ arm with an empty scope and a fixture whose precondition fails each print no lin
 - Worktree isolation, "land same day" and at most 3 open branches are maintainer hygiene, not agent rules.
 
 Citations behind these decisions live in `docs/research.md`, outside every ADR arm: no length cap, no
-heading rule, nothing checking whether a link still resolves.
+heading rule there, though `md-links` does check whether a target it names still resolves.

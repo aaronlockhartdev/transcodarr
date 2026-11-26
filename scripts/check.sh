@@ -72,6 +72,27 @@ for f in "${adr_files[@]}"; do
 done
 if [ "$adr_bad" -eq 0 ]; then pass "adr-structure"; else fail "adr-structure"; fi
 
+# --- Document links: a resolver reads the corpus, the shell only reports ------------------
+# `--config` names the tracked file rather than letting lychee pick up whatever sits in the working
+# directory -- the lesson `.gitleaks.toml` taught in #55. `include_fragments = "full"` makes a link
+# to a heading that no longer exists a failure, which is the rot a prose corpus actually produces.
+# The count is printed because lychee exits 0 whether it read 0 links or 100, so a green that
+# cannot name what it read is not a green; the empty scope has a probe in scripts/selftest.sh.
+link_out=$(lychee --config lychee.toml --no-progress docs 2>&1); link_code=$?
+link_n=$(printf '%s\n' "$link_out" | sed -n 's/.*🔍[[:space:]]*\([0-9][0-9]*\)[[:space:]]*Total.*/\1/p' | head -1)
+case "$link_code" in
+  0) if [ -z "$link_n" ]; then
+       printf '%s\n' "$link_out" | sed 's/^/        /'
+       fail "md-links (no link count in lychee's output, so nothing was proved)"
+     elif [ "$link_n" -eq 0 ]; then
+       fail "md-links (lychee found no links in docs, so a green here would mean nothing)"
+     else pass "md-links (lychee: $link_n links, offline, fragments checked)"; fi ;;
+  2) printf '%s\n' "$link_out" | grep -E '^\[ERROR\]' | sed 's/^/        /'
+     fail "md-links (lychee: $(printf '%s\n' "$link_out" | grep -cE '^\[ERROR\]') links do not resolve)" ;;
+  *) printf '%s\n' "$link_out" | sed 's/^/        /'
+     fail "md-links (lychee exited $link_code without a verdict; check lychee.toml and the pins)" ;;
+esac
+
 # --- ADR index: every ADR listed, every listing real -----------------------------------------
 # The measured failure: 167 ADRs, an index that showed 30, and 29 live decisions invisible.
 idx_bad=0
@@ -128,7 +149,11 @@ want_just=$(sed -n 's/^just *= *"\([^"]*\)".*/\1/p' mise.toml | head -1)
 got_just=$(just --version 2>/dev/null | awk '{print $NF}')
 if [ -z "$want_just" ]; then echo "        mise.toml has no just = \"…\" pin to compare against"; pin_bad=1
 elif [ "$want_just" != "$got_just" ]; then echo "        just ${got_just:-none}, mise.toml pins $want_just ($(command -v just || echo 'not on PATH'))"; pin_bad=1; fi
-if [ "$pin_bad" -eq 0 ]; then pass "toolchain-pins (node $got_node, rustc $got_rust, cargo-deny $got_deny, gitleaks $got_gl, just $got_just)"; else fail "toolchain-pins"; fi
+want_lychee=$(sed -n 's/^lychee *= *"\([^"]*\)".*/\1/p' mise.toml | head -1)
+got_lychee=$(lychee --version 2>/dev/null | awk '{print $NF}')
+if [ -z "$want_lychee" ]; then echo "        mise.toml has no lychee = \"…\" pin to compare against"; pin_bad=1
+elif [ "$want_lychee" != "$got_lychee" ]; then echo "        lychee ${got_lychee:-none}, mise.toml pins $want_lychee ($(command -v lychee || echo 'not on PATH'))"; pin_bad=1; fi
+if [ "$pin_bad" -eq 0 ]; then pass "toolchain-pins (node $got_node, rustc $got_rust, cargo-deny $got_deny, gitleaks $got_gl, just $got_just, lychee $got_lychee)"; else fail "toolchain-pins"; fi
 
 # --- Generated and cache files must stay tracked --------------------------------------------
 # These paths have to stay tracked or every check that reads them goes quietly green: the
