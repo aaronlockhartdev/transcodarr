@@ -41,14 +41,12 @@ cat > "$work/justfile" <<'JUSTFILE'
 # gate never shells out to a toolchain that is not installed in here.
 JUSTFILE
 cp "$repo/mise.toml" "$repo/rust-toolchain.toml" "$work/"
-# The tracked link config, passed to lychee by name the way `.gitleaks.toml` is: a scratch tree
-# without it would prove the arm skips, not that the arm works.
-cp "$repo/lychee.toml" "$work/"
-# The rules travel with their cases, and `vale test --coverage` (below) runs them inside this scratch
-# tree: without `.vale.ini` and `.vale/` here, the probe would test an absent style, not the rules.
-cp "$repo/.vale.ini" "$work/"
-cp -r "$repo/.vale" "$work/.vale"
 cp -r "$repo/docs" "$work/docs"
+# The prose rules travel with their cases: the two arms read `.vale.ini`, `.vale/ADR/*.yml` and
+# `lychee.toml` out of the work tree, so a scratch repo without them would test an absent tool, not
+# the arm. `check.sh` passes `lychee.toml` by name, the way `.gitleaks.toml` travels (#55).
+cp "$repo/.vale.ini" "$repo/lychee.toml" "$work/"
+cp -r "$repo/.vale" "$work/.vale"
 [ -f "$repo/.gitignore" ] && cp "$repo/.gitignore" "$work/"
 # The enforced secret ruleset, tracked since #55. Without it the gate refuses to scan at all rather
 # than fall back to embedded defaults, so every gitleaks probe below would be red for the wrong
@@ -177,9 +175,13 @@ fi
 
 # The .md gates, both directions. Each line below is a live misfire found by auditing the corpus
 # checks against a scratch tree: a mistyped filename was invisible to every ADR check, and an index
-# row that named no file made the README-to-file direction check nothing. The status vocabulary, the
-# required headings and the supersession lifecycle are pinned here too, in both directions. The plan to move
-# them into a Vale config was deferred and never ran, so nothing else enforces them but these probes.
+# row that named no file made the README-to-file direction check nothing. The supersession
+# lifecycle and the `Status:` vocabulary are pinned here too, in both directions. The required
+# headings live in `.vale/ADR/` as rules carrying their own cases, and `vale test --coverage` (below)
+# fails on a rule no case fires. The vocabulary stays here because a Vale `conditional` pairs its two
+# patterns inside one block, and a block is one line, so the rule came out vacuous rather than strict
+# (measured, and it looked green); the lifecycle stays because a two-file join is the one thing
+# neither prose tool can read.
 adr_body() { printf 'Status: %s\n\n# T\n\n## Context\n\nb\n\n## Decision\n\nd\n\n## Rejected alternatives\n\nr\n\n## Unenforced\n\nz\n' "$1"; }
 expect_check() { run_gate; # check want name
   local line got
@@ -240,11 +242,12 @@ if make docs/adr/9991-new.md "$(sup_back)" \
     "no docs/adr/9990-*.md exists"
   printf '%s' "$(adr_body 'superseded by ADR-9992')" > docs/adr/9992-old.md
   expect_sup adr-structure red "a record that supersedes itself" "supersedes its own record"
-  # The vocabulary is an enum, so a value that merely starts with a legal word is not legal. Main
-  # matched the prefix, and `proposedly` and `proposed-legacy` are the values #3 names by name.
+  # The vocabulary is an enum, so a value that merely starts with a legal word is not legal. A regex
+  # matching only the prefix lets `proposedly` and `proposed-legacy` read as states, which is the
+  # defect #3 names by name; `retired` is the plain case of a word outside the enum.
   for bad_status in retired proposedly proposed-legacy; do
     printf '%s' "$(adr_body "$bad_status")" > docs/adr/9992-old.md
-    expect_sup adr-structure red "Status '$bad_status' is not a state" "begins with 'proposed'"
+    expect_sup adr-structure red "Status '$bad_status' is not a state" "neither begins with"
   done
   # Green side of the same line: this corpus puts a sentence on the Status line (all four shipped ADRs
   # read `Status: proposed. Human owner: Aaron; ...`), so an over-anchored regex fails the real corpus.
@@ -264,12 +267,16 @@ if make docs/adr/9991-new.md "$(sup_back)" \
   # enforced. The fixture is the valid pair minus that heading and nothing else, so a red can only come
   # from the heading -- built from adr_body instead it also loses the back pointer and bites nothing.
   printf '%s' "$(sup_back | grep -v '^## Unenforced$')" > docs/adr/9991-new.md
-  expect_sup adr-structure red "a record hiding which rules are unenforced" \
-    "missing section '## Unenforced'"
+  expect_sup md-structure red "a record hiding which rules are unenforced" "ADR.Unenforced"
   rm -f docs/adr/9991-new.md docs/adr/9992-old.md docs/adr/9993-prose.md
 fi
 report "all supersession probes ran" "10" "$sup_probes"
 
+# The two prose arms, both directions. The rules themselves are tested where they live, in the cases
+# beside them, so these probes cover the shell: a defect reaching a verdict, the reason the arm printing
+# it naming the right rule, and an empty scope being refused instead of rewarded.
+md_probes=0
+expect_md() { md_probes=$((md_probes + 1)); expect_check "$@"; }
 # The link arm, both directions. What must break is named, not counted: a target that is not a file,
 # a fragment that is not a heading, a pointer in the index to a file that is not there -- the direction
 # the shell used to check with `-e` before the resolver took it over -- a scope whose links were all
@@ -282,6 +289,23 @@ expect_link() { link_probes=$((link_probes + 1)); expect_check "$@"; }
 # can see: `9990-` is not in the index, which keeps adr-index out of these verdicts' way by being
 # red on its own line, and `expect_check` reads one arm's line.
 md_shaped() { printf '%s\n\nGoes nowhere: [nowhere](0000-nowhere.md).\n' "$(adr_body "$1")"; }
+if make docs/adr/9990-unshaped.md 'Status: proposed.
+
+# T
+
+## Context
+
+b
+'; then
+  expect_md md-structure red "an ADR with three sections missing" "ADR.Decision"
+  rm -f docs/adr/9990-unshaped.md
+fi
+if make docs/adr/9990-blank.md "$(printf 'Status: proposed.\n\n# T\n\n## Context\n\nb\n\n## Decision\n\nd\n\n## Rejected alternatives\n\nr\n\n## Unenforced\n\n## Next\n\nn\n')"; then
+  expect_md md-structure red "an empty '## Unenforced' where an admission belongs" "ADR.UnenforcedBody"
+  rm -f docs/adr/9990-blank.md
+fi
+expect_md md-structure green "the corpus as it stands, and what it counted" "no alerts"
+
 if make docs/adr/9990-file.md "$(md_shaped proposed)"; then
   expect_link md-links red "a link whose target is not a file" "File not found"
   rm -f docs/adr/9990-file.md
@@ -301,12 +325,13 @@ if cp docs/adr/README.md readme.bak \
   mv readme.bak docs/adr/README.md
 fi
 
-# Two greens the tool does not withhold on its own: an empty scope, and a scope whose every link it
-# skipped. Both print `0 OK` and exit 0, so the arm reads the resolved count and not just the code --
-# `Total` cannot be the guard because it counts excluded links too (measured: a tree with two external
-# links under `offline = true` prints `2 Total ... 0 OK ... 2 Excluded`). A path it cannot open at all
-# exits 2 and prints no verdict line.
+# Greens neither tool withholds on its own: an empty docs directory, a scope whose every link lychee
+# skipped, and links it resolved as zero. Vale reports success over a directory with no Markdown and
+# lychee prints `0 OK` and exits 0 over an empty or entirely excluded scope, so each arm reads its own
+# evidence -- `Total` cannot be lychee's guard because it counts excluded links too (measured: two
+# external links under `offline = true` print `2 Total ... 0 OK ... 2 Excluded`).
 mv docs docs-empty && mkdir docs
+expect_md md-structure red "a directory holding no Markdown at all" "read no Markdown files"
 expect_link md-links red "no links for lychee to read" "resolved 0 links, 0 excluded"
 printf 'External only: [a](https://example.com/x) and [b](https://example.org/y)\n' > docs/ext.md
 expect_link md-links red "every link excluded, none resolved" "resolved 0 links, 2 excluded"
@@ -319,9 +344,11 @@ cp lychee.toml lychee.bak && sed -i 's/offline = true/offline = fasle/' lychee.t
 expect_link md-links red "a config lychee refuses to load" "without a verdict"
 mv lychee.bak lychee.toml
 mv docs docs-gone
+expect_md md-structure red "a path vale cannot find, which it reads as stdin" "read no Markdown files"
 expect_link md-links red "a path lychee refuses to read at all" "without a verdict"
 mv docs-gone docs
 report "all link probes ran" "8" "$link_probes"
+report "all prose-arm probes ran" "5" "$md_probes"
 
 # `vale test --coverage` is the teeth on the rules themselves -- a rule that never fires fails the
 # run -- so it gets a probe both ways: green on the shipped style, red once a silent rule exists.

@@ -67,3 +67,30 @@
 
     d
   contains: ADR.Unenforced
+
+- name: an empty Unenforced section reports nothing
+  rule: UnenforcedBody.yml
+  about: "A disclosure section with no admissions reads as compliance (#73)."
+  input: |
+    # T
+
+    Status: proposed.
+
+    ## Unenforced
+
+    ## Decision
+
+    d
+  contains: ADR.UnenforcedBody
+
+- name: a bullet list is content
+  rule: UnenforcedBody.yml
+  input: |
+    # T
+
+    Status: proposed.
+
+    ## Unenforced
+
+    - Lane B has no attendance record.
+  absent: ADR.UnenforcedBody
