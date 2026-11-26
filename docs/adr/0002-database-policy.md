@@ -72,19 +72,6 @@ only path into the schema, and every agent writing SQL needs the same view.
 |banning permission-seeking outright (earlier draft)|reviewed and removed: it excluded the human from the one decision that can destroy their library, and was unfalsifiable anyway|
 |trusting sqlx checksums to catch migration edits|structurally unreachable in CI: the checksum path only fires against a database with migration history, and tests use fresh temporary databases|
 
-## Evidence
-
-- docs.rs, `sqlx::migrate` (v0.9.1): "**The only solution on stable Rust right now** is to create a
-  Cargo build script … `println!("cargo:rerun-if-changed=migrations")`"; and for the checksum/line
-  ending hazard, "force `.sql` files to be checked out with Line Feeds: `*.sql text eol=lf`".
-  Without `build.rs` an agent adds a migration, rebuilds, sees the old schema, concludes sqlx is
-  broken, and invents workarounds.
-- sqlite.org, `lang_altertable`: `ALTER TABLE` covers rename table/column, add column, drop column,
-  add/drop constraint, and set/drop `NOT NULL`. Everything else goes through §8 "Making Other Kinds
-  Of Table Schema Changes": the 12-step rebuild using `PRAGMA writable_schema=ON`, where the docs
-  warn that a syntax error in the schema change "will render the database corrupt and unreadable".
-  The migration-intent gate and the backup rule exist to catch that mechanism.
-
 ## Unenforced
 
 - **Write the destructive migration; no compat shims.** Promised: grep the migration diff for
