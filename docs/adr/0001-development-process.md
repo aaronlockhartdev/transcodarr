@@ -48,8 +48,11 @@ Stop and ask if: a schema change, a new dependency, a check that will not pass, 
 single-writer: at most one open task may touch it.
 
 `git rebase` plus `git merge --ff-only`, no squash merges. Atomic commits carrying
-`Task:`/`Agent:`/`Verified:` trailers, presence checked by the `commit-msg` hook. Trailers are for
-humans and CI and are never fed to a reviewer (see Review).
+`Task:`/`Agent:`/`Verified:` trailers, checked by the `commit-msg` hook and again by `just check` over
+the commits above the base, so a clone where `just setup` never ran cannot land untrailered work. The
+gate reads the trailer block with `git interpret-trailers`, so naming the keys in prose is not
+provenance, which makes it the stricter of the two readers. Trailers are for humans and CI and are
+never fed to a reviewer (see Review).
 
 ### Diff budget
 
@@ -156,8 +159,9 @@ arm with an empty scope and a fixture whose precondition fails each print no lin
   The motive is gated instead: a widened check buys budget or suppressions, and both of those fail.
 - **Trailers are presence, not truth.** `commit-msg` checks the three names, the `Task:` value shape, and
   an `Agent:` whose words appear in `$PI_MODEL` -- a clause it skips when `$PI_MODEL` is unset, which is
-  every CI runner and every human shell. No gate arm and no CI step re-checks a trailer, so a clone that
-  never ran `just setup` commits freely (#61). Nothing verifies that a review ran, that `Verified:`
+  every CI runner and every human shell. `just check` re-reads the block over the commits above the
+  base, closing the untrailered landing (#61); the hook greps, so it is the looser reader. Nothing
+  verifies that a review ran, that `Verified:`
   describes a real run, or that `Task: #N` names an issue (#63).
 - **Platform settings are configured, not observed.** `--ff-only`, no squash, no force-push, no push to
   `main` and one required approval are GitHub settings; no check in this repo reads them, so a silent

@@ -550,6 +550,53 @@ git reset -q --hard "$scope_base" 2>/dev/null
 rm -f scope_*.py
 report "all budget fixtures ran" "9" "$scope_probes"
 
+# --- Trailers on the machine no hook runs on (#49) --------------------------------------------------
+# `commit-msg` enforces the shape only where `just setup` ran. Measured before-state: a fresh clone
+# of main has `core.hooksPath` unset, `git commit -m wip` exited 0 with no trailers at all, and that
+# branch's CI run said `check: 14 ran, 0 failed`. The gate now re-checks the shape over
+# the commits above the base with `git interpret-trailers`, so the arm is pinned here in both
+# directions and in both skip directions -- a skip is the only way it can go blind silently -- plus
+# the two ways grepping the whole message was fooled: prose naming the keys, and a subject that only
+# looks like a revert. Scope commits above carry no trailers, so a trailer FAIL inside *their* probes
+# is the arm working; these probes read the `trailer` verdict by name.
+trail_from=$(git rev-parse HEAD)
+trail_probes=0
+trail() { trail_probes=$((trail_probes + 1)); expect_check "$@"; }      # check want name [reason]
+trail_git() { local n="$1"; shift; git "$@" >/dev/null 2>&1 || { skipping "$n" "$n"; return 1; }; }
+trail_ok=$(printf 'fix: provenance that points somewhere\n\nTask: #49\nAgent: pi / selftest fixture\nVerified: just selftest')
+trail_bad=$(printf 'fix: provenance that points nowhere\n\nTask: banana\nAgent: pi / selftest fixture\nVerified: just selftest')
+trail_prose=$(printf 'fix: provenance written above the block\n\nTask: #49\nAgent: pi / selftest fixture\nVerified: just selftest\n\nThe block above is not the trailer block: git reads the last paragraph, and this sentence is the last paragraph.')
+if git update-ref refs/remotes/origin/main "$trail_from"; then
+  trail trailer skip "HEAD is origin/main's tip, so nothing is ours" "no commits of ours"
+  trail_git "commit an untrailered message" commit -q --allow-empty -m 'wip: no provenance here' \
+    && trail trailer red "an untrailered commit is refused" "missing: Task Agent Verified"
+  trail_git "amend to Task: banana" commit -q --allow-empty --amend -m "$trail_bad" \
+    && trail trailer red "Task: banana asserts nothing" "missing: Task-shape"
+  # A trailer-shaped block that is not the last paragraph is not provenance: git reads the last
+  # paragraph. Grepping the message passes on this text; reading the block does not, which is the
+  # difference between the hook, which greps, and this arm.
+  trail_git "amend to prose naming the keys" commit -q --allow-empty --amend -m "$trail_prose" \
+    && trail trailer red "trailers above a closing paragraph are not provenance" "missing: Task Agent Verified"
+  # `git revert` writes `Revert "subject"`, and that is the exempt shape. A subject that merely
+  # begins with the word is an ordinary commit that still owes its three trailers.
+  trail_git "amend to a revert-looking subject" commit -q --allow-empty --amend -m 'Revert to the earlier budget rule' \
+    && trail trailer red "a revert-looking subject is not exempt" "missing: Task Agent Verified"
+  trail_git "amend to the shape the hook accepts" commit -q --allow-empty --amend -m "$trail_ok" \
+    && trail trailer green "the shape the hook accepts" "1 commits checked, 0 reverts exempt"
+  # Two commits above the base now, one of them the revert shape, and the PASS must say one commit
+  # was checked: counting an exempt commit overstated the coverage on a green line.
+  trail_git "commit a revert in the shape GitHub writes" commit -q --allow-empty \
+    -m 'Revert "fix: provenance that points somewhere"' \
+    && trail trailer green "a revert is exempt and not counted" "1 commits checked, 1 reverts exempt"
+  git update-ref -d refs/remotes/origin/main \
+    && trail trailer skip "no origin/main: a named skip, not a silent pass" "no origin/main"
+else
+  skipping "origin/main ref" "trailer arm fixtures"
+fi
+git reset -q --hard "$trail_from" 2>/dev/null
+git update-ref -d refs/remotes/origin/main 2>/dev/null
+report "all trailer probes ran" "8" "$trail_probes"
+
 # --- Secrets, in both scans and both directions (#37) ---------------------------------------------
 # ADR-0001 claims a both-directions fixture for every rule it enforces, and for secret scanning that
 # claim was false: the branch at check.sh:112-128 ran on every probe and always said green, so a gate
