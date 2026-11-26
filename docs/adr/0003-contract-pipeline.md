@@ -59,19 +59,6 @@ TypeScript cannot resolve them; `config.alias` is deprecated and unused.
 |SSR-capable SvelteKit behind the same binary|needs a JS runtime in the binary, contradicting single-process; SPA plus static embed is the design (ADR-0001 context)|
 |`sppl` crate to embed and serve|0.0.5, single maintainer, and the job is ~30 lines of `rust-embed` plus a fallback handler|
 
-## Evidence
-
-Verified on this machine 2026-11-24 with the pin set above. The control: `npm install`
-without the `overrides` entry fails `ERESOLVE … peer typescript@"^5.x" from
-openapi-typescript@7.13.0`; with it the install is clean. Green run: `svelte-kit sync`, then
-`svelte-check --threshold error` (0 errors, 0 warnings), then `vite build` produces
-`build/index.html`, typechecking runes, path params and nullable narrowing.
-
-Two claims here are measured. Regenerating the generated types from the same spec is
-byte-identical, which is what makes `git diff --exit-code` a valid drift gate. And
-extension-less `#lib` specifiers are refused by `tsc --traceResolution` after the mapping
-resolves, which is where the extension rule comes from.
-
 ## Unenforced
 
 - **Do not hand-edit `contracts/openapi.json`.** The drift gate diffs those paths against the index, so a

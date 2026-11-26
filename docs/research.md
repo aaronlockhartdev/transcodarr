@@ -40,3 +40,47 @@ allow it" (doi:10.1145/3715729). LLM evaluators recognise and favour their own o
 while human annotators judge the texts equal (arXiv:2404.13076), so the separate context window
 holding only the diff is the only independence we have.
 
+
+## ADR-0002 — database policy
+
+- docs.rs, `sqlx::migrate` (v0.9.1): "**The only solution on stable Rust right now** is to create a
+  Cargo build script … `println!("cargo:rerun-if-changed=migrations")`"; and for the checksum/line
+  ending hazard, "force `.sql` files to be checked out with Line Feeds: `*.sql text eol=lf`".
+  Without `build.rs` an agent adds a migration, rebuilds, sees the old schema, concludes sqlx is
+  broken, and invents workarounds.
+- sqlite.org, `lang_altertable`: `ALTER TABLE` covers rename table/column, add column, drop column,
+  add/drop constraint, and set/drop `NOT NULL`. Everything else goes through §8 "Making Other Kinds
+  Of Table Schema Changes": the 12-step rebuild using `PRAGMA writable_schema=ON`, where the docs
+  warn that a syntax error in the schema change "will render the database corrupt and unreadable".
+
+## ADR-0003 — contract pipeline
+
+Verified on this machine 2026-11-24 with the pin set above. The control: `npm install`
+without the `overrides` entry fails `ERESOLVE … peer typescript@"^5.x" from
+openapi-typescript@7.13.0`; with it the install is clean. Green run: `svelte-kit sync`, then
+`svelte-check --threshold error` (0 errors, 0 warnings), then `vite build` produces
+`build/index.html`, typechecking runes, path params and nullable narrowing.
+
+Two claims here are measured. Regenerating the generated types from the same spec is
+byte-identical, which is what makes `git diff --exit-code` a valid drift gate. And
+extension-less `#lib` specifiers are refused by `tsc --traceResolution` after the mapping
+resolves, which is where the extension rule comes from.
+
+
+## ADR-0004 — licence
+
+Neighbour licences (GitHub API, 2026-11-24): Sonarr `GPL-3.0`, Radarr `GPL-3.0`, Jellyfin
+`GPL-2.0`, Immich `AGPL-3.0`. Immich is the direct precedent: a self-hosted media server that
+switched **from MIT to AGPLv3** in February 2024 (discussion #7023) explicitly to stop closed
+hosted wrappers.
+
+Compatibility direction we depend on: MIT / Apache-2.0 / BSD / ISC / MPL-2.0 crates are usable in an
+AGPL-3.0 project (Apache-2.0 to AGPLv3 is one-way compatible). GPL-2.0-only is the exclusion, and the
+pinned cargo-deny has no license ban table, so the exclusion is carried by its absence from the allow
+list. The semantics are SPDX's: a dependency that offers a compatible side (`MIT OR GPL-2.0-only`) is
+satisfied by that side and passes, which is correct, since you may take it. The door that would re-admit
+GPL-2.0-only alone is `[[licenses.exceptions]]`, and rule 1 bans reaching for it.
+
+Text relied on: AGPL-3.0 §13, "Remote Network Interaction; Use of Source Code", i.e. network use
+counts as conveying.
+
