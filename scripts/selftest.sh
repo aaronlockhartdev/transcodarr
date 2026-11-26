@@ -44,6 +44,10 @@ JUSTFILE
 cp "$repo/mise.toml" "$repo/rust-toolchain.toml" "$work/"
 cp -r "$repo/docs" "$work/docs"
 [ -f "$repo/.gitignore" ] && cp "$repo/.gitignore" "$work/"
+# The enforced secret ruleset, tracked since #55. Without it the gate refuses to scan at all rather
+# than fall back to embedded defaults, so every gitleaks probe below would be red for the wrong
+# reason -- which is the point, and why it is copied here instead of made per-probe.
+[ -f "$repo/.gitleaks.toml" ] && cp "$repo/.gitleaks.toml" "$work/.gitleaks.toml"
 # A fixture licence policy, not the real one. The real allow list names five licences and the scratch
 # graph is one crate, and since #14 `unused-allowed-license = "deny"` turns that mismatch into an error,
 # so copying the real file would put an unread `FAIL deny` on every probe below that has a Cargo.lock.
@@ -252,6 +256,44 @@ if grep -q '^node = ' mise.toml; then
   expect red "pin line deleted from mise.toml"
   git checkout -q -- mise.toml
 fi
+
+# gitleaks decides what counts as a secret and just is what ran this suite, so a wrong version of
+# either must not run quietly (#43). Not a rewritten pin: a pin naming a version that does not exist
+# makes the mise shim try to install it, so the red comes from a 404 and the probe tests mise's
+# network instead of the gate's comparison (measured: `just --version` inside such a repo exits 1 on
+# `GitHub release casey/just@9.9.9 not found`). A shim binary on PATH is offline and deterministic,
+# and is what the cargo-deny probe below already does.
+pin_probes=0
+pin_said() { pin_probes=$((pin_probes + 1)); report "$@"; }
+if make shims/gitleaks '#!/bin/sh
+echo "gitleaks 8.20.0"
+' && make shims/just '#!/bin/sh
+echo "just 1.20.0"
+'; then
+  chmod +x shims/gitleaks shims/just
+  # Not expect_check: it re-runs the gate with the ambient PATH and would report the real binaries.
+  PATH="$work/shims:$PATH" bash scripts/check.sh > "$log" 2>&1
+  pins=$(grep -E '^  (PASS|FAIL|SKIP|WARN)  toolchain-pins' "$log" | head -1)
+  case "$pins" in *FAIL*) pins=red ;; *PASS*) pins=green ;; *) pins=absent ;; esac
+  pin_said "two shadowed tools, both refused" "red" "$pins"
+  for pin_tool in gitleaks just; do
+    pin_said "and it names the $pin_tool that ran" "$work/shims/$pin_tool" \
+      "$(grep -E "^ +$pin_tool " "$log" | sed -n 's/.*(\(.*\))$/\1/p' | head -1)"
+  done
+  rm -rf shims
+else
+  skipping "create shim binaries" "the two extra pin probes"
+fi
+# Named on the PASS line as well as compared: a check that silently stops looking at a tool is the
+# failure mode #43 is about, and only the green side can see that.
+pin_probes=$((pin_probes + 1))
+expect_check toolchain-pins green "and the green line names the tools it checked" ", gitleaks "
+report "the pin probes ran" "4" "$pin_probes"
+
+# #50's second half, pinned as a property rather than a behaviour: two gates racing over one
+# machine-wide log produce verdicts neither run earned, and the only cheap defence is to refuse the
+# literal. The suite's own scratch path is asserted to resolve inside its run dir in the header.
+report "the gate writes only inside its own run" "0" "$(grep -c '/tmp/' scripts/check.sh)"
 
 # The two checks that look at the shipped artifact instead of the sources, both directions.
 #
@@ -539,12 +581,31 @@ expect_gl() { # check want label [the reason the gate must print]
     gl_probes=$((gl_probes + 1))
   fi
 }
+
+# Evidence, asserted as a shape rather than a rule name: the rule that fires on this fixture is the
+# entropy rule, whose id is gitleaks' to change, and #51 is about there being any finding line at all.
+expect_gl_finding() {
+  gl_probes=$((gl_probes + 1))
+  if grep -qE "$2" "$log"; then printf '  ok    %-42s %s\n' "$1" "red"
+  else printf '  BROKE %-42s the gate printed no such line\n' "$1"; bad=$((bad + 1)); fi
+}
 expect_shape() { gl_probes=$((gl_probes + 1)); report "$1" "$2" "$3"; }
 gl_base=$(git rev-parse HEAD) # the reset below returns here, so no probe of mine is in anyone's baseline
 gl_secret_value="hR3nQpLd""Kf8sVtYb""NwCzXmJq""AeGdUiOo"
 if make probe_aws_config.toml "aws_secret_access_key = \"$gl_secret_value\""; then
   stage probe_aws_config.toml
   expect_gl gitleaks red "a secret sitting in the index" "staged changes contain a secret"
+  expect_gl_finding "the red names the finding" "finding: "
+  expect_gl_finding "and names the file it found" "finding: .*probe_aws_config.toml"
+  # A config that will not parse also exits 1, so this is the case where the gate used to say
+  # "contains a secret" and print nothing. It must name the config, and blame no secret.
+  printf '[extend]\nuseDefault = "yes"\n' > .gitleaks.toml
+  expect_gl gitleaks red "a config that will not load" "does not load, so no verdict about secrets is possible"
+  gl_probes=$((gl_probes + 1))
+  if grep -q 'contain a secret' "$log"; then
+    printf '  BROKE %-42s it called a broken config a secret\n' "and blames no secret"; bad=$((bad + 1))
+  else printf '  ok    %-42s %s\n' "and blames no secret" "clean"; fi
+  git checkout -q -- .gitleaks.toml
   unstage probe_aws_config.toml
   expect_gl gitleaks green "the same bytes, present but not staged"
   stage probe_aws_config.toml
@@ -557,14 +618,25 @@ if make probe_aws_config.toml "aws_secret_access_key = \"$gl_secret_value\""; th
   expect_shape "and the tip tree does not hold it" "0" \
     "$(git show --name-only --format= HEAD | grep -c probe_aws_config.toml)"
   expect_gl gitleaks red "a secret three commits back in history" "history contains a secret"
-  if make .gitleaks.toml "[extend]
-useDefault = true
-
-[allowlist]
-paths = ['''probe_aws_config.toml''']"; then
-    expect_gl gitleaks green "the same history, allowed by the repo's own config"
-    rm -f .gitleaks.toml
-  fi
+  expect_gl_finding "the history red names its finding" "finding: .*probe_aws_config.toml"
+  # Widening the ruleset has to move the verdict, which is what proves the gate reads this file and
+  # not whatever gitleaks happens to auto-load. It is also the hazard #55 records: an allowlist entry
+  # is a silent disarm, so the file is a FLAG path and this probe is its witness.
+  printf "[extend]\nuseDefault = true\n\n[allowlist]\npaths = ['''probe_aws_config.toml''']\n" > .gitleaks.toml
+  expect_gl gitleaks green "the same history, allowed by the config the gate reads"
+  git checkout -q -- .gitleaks.toml
+  # The flag, not just the file: gitleaks auto-loads a root `.gitleaks.toml` either way, so only an
+  # out-of-repo config can show that `--config` is what decides. Without the flag gitleaks reads
+  # $GITLEAKS_CONFIG, this file wins, and a landed secret turns the gate green.
+  printf "[extend]\nuseDefault = true\n\n[allowlist]\npaths = ['''probe_aws_config.toml''']\n" > env-config.toml
+  export GITLEAKS_CONFIG="$PWD/env-config.toml"
+  expect_gl gitleaks red "a landed secret, with an env config that allows it" "history contains a secret"
+  unset GITLEAKS_CONFIG
+  rm -f env-config.toml
+  # The other direction of the same wiring: a missing ruleset is a failure, not a return to defaults.
+  rm -f .gitleaks.toml
+  expect_gl gitleaks red "the ruleset file is missing" "is missing — the enforced ruleset has to be a tracked file"
+  git checkout -q -- .gitleaks.toml
   git reset -q --hard "$gl_base"
   expect_gl gitleaks green "the commits gone, the scan clean again"
 else
@@ -572,7 +644,7 @@ else
 fi
 # Outside the guard above on purpose: a block that never runs reports 0 against 9 and breaks the run,
 # which is what keeps a precondition from shedding these probes silently.
-report "all gitleaks assertions ran" "9" "$gl_probes"
+report "all gitleaks assertions ran" "19" "$gl_probes"
 
 run_gate; report "restored to baseline" "$base" "$(verdict)"
 printf 'selftest: %d broken, %d skipped\n' "$bad" "$skipped"

@@ -1,0 +1,13 @@
+# The rules `just check` enforces. It is tracked so the ruleset is a reviewed artifact: check.sh
+# passes it with `--config`, which outranks $GITLEAKS_CONFIG and gitleaks' auto-load of an untracked
+# `.gitleaks.toml` in the worktree. Passing the path is what makes an untracked file of that name
+# inert; before this, one was all it took to report "no leaks found" over a real key.
+#
+# `[extend] useDefault = true` is load-bearing, not tidiness. A config WITHOUT it replaces gitleaks'
+# embedded rules instead of adding to them -- measured on 8.30.1, a config holding only
+# `bogus_top_key = true` scans a repo whose HEAD contains an AWS key and finds nothing. So an empty
+# file here would silently disarm secret scanning, and an allowlist entry hiding a path does the same
+# for that path. Hence this file sits in ADR-0001's FLAG list, and `just selftest` holds a probe
+# showing a config that allows the fixture's path turns the gate green.
+[extend]
+useDefault = true
