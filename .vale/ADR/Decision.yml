@@ -1,0 +1,7 @@
+# Same shape as Context.yml.
+extends: conditional
+message: 'An ADR has no "## Decision" heading.'
+level: error
+scope: raw
+first: '(?m)^# .+$'
+second: '(?m)^## Decision[ \t]*$'

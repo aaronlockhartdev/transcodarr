@@ -1,0 +1,69 @@
+# Cases kept beside the rules, run by `vale test --coverage` from
+# `just selftest`. Every rule here must fire in at least one case or the
+# run fails, so a rule that matches nothing cannot sit in the style
+# reporting success forever. `rule:` makes a case isolated -- it runs
+# that one rule, not the project's configuration. `contains`/`absent`
+# over `want` on purpose, because `want` pins the message text too, so
+# rewording a message would break a case that was only ever about which
+# text the rule matches.
+- name: a missing heading is a violation
+  rule: Context.yml
+  about: The corpus rule. `grep -qx` did this byte-exact and rejected a space.
+  input: |
+    # T
+
+    Status: proposed.
+
+    ## Decision
+
+    d
+  contains: ADR.Context
+
+- name: a heading with a trailing space is still a heading
+  rule: Context.yml
+  about: The false red the byte-exact compare produced on a valid ADR, kept.
+  input: |
+    # T
+
+    Status: proposed.
+
+    ## Context
+    c
+  absent: ADR.Context
+
+- name: a heading that only contains the word is not the section
+  rule: Decision.yml
+  about: A `contains()` selector would pass this, so the rule is a raw regex.
+  input: |
+    # T
+
+    Status: proposed.
+
+    ## Decision log
+
+    d
+  contains: ADR.Decision
+
+- name: Rejected alternatives is required
+  rule: RejectedAlternatives.yml
+  input: |
+    # T
+
+    Status: proposed.
+
+    ## Decision
+
+    d
+  contains: ADR.RejectedAlternatives
+
+- name: Unenforced is required
+  rule: Unenforced.yml
+  input: |
+    # T
+
+    Status: proposed.
+
+    ## Decision
+
+    d
+  contains: ADR.Unenforced

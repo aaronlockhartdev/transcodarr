@@ -1,0 +1,13 @@
+# The four sections an ADR must contain, per docs/adr/README.md.
+# The `[ \t]*` before the end of the line is the defect this replaced
+# a `grep -qx` for: a trailing space was a byte mismatch, so a valid
+# ADR read red with no way to see why.
+# A rule per heading rather than one rule holding four patterns, so
+# the alert names the section that is missing; the arm prints every
+# alert it gets.
+extends: conditional
+message: 'An ADR has no "## Context" heading.'
+level: error
+scope: raw
+first: '(?m)^# .+$'
+second: '(?m)^## Context[ \t]*$'

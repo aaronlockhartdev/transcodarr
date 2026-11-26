@@ -1,0 +1,24 @@
+# Terms the built-in dictionary lacks: project and product names, tools, and
+# words this corpus coins. One case-sensitive regular expression per line, so a
+# term's spelling and casing are enforced too (`Vale.Terms`).
+transcodarr
+transcoder
+Immich
+Jellyfin
+Kiro
+Radarr
+Sonarr
+Sadowski
+Mavin
+axum
+sqlx
+utoipa
+compat
+gitignored
+typechecks?
+typechecking
+unactioned
+unallowed
+untrailered
+implementer's
+SPDX's

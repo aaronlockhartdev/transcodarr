@@ -1,0 +1,8 @@
+# Same shape as Context.yml. This is the one heading with a space in
+# it, which is why it needs its own file.
+extends: conditional
+message: 'An ADR has no "## Rejected alternatives" heading.'
+level: error
+scope: raw
+first: '(?m)^# .+$'
+second: '(?m)^## Rejected alternatives[ \t]*$'

@@ -44,6 +44,10 @@ cp "$repo/mise.toml" "$repo/rust-toolchain.toml" "$work/"
 # The tracked link config, passed to lychee by name the way `.gitleaks.toml` is: a scratch tree
 # without it would prove the arm skips, not that the arm works.
 cp "$repo/lychee.toml" "$work/"
+# The rules travel with their cases, and `vale test --coverage` (below) runs them inside this scratch
+# tree: without `.vale.ini` and `.vale/` here, the probe would test an absent style, not the rules.
+cp "$repo/.vale.ini" "$work/"
+cp -r "$repo/.vale" "$work/.vale"
 cp -r "$repo/docs" "$work/docs"
 [ -f "$repo/.gitignore" ] && cp "$repo/.gitignore" "$work/"
 # The enforced secret ruleset, tracked since #55. Without it the gate refuses to scan at all rather
@@ -311,6 +315,27 @@ expect_link md-links red "a path lychee refuses to read at all" "without a verdi
 mv docs-gone docs
 report "all link probes ran" "8" "$link_probes"
 
+# `vale test --coverage` is the teeth on the rules themselves -- a rule that never fires fails the
+# run -- so it gets a probe both ways: green on the shipped style, red once a silent rule exists.
+# The counter increments outside the call: `$(cov)` runs in a subshell, and a counter raised in one
+# reports 0 to the probe below it, which is a green that proves nothing.
+vale_probes=0
+cov() { vale test --coverage .vale >"$work/vale-test.log" 2>&1; printf '%s' "$?"; }
+got=$(cov); vale_probes=$((vale_probes + 1))
+report "every shipped rule fires in a case" "0" "$got"
+if make .vale/ADR/Silent.yml 'extends: occurrence
+message: "a heading nobody writes"
+level: error
+scope: raw
+token: (?m)^## A Heading Nobody Writes$
+min: 1
+'; then
+  got=$(cov); vale_probes=$((vale_probes + 1))
+  report "a rule no case fires fails --coverage" "1" "$got"
+  rm -f .vale/ADR/Silent.yml
+fi
+report "all coverage probes ran" "2" "$vale_probes"
+
 # The rule that a gate edit must ship a fixture, tested against itself.
 printf '\n# probe\n' >> scripts/check.sh
 stage scripts/check.sh
@@ -341,14 +366,16 @@ echo "gitleaks 8.20.0"
 echo "just 1.20.0"
 ' && make shims/lychee '#!/bin/sh
 echo "lychee 0.10.0"
+' && make shims/vale '#!/bin/sh
+echo "vale version 3.20.0"
 '; then
-  chmod +x shims/gitleaks shims/just shims/lychee
+  chmod +x shims/gitleaks shims/just shims/lychee shims/vale
   # Not expect_check: it re-runs the gate with the ambient PATH and would report the real binaries.
   PATH="$work/shims:$PATH" bash scripts/check.sh > "$log" 2>&1
   pins=$(grep -E '^  (PASS|FAIL|SKIP|WARN)  toolchain-pins' "$log" | head -1)
   case "$pins" in *FAIL*) pins=red ;; *PASS*) pins=green ;; *) pins=absent ;; esac
-  pin_said "three shadowed tools, all refused" "red" "$pins"
-  for pin_tool in gitleaks just lychee; do
+  pin_said "four shadowed tools, all refused" "red" "$pins"
+  for pin_tool in gitleaks just lychee vale; do
     pin_said "and it names the $pin_tool that ran" "$work/shims/$pin_tool" \
       "$(grep -E "^ +$pin_tool " "$log" | sed -n 's/.*(\(.*\))$/\1/p' | head -1)"
   done
@@ -360,7 +387,7 @@ fi
 # failure mode #43 is about, and only the green side can see that.
 pin_probes=$((pin_probes + 1))
 expect_check toolchain-pins green "and the green line names the tools it checked" ", gitleaks "
-report "the pin probes ran" "5" "$pin_probes"
+report "the pin probes ran" "6" "$pin_probes"
 
 # #50's second half, pinned as a property rather than a behaviour: two gates racing over one
 # machine-wide log produce verdicts neither run earned, and the only cheap defence is to refuse the
