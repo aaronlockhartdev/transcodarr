@@ -1,0 +1,15 @@
+# `## Unenforced` is the disclosure that a promised rule has no detector,
+# so an empty one is worse than an absent one: it reads as compliance.
+# `first:` finds the heading, `second:` demands content after it, and
+# what makes a line content is the leading form of each block Markdown
+# gives you -- a list bullet, an ordered item, a quote, a fence, or plain
+# text. A heading is not content, which is what `[^#\s]` is excluding.
+# The `doc(section:has(...))` selector I tried first does not fire when
+# the empty section is the last one in the file, which is exactly the
+# shape an unfilled disclosure takes, so the rule is a raw pattern.
+extends: conditional
+message: "'## Unenforced' names nothing that is not enforced."
+level: error
+scope: raw
+first: '(?m)^## Unenforced[ \t]*$'
+second: '(?m)^## Unenforced[ \t]*\n+(?:- |\d+\. |> |```|[^#\s])'

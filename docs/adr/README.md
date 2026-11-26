@@ -46,11 +46,11 @@ state.
 Evidence means a quote or a command transcript. A citation to a page nobody can reach is not
 evidence. Shape to copy: `0004-license.md`.
 
-Gate (`adr-structure` in `scripts/check.sh`): the `Status:` line begins with `proposed` or `accepted`,
-or reads exactly `superseded by ADR-NNNN`, and a supersession fails unless the record it names exists
-and names the file back. Naming yourself is one decision written twice; a pointer at a record that does
-not exist, or at one that never mentions you, is the same claim made quietly. All four are gate failures,
-not advice.
+Gate (`md-structure`, which runs the `.vale/ADR/` rules, plus `adr-structure` in `scripts/check.sh`):
+the `Status:` line begins with `proposed` or `accepted`, or reads exactly `superseded by ADR-NNNN`,
+and a supersession fails unless the record it names exists and names the file back. Naming yourself
+is one decision written twice; a pointer at a record that does not exist, or at one that never
+mentions you, is the same claim made quietly. All four are gate failures, not advice.
 
 Sourcing rule: cite by id (`arXiv:NNNN.NNNNN`, `doi:…`) plus the one clause leaned on. Quote verbatim
 only when the exact wording is the rule. Every blockquote is a second text to keep true, and this

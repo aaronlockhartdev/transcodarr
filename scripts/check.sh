@@ -20,7 +20,7 @@ warn() { printf '  WARN  %s\n' "$1"; warned=$((warned + 1)); }
 
 printf 'check.sh  %s\n' "$(git rev-parse --short HEAD 2>/dev/null || echo 'no commits')"
 
-# --- ADR corpus: shape, status, and the one-decision-written-twice rule ----------------------
+# --- ADR corpus: the filename, and the one decision written twice ------------------------------
 # Scope is every .md in docs/adr except the index. A four-digit glob made a mistyped name
 # (001-x.md, adr-0006-x.md) invisible to every ADR check, and an empty glob reported PASS.
 adr_files=()
@@ -42,23 +42,24 @@ for f in "${adr_files[@]}"; do
   num=${num%%-*}
   # The state is the line's first word, and the guard after it is load-bearing: `proposed|accepted`
   # unanchored lets `Status: proposedly` and `proposed-legacy` read as valid states, which is the
-  # defect #3 names by name, measured still passing on main and on this PR's first draft. But the state
-  # may still carry a sentence, because that is how this corpus annotates the line -- all four shipped
-  # ADRs read `Status: proposed. Human owner: Aaron; ...` -- and README gives that line to the human
-  # alone, so the gate takes the first word rather than rewriting four people's Status lines to suit a
-  # regex. The supersession value is exact, because the gate reads a number out of it.
+  # defect #3 names by name. The state may carry a sentence, because that is how this corpus
+  # annotates the line -- all four shipped ADRs read `Status: proposed. Human owner: Aaron; ...`.
+  # The supersession value is exact, because the gate reads a number out of it. The four required
+  # headings did move to Vale, where a trailing space stopped being a false red; this check stayed,
+  # because `conditional` pairs its two patterns inside one block and a block here is one line, so
+  # "a Status line exists and reads one of three things" comes out either vacuous or a false red on
+  # every ADR. Measured: a first draft of this arm read green while never firing once.
   grep -qE '^Status: (proposed|accepted)([[:space:].]|$)|^Status: superseded by ADR-[0-9]{4}$' "$f" \
     || { echo "        $f: Status line neither begins with 'proposed'/'accepted' nor reads 'superseded by ADR-NNNN'"; adr_bad=1; }
-  for h in '## Context' '## Decision' '## Rejected alternatives' '## Unenforced'; do
-    grep -qx "$h" "$f" || { echo "        $f: missing section '$h'"; adr_bad=1; }
-  done
-  # Supersession, read off the Status line and nowhere else: the old record says `superseded by
-  # ADR-NNNN`, that record exists, and it points back with `Supersedes ADR-NNNN`. Both directions are
-  # required because the failure is silent otherwise -- Equinor audited its own corpus for exactly this
-  # after finding "informal/undeclared supersession", and the only CI enforcement of it found anywhere
-  # (plecture's check-adr-lifecycle.sh) fails the build on a one-directional pair. Anchoring to the
-  # Status line is what makes prose safe: this rule used to grep the whole file for the pattern, and
-  # apology for tripping on an unrelated mention by number, and a dangling target passed it.
+  # What stays here beyond the vocabulary is the pair that joins this record to the one it names: no
+  # rule in either tool reads a second file, and the failure -- a supersession only one side admits
+  # -- is silent without the join. Supersession is read off the Status line and nowhere else: the old
+  # record says `superseded by ADR-NNNN`, that record exists, and it points back with `Supersedes
+  # ADR-NNNN`. Both directions are required because the failure is silent otherwise -- Equinor
+  # audited its own corpus after finding "informal/undeclared supersession", and the only CI
+  # enforcement found anywhere (plecture's check-adr-lifecycle.sh) fails on a one-directional pair.
+  # Anchoring to the Status line is what makes prose safe: grepping the whole file made prose that
+  # merely named a number go red, and let a dangling target pass.
   sup=$(sed -n 's/^Status: superseded by ADR-\([0-9][0-9][0-9][0-9]\)$/\1/p' "$f" | head -1)
   if [ -n "$sup" ]; then
     if [ "$sup" = "$num" ]; then
@@ -75,7 +76,24 @@ for f in "${adr_files[@]}"; do
 done
 if [ "$adr_bad" -eq 0 ]; then pass "adr-structure"; else fail "adr-structure"; fi
 
-# --- Document links: a resolver reads the corpus, the shell only reports ------------------
+# --- Document structure and links: the tools read the corpus, the shell only reports -----------
+# The rules live in `.vale/ADR/*.yml` with their cases beside them, and `vale test --coverage`
+# (scripts/selftest.sh) fails on a rule no case fires, so a rule that matches nothing cannot sit in
+# the style reporting success forever. Both counts are printed because each tool exits 0 on an empty
+# scope: `vale` that read no files and `lychee` that found no links look exactly like a clean bill
+# of health, and `--output line` would make them byte-identical to one. The counts rule that out.
+md_out=$(vale docs 2>&1); md_code=$?
+md_files=$(printf '%s\n' "$md_out" | sed -n 's/.*in \([0-9][0-9]*\) file.*/\1/p' | head -1)
+case "$md_code" in
+  0) if [ -z "$md_files" ] || [ "$md_files" -eq 0 ]; then
+       fail "md-structure (vale read no Markdown files, so a green here would mean nothing)"
+     else pass "md-structure (vale: $md_files files, no alerts)"; fi ;;
+  1) printf '%s\n' "$md_out" | grep -vE '^[[:space:]]*$' | sed 's/^/        /'
+     fail "md-structure (vale: ${md_files:-?} files read; the alerts are above)" ;;
+  *) printf '%s\n' "$md_out" | sed 's/^/        /'
+     fail "md-structure (vale exited $md_code without a verdict; check .vale.ini and the pins)" ;;
+esac
+
 # `--config` names the tracked file rather than letting lychee pick up whatever sits in the working
 # directory -- the lesson `.gitleaks.toml` taught in #55. `include_fragments = "full"` makes a link
 # to a heading that no longer exists a failure, which is the rot a prose corpus actually produces.
@@ -156,9 +174,8 @@ want_just=$(sed -n 's/^just *= *"\([^"]*\)".*/\1/p' mise.toml | head -1)
 got_just=$(just --version 2>/dev/null | awk '{print $NF}')
 if [ -z "$want_just" ]; then echo "        mise.toml has no just = \"…\" pin to compare against"; pin_bad=1
 elif [ "$want_just" != "$got_just" ]; then echo "        just ${got_just:-none}, mise.toml pins $want_just ($(command -v just || echo 'not on PATH'))"; pin_bad=1; fi
-# Vale decides what a well-shaped ADR is, so a wrong version of it is a different verdict, not a
-# slower one (#43's rule, one more tool). The arm that runs Vale over the corpus lands next; the pin
-# is watched from here, so the toolchain never quietly gains an unwatched binary.
+# Vale decides what a well-shaped ADR is and lychee decides whether a link resolves, so a wrong
+# version of either is a different verdict, not a slower one (#43's rule, two more tools).
 want_vale=$(sed -n 's/^vale *= *"\([^"]*\)".*/\1/p' mise.toml | head -1)
 got_vale=$(vale --version 2>/dev/null | awk '{print $NF}')
 if [ -z "$want_vale" ]; then echo "        mise.toml has no vale = \"…\" pin to compare against"; pin_bad=1
