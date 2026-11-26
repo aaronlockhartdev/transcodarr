@@ -35,6 +35,9 @@ for f in "${adr_files[@]}"; do
     [0-9][0-9][0-9][0-9]-[a-z0-9]*.md) ;;
     *) echo "        $f: name is not NNNN-title.md, so no ADR check can see it"; adr_bad=1 ;;
   esac
+  # A level-1 heading is a precondition, not style: Vale's heading rules are `conditional`, so a record
+  # with no `# ` line matches nothing and escapes every section check beside it.
+  grep -q '^# ' "$f" || { echo "        $f: no level-1 heading, so the Vale heading rules pair against nothing"; adr_bad=1; }
   num=${f##*/}
   num=${num%%-*}
   # The state is the line's first word, and the guard after it is load-bearing: `proposed|accepted`
