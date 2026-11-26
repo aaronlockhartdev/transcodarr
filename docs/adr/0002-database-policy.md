@@ -85,14 +85,12 @@ only path into the schema, and every agent writing SQL needs the same view.
   warn that a syntax error in the schema change "will render the database corrupt and unreadable".
   The migration-intent gate and the backup rule exist to catch that mechanism.
 
-## Binding summary for AGENTS.md
+## Unenforced
 
-1. Pre-1.0 the schema is not frozen. Write the destructive migration; no compat shims, no asking.
-   Enforcer: a grep of the migration diff for `IF NOT EXISTS` and for columns added without being
-   dropped.
-2. Library code does not bulk-delete user intent, and tests open a fresh temporary database.
-   Enforcer: the migration-intent test plus a check on the DSN tests use.
-
-Machine-enforced, so out of `AGENTS.md`: post-apply migration edits (`git diff` on
-`migrations/**`); `build.rs` `rerun-if-changed` and `*.sql eol=lf` (comments in those files);
-fixtures deliberately non-empty (comment in the test file); no `*.db` tracked (`just check`).
+- **Write the destructive migration; no compat shims.** Promised: grep the migration diff for
+  `IF NOT EXISTS` and for columns added without being dropped. No `migrations/`, no `build.rs`, and
+  `check.sh` greps for neither, so nothing tells a shim from a migration.
+- **No bulk-deleting user intent; fresh temporary databases in tests.** Promised: a migration-intent test
+  and a DSN assertion. `apps/server/tests/` holds the serving test only; the schema PR owes both.
+- Post-apply migration edits, `build.rs` `rerun-if-changed`, `*.sql eol=lf` and "no `*.db` tracked" have no
+  code. `check.sh` matches none of them; the only defence on `*.db` is `.gitignore:11`.

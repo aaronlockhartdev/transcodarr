@@ -50,14 +50,10 @@ GPL-2.0-only alone is `[[licenses.exceptions]]`, and rule 1 bans reaching for it
 Text relied on: AGPL-3.0 §13, "Remote Network Interaction; Use of Source Code", i.e. network use
 counts as conveying.
 
-## Binding summary for AGENTS.md
+## Unenforced
 
-1. Never widen `deny.toml`. No "temporary" allow entry and no `[[licenses.exceptions]]` entry to
-   unblock a build; report it to the human. Enforcer: the path is a FLAG path and `cargo deny` runs in
-   `just check` and CI.
-
-Machine-enforced for dependencies, so out of `AGENTS.md`: the licence is `LICENSE` (AGPL-3.0-only), and
-the GPL-2.0-only exclusion is the absence of an allow entry in `deny.toml`, which cargo-deny reports as
-`license is not explicitly allowed`. Workspace crates are checked, not skipped, so this repo's own crate
-passes the gate on the `AGPL-3.0-only` allow entry; that entry is list-wide, so a dependency under
-AGPL-3.0-only passes too (#14).
+- **Never widen `deny.toml`.** `cargo deny` reads the worktree config, so the arm fails while an unallowed
+  licence sits in the graph and becomes a PASS byte-identical to a clean run the moment that licence is
+  allow-listed. Nothing inspects diff paths, so a widening leaves no trace; what does fail is an allow
+  entry nobody declares (#14).
+- The `AGPL-3.0-only` entry is list-wide, so an `AGPL-3.0-only` dependency passes too (#14).

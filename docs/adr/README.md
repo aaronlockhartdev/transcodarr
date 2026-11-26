@@ -1,8 +1,9 @@
 # ADR policy and index
 
 An ADR records a **decision**, not information. Agents may draft one; only the human accepts it.
-`AGENTS.md` carries the binding rules; an ADR carries the why and the evidence. pi does not
-auto-load `docs/adr/**`, so a binding rule must already appear in `AGENTS.md`.
+`AGENTS.md` carries the binding rules; an ADR carries the why, and `docs/research.md` carries the
+citations behind it. pi does not auto-load `docs/adr/**`, so a binding rule must already appear in
+`AGENTS.md`.
 
 `AGENTS.md` holds one line per rule that survives the loud-and-cheap test, and a new rule displaces
 an old one. Adherence falls with instruction count, and the harness spends about a third of an
@@ -27,7 +28,7 @@ investigation); anything with no rejected alternative.
 ## Format
 
 At most 200 lines (`adr-length` in `scripts/check.sh`), `NNNN-title.md`, sections: Context · Decision ·
-Rejected alternatives (with the reason that kills each) · Evidence · Binding summary for AGENTS.md.
+Rejected alternatives (with the reason that kills each) · Unenforced (the gate requires these four).
 Every binding line names its enforcer: a `just` recipe, a lint, a hook, or a platform setting. A line
 with no enforcer is advice, and advice decays. The cap warns rather than fails because file structure
 has no measurable effect on compliance, and adherence falls as the amount a session has already

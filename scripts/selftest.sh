@@ -166,7 +166,7 @@ fi
 # row that named no file made the README-to-file direction check nothing. The status vocabulary, the
 # required headings and the supersession lifecycle are pinned here too, in both directions. The plan to move
 # them into a Vale config was deferred and never ran, so nothing else enforces them but these probes.
-adr_body() { printf 'Status: %s\n\n# T\n\n## Context\n\nb\n\n## Decision\n\nd\n\n## Rejected alternatives\n\nr\n\n## Evidence\n\ne\n\n## Binding summary for AGENTS.md\n\nz\n' "$1"; }
+adr_body() { printf 'Status: %s\n\n# T\n\n## Context\n\nb\n\n## Decision\n\nd\n\n## Rejected alternatives\n\nr\n\n## Unenforced\n\nz\n' "$1"; }
 expect_check() { run_gate; # check want name
   local line got
   line=$(grep -E "^  (PASS|FAIL|SKIP|WARN)  $1" "$log" | head -1)
@@ -237,9 +237,16 @@ if make docs/adr/9991-new.md "$(sup_back)" \
   printf '%s' "$({ adr_body proposed; printf '\nWriting `superseded by ADR-9993` in a sentence is prose.\n'; })" \
     > docs/adr/9993-prose.md
   expect_sup adr-structure green "the pattern spelled out in prose"
+  # The required-heading list is checked for the one section a future edit is most motivated to drop: the
+  # admission that a rule has no machine behind it, since deleting it makes an unenforced rule look
+  # enforced. The fixture is the valid pair minus that heading and nothing else, so a red can only come
+  # from the heading -- built from adr_body instead it also loses the back pointer and bites nothing.
+  printf '%s' "$(sup_back | grep -v '^## Unenforced$')" > docs/adr/9991-new.md
+  expect_sup adr-structure red "a record hiding which rules are unenforced" \
+    "missing section '## Unenforced'"
   rm -f docs/adr/9991-new.md docs/adr/9992-old.md docs/adr/9993-prose.md
 fi
-report "all supersession probes ran" "9" "$sup_probes"
+report "all supersession probes ran" "10" "$sup_probes"
 
 # The rule that a gate edit must ship a fixture, tested against itself.
 printf '\n# probe\n' >> scripts/check.sh
