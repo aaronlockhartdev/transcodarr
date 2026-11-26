@@ -153,11 +153,18 @@ want_just=$(sed -n 's/^just *= *"\([^"]*\)".*/\1/p' mise.toml | head -1)
 got_just=$(just --version 2>/dev/null | awk '{print $NF}')
 if [ -z "$want_just" ]; then echo "        mise.toml has no just = \"…\" pin to compare against"; pin_bad=1
 elif [ "$want_just" != "$got_just" ]; then echo "        just ${got_just:-none}, mise.toml pins $want_just ($(command -v just || echo 'not on PATH'))"; pin_bad=1; fi
+# Vale decides what a well-shaped ADR is, so a wrong version of it is a different verdict, not a
+# slower one (#43's rule, one more tool). The arm that runs Vale over the corpus lands next; the pin
+# is watched from here, so the toolchain never quietly gains an unwatched binary.
+want_vale=$(sed -n 's/^vale *= *"\([^"]*\)".*/\1/p' mise.toml | head -1)
+got_vale=$(vale --version 2>/dev/null | awk '{print $NF}')
+if [ -z "$want_vale" ]; then echo "        mise.toml has no vale = \"…\" pin to compare against"; pin_bad=1
+elif [ "$want_vale" != "$got_vale" ]; then echo "        vale ${got_vale:-none}, mise.toml pins $want_vale ($(command -v vale || echo 'not on PATH'))"; pin_bad=1; fi
 want_lychee=$(sed -n 's/^lychee *= *"\([^"]*\)".*/\1/p' mise.toml | head -1)
 got_lychee=$(lychee --version 2>/dev/null | awk '{print $NF}')
 if [ -z "$want_lychee" ]; then echo "        mise.toml has no lychee = \"…\" pin to compare against"; pin_bad=1
 elif [ "$want_lychee" != "$got_lychee" ]; then echo "        lychee ${got_lychee:-none}, mise.toml pins $want_lychee ($(command -v lychee || echo 'not on PATH'))"; pin_bad=1; fi
-if [ "$pin_bad" -eq 0 ]; then pass "toolchain-pins (node $got_node, rustc $got_rust, cargo-deny $got_deny, gitleaks $got_gl, just $got_just, lychee $got_lychee)"; else fail "toolchain-pins"; fi
+if [ "$pin_bad" -eq 0 ]; then pass "toolchain-pins (node $got_node, rustc $got_rust, cargo-deny $got_deny, gitleaks $got_gl, just $got_just, vale $got_vale, lychee $got_lychee)"; else fail "toolchain-pins"; fi
 
 # --- Generated and cache files must stay tracked --------------------------------------------
 # These paths have to stay tracked or every check that reads them goes quietly green: the

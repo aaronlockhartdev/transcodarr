@@ -1,0 +1,8 @@
+# Same shape as Context.yml. Its content is a separate rule, because
+# a disclosure section that is present and empty reports nothing.
+extends: conditional
+message: 'An ADR has no "## Unenforced" heading.'
+level: error
+scope: raw
+first: '(?m)^# .+$'
+second: '(?m)^## Unenforced[ \t]*$'
