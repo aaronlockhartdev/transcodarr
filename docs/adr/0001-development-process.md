@@ -95,16 +95,19 @@ author's authority.
 For a behavioural defect the best `REPRO` is a failing test. The reviewer writes it in its scratch
 directory, runs it, and pastes command, failing output and test body. Never into the tree: the author
 must start from the tree that was audited, and a reviewer-committed test is a second unverified
-authority (79–82% of generated tests compile, arXiv:2601.09695; wrong assertions cause 15.6% of
-generated-test failures, arXiv:2610.32548). The implementer commits that test with its fix so CI owns
-it, and may not weaken, `#[ignore]`, or delete it, which is what benchmark harnesses harden against
-(arXiv:2610.24206). Disputing an assertion is a stop-and-ask, not a licence. A green suite proves the
+authority (wrong assertions cause 15.6% of generated-test failures, arXiv:2610.32548). The implementer
+commits that test with its fix so CI owns
+it, and may not weaken, `#[ignore]`, or delete it. Benchmark harnesses guard the same shape of
+credit-taking by re-grading a patch in a clean container (arXiv:2610.24206) -- an analogy, not a study of
+committed tests. Disputing an assertion is a stop-and-ask, not a licence. A green suite proves the
 assertion and not correctness (arXiv:2503.15223), which is why the test is in the diff you read. If no
 cheap harness can make it red, that absence is the `GAP`, and it closes the class and not the instance.
 
 What reaches you is at most 3 lines in the PR body: `Review: N found, M fixed, K unresolved` plus the
-`HUNCH`es, never the review itself. Most posted bot comments are rejected or left unactioned, and the
-one feature that predicts a comment being acted on is a concrete inline fix (arXiv:2607.21997).
+`HUNCH`es, never the review itself. Agent review comments rarely reach the code, 0.9-19.2% of valid ones
+against 60% for human comments (arXiv:2508.18771), and a closed thread is not the signal: the recorded
+resolution rate for one agent's comments is 72.9% (arXiv:2607.21997). What predicts action is a concrete
+inline fix.
 
 ### The loop, and who runs it
 
@@ -122,16 +125,26 @@ and never a memory.
    holding. An unverified repair loop that oscillates does not converge with more rounds; it corrupts
    more code than it repairs (extrapolator.ai, 2026-09-10, "If It's Not Buggy, Don't Fix It", no paper
    id: the weakest cite here).
-5. Re-review only when the fix landed on a boundary path. At most two reviewer calls per PR.
+5. Re-review only when the fix landed on a boundary path. Revise while a deterministic signal is
+   moving -- the reviewer's red test still red, `just check` green -- and stop at the first
+   oscillation. Rounds are near-free (one 1,000-PR review run measured ~$1.57, arXiv:2509.01494) and
+   graded rounds kept paying, 22.9% to 38.4% over four (arXiv:2607.06065); an LLM re-grading the
+   *findings* is capped at zero, since a validator role collapsed key-bug inclusion 20.00 to 2.22
+   (arXiv:2505.17928).
 6. Push, open the PR, write the `Review:` line. **The loop can revise; only the human approves.**
 
 Escalate instead of iterating on: a gate that stays red, oscillation, a disputed assertion, a fix
 that would breach the budget, or reviewer and implementer reading the brief differently.
 
-Trigger: a FLAG or boundary path, or you asking. Review an ordinary diff now and then, so the flag
-list grows from findings and you get a read on how often the gates miss. The loop is worth most when
-the implementer is weakest: the same generate-review-revise loop moved resolve rate from 27.5% to
-56.9% on a 30B model and from 72.2% to 75.4% on a frontier one (arXiv:2607.06065). Measure both.
+Trigger, by what the diff can break rather than by path. Mandatory: security-relevant code; user-visible
+behaviour and interface logic; any check deleted or weakened, where the reviewer's one job is naming what
+is now unchecked; migrations and anything able to destroy user intent; any FLAG or boundary path; or you
+asking. Exempt: docs, fixtures and generated output, where the controls are grep and regeneration. The
+numbers behind every row, and the two rows that have none -- migrations and path escape, so those are
+risk tolerance and written as such -- are in `docs/research.md`. Sample the exempt classes on purpose:
+repetition degrades a rubber stamp, and the loop is worth most where the implementer is weakest, so
+measure both ends: the generate-review-revise loop moved resolve rate 27.5% to 56.9% on a 30B model and
+72.2% to 75.4% on a frontier one (arXiv:2607.06065).
 
 ### Revert-first
 
