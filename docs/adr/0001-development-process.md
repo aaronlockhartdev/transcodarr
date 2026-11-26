@@ -123,8 +123,8 @@ and never a memory.
    findings. A long session has decayed, and a fresh one has no commitment to the plan under review.
 4. Verify with the gate and not with another model: `just check` green and the diff budget still
    holding. An unverified repair loop that oscillates does not converge with more rounds; it corrupts
-   more code than it repairs (extrapolator.ai, 2026-09-10, "If It's Not Buggy, Don't Fix It", no paper
-   id: the weakest cite here).
+   more code than it repairs. That clause used to carry a blog cite with no paper id; it is deleted, not
+   re-homed, because nothing in this repo can be checked against it.
 5. Re-review only when the fix landed on a boundary path. Revise while a deterministic signal is
    moving -- the reviewer's red test still red, `just check` green -- and stop at the first
    oscillation. Rounds are near-free (one 1,000-PR review run measured ~$1.57, arXiv:2509.01494) and
