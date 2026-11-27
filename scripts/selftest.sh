@@ -97,7 +97,18 @@ bad=0; skipped=0; probes=0
 # which is another process's scratch tree answering this process's question. Nothing is lost for
 # post-mortems: `report` below already echoes the log's FAIL and WARN lines into the BROKE output.
 log="$work/selftest-gate.log"
-run_gate() { bash scripts/check.sh > "$log" 2>&1; }
+arm_names=(adr-structure md-structure md-links adr-index adr-length toolchain-pins
+  "generated-paths-tracked" gitleaks cargo deny web "web build" serving "diff budget"
+  gate-proof suppressions trailer)                     # one entry per arm, as its verdict line names it
+arm_gap_names=""                                       # names an arm failed to print, across every run
+run_gate() {                                           # every arm speaks, in every state, or this goes red
+  bash scripts/check.sh > "$log" 2>&1
+  local missing
+  missing=$(comm -23 <(printf '%s\n' "${arm_names[@]}" | sort) \
+                     <(grep -E '^  (PASS|FAIL|WARN|SKIP)  ' "$log" \
+                        | sed -E 's/^  [A-Z]+ +//; s/( \(| — ).*$//' | sort -u))
+  [ -n "$missing" ] && arm_gap_names="$arm_gap_names $(printf '%s' "$missing" | tr '\n' ' ')"
+}
 verdict() { local g=green; grep -q 'FAIL' "$log" && g=red; [ "$g" = green ] && grep -q 'WARN' "$log" && g=warn; printf '%s' "$g"; }
 report() { # name want got
   probes=$((probes + 1))
@@ -120,15 +131,26 @@ base=$(verdict)
 [ "$base" = red ] && report "baseline" "not red" "$base"
 printf '  info  %-42s %s\n' "baseline verdict" "$base"
 
-# Every arm speaks, and the summary counts what it printed (#71). Measured before the fix: 15 rules and 13
-# verdict lines in a root-commit repo, because `gate-proof` and `suppressions` sat inside the diff-scope
-# guard, printed nothing, and were not counted skipped — `check: 6 ran, 7 skipped` read as healthy. The
-# count here is the arm count: add an arm with no verdict line, or delete a whole arm (killer's mutant:
-# delete the `web` arm plus one comment line, 0 BROKE), and this goes short.
+# Every arm speaks, and the summary counts what it printed (#71). Before the fix, `gate-proof` and
+# `suppressions` sat inside the diff-scope guard, printed nothing, and were not counted skipped, so a
+# root-commit run read `check: 6 ran, 7 skipped` and looked healthy.
+# The invariant is names, not line counts, and `run_gate` evaluates it on every gate run, not once here. A
+# line count pinned at 17 goes red on a legitimate state — `adr-length` warns once per over-cap file, and
+# this corpus sits at the cap — while an arm name missing from any run is exactly the defect.
+report "every arm printed its name in every gate run" "none" "${arm_gap_names:-none}"
 lines=$(grep -cE '^  (PASS|FAIL|WARN|SKIP)  ' "$log")
-report "every arm prints a verdict line" "17" "$lines"
 report "the summary counts every line it printed" "$lines" \
   "$(awk -F'[ ,]+' '/^check:/{print $2 + $4 + $6 + $8}' "$log")"
+# A `skip` is not a `pass`: flipping the two new skip lines to `pass` used to keep the suite green, because
+# both arms were sampled only by line counts. Inline rather than `expect_check` — that helper is defined
+# below this point, and calling it here failed as "command not found" without failing the run, which is the
+# same class of defect as an arm that prints nothing.
+for arm in gate-proof suppressions; do
+  run_gate
+  report "$arm skips, not passes, with no scope" "skip" \
+    "$(grep -E "^  [A-Z]+  $arm" "$log" | awk '{print tolower($1)}')"
+  report "$arm names why it skipped" "1" "$(grep -c "^  [A-Z]*  $arm — no scope measured" "$log")"
+done
 
 if make contracts/openapi.json '{"openapi":"3.1.0"}'; then
   expect red "generated file on disk, never committed"
@@ -903,14 +925,19 @@ report "all gitleaks assertions ran" "19" "$gl_probes"
 # The suite's own attendance sheet. Every probe outcome bumps `probes`, so a probe whose fixture never ran
 # makes the total short and the run red. The per-block counters cannot see that: a block that never runs
 # reports exactly the number its neighbours expect (#72, mutant (i) — delete an uncounted probe, every
-# counter still prints its number). Bump this when adding or removing a probe. Measured: this run prints 119
-# probe lines and the counter sees 118 — one printer escapes the increment. Pinned as measured rather than
-# hunted, because a printer that forgets to count itself arrives as a short total and a red run, never as a
-# green silence.
+# counter still prints its number). Bump this when adding or removing a probe. The pin is an equality, so
+# it catches probes deleted and probes moved into a subshell; it does not catch a *new* assertion that
+# forgets to bump — that is free against an equality, and closing it needs a per-printer census.
+# Measured: the run prints one probe line more than this number, because `restored to baseline` below runs
+# after the comparison reads `probes` — an ordering artefact, not an uncounted printer.
 probes=$((probes + 1))
-if [ "$probes" = "118" ]; then printf '  ok    %-42s %s\n' "every probe printed a line" "$probes"
-else printf '  BROKE %-42s wanted %s, got %s\n' "every probe printed a line" "118" "$probes"
+if [ "$probes" = "122" ]; then printf '  ok    %-42s %s\n' "every probe printed a line" "$probes"
+else printf '  BROKE %-42s wanted %s, got %s\n' "every probe printed a line" "122" "$probes"
   bad=$((bad + 1)); fi
+# A shed probe and a legitimate skip look identical on the last line, and nothing bounded `skipped`: a
+# fixture whose precondition fails used to turn `1 skipped` into `2 skipped` with the run still green.
+# One probe may skip on a provisioned machine — `web build`, which no fixture can provision.
+report "only the un-provisionable fixture skipped" "1" "$skipped"
 
 run_gate; report "restored to baseline" "$base" "$(verdict)"
 printf 'selftest: %d broken, %d skipped\n' "$bad" "$skipped"
