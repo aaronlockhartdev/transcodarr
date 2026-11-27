@@ -439,12 +439,27 @@ if [ ${#scope[@]} -gt 0 ]; then
   else
     pass "suppressions"
   fi
+
+  # --- Vendored agent instructions (#56) ---------------------------------------------------------
+  # `.agents/` is third-party prose this repo hands to models as instructions. Changing it is legitimate
+  # (skills do get updated), so this warns rather than fails — but it reports on every run, because an arm
+  # that goes silent in the states nobody thought to test is the defect #71 is about. `--no-renames` so a
+  # file moved *out* of the tree still names the path it left, and `-z` because a quoted path
+  # (`.agents/we"ird.md`) defeats an anchored pattern: with NUL separators git emits paths verbatim.
+  vendored=$(git diff --name-only -z --no-renames "${scope[@]}" -- \
+    | awk 'BEGIN{RS="\0"} /^\.agents(\/|$)/{n++} END{print n + 0}')
+  if [ "$vendored" -gt 0 ]; then
+    warn "vendored instructions (${vendored} path(s) under .agents/**: prose an agent may follow verbatim)"
+  else
+    pass "vendored instructions (.agents/** untouched)"
+  fi
 else
   # Both arms above measure the task diff, so with no scope they have nothing to read. They used to print
   # *nothing at all* and not be counted skipped: #71 measured 13 lines for 15 rules at a76c939 and a summary
   # of `6 ran, 7 skipped` that looked healthy. Silence and green are now different states.
   skip "gate-proof" "no scope measured, so no diff to pair check.sh with selftest.sh"
   skip "suppressions" "no scope measured, so no added lines to read"
+  skip "vendored instructions" "no scope measured, so no paths to read"
 fi
 
 # --- Commit trailers, where no hook can run (ADR-0001, issue #49) ---------------------------------

@@ -99,7 +99,7 @@ bad=0; skipped=0; probes=0
 log="$work/selftest-gate.log"
 arm_names=(adr-structure md-structure md-links adr-index adr-length toolchain-pins
   "generated-paths-tracked" gitleaks cargo deny web "web build" serving "diff budget"
-  gate-proof suppressions trailer)                     # one entry per arm, as its verdict line names it
+  gate-proof suppressions "vendored instructions" trailer)  # one entry per arm, as its verdict line names it
 arm_gap_names=""                                       # names an arm failed to print, across every run
 run_gate() {                                           # every arm speaks, in every state, or this goes red
   bash scripts/check.sh > "$log" 2>&1
@@ -419,6 +419,73 @@ printf '\n# probe\n' >> scripts/check.sh
 stage scripts/check.sh
 expect_check gate-proof red "check.sh changed with no selftest.sh change"
 unstage scripts/check.sh; git checkout -q -- scripts/check.sh
+
+# The vendored instruction tree is third-party prose an agent may follow verbatim. The gate must see it
+# without forbidding it (#56), and it must say so in the states nobody thought to test (#71): the first
+# version of this arm printed a line only when the pattern matched, and its green probe ran with nothing
+# staged, no origin/main and no HEAD^ — so the arm never ran at all.
+watch_probes=0
+watch_said() { watch_probes=$((watch_probes + 1)); report "$@"; }
+watch_skip() { watch_probes=$((watch_probes + 1)); skipping "$1" "$2"; }   # counted, not shed
+mkdir -p .agents/selftest-fixture && printf 'skill: probe\n' > .agents/selftest-fixture/SKILL.md
+printf 'w = 1\n' > watch_me.py
+if stage watch_me.py; then
+  run_gate
+  watch_said "an ordinary staged diff: the arm passes, it does not warn" \
+    "PASS  vendored instructions (.agents/** untouched)" \
+    "$(grep 'vendored instructions' "$log" | sed 's/^ *//')"
+else
+  watch_skip "stage an ordinary file" "an ordinary staged diff: the arm passes, it does not warn"
+fi
+if stage .agents/selftest-fixture/SKILL.md; then
+  run_gate
+  watch_said "the vendored tree changed: the arm names it" "1" "$(grep -c 'WARN.*vendored instructions' "$log")"
+  unstage .agents/selftest-fixture/SKILL.md
+else
+  watch_skip "stage a vendored file" "the vendored tree changed: the arm names it"
+fi
+# A move *out* of the tree, from a committed file: `git diff` finds renames by default, so a staged
+# delete-plus-add reports only the destination and an anchored `^\.agents/` pattern sees nothing (#88).
+mv_base=$(git rev-parse HEAD)   # the commit below is dropped again below; no later block sees it
+if stage .agents/selftest-fixture/SKILL.md \
+   && git commit -q -m "vendored fixture" -- .agents/selftest-fixture/SKILL.md \
+   && git rm -q --cached .agents/selftest-fixture/SKILL.md \
+   && mv .agents/selftest-fixture/SKILL.md moved_skill.md && git add moved_skill.md; then
+  run_gate
+  watch_said "a file moved out of the tree: the path it left still counts" "1" \
+    "$(grep -c 'WARN.*vendored instructions' "$log")"
+  git reset -q --hard "$mv_base"; rm -f moved_skill.md
+  mkdir -p .agents/selftest-fixture; printf 'skill: probe\n' > .agents/selftest-fixture/SKILL.md
+  stage watch_me.py
+else
+  watch_skip "move a vendored file" "a file moved out of the tree: the path it left still counts"
+fi
+# A path git would quote in its own output used to slip past the pattern (#88): the arm reads
+# NUL-separated names, which git emits verbatim.
+mkdir -p '.agents/q"uote' && printf 'skill: probe\n' > '.agents/q"uote/SKILL.md'
+if stage '.agents/q"uote/SKILL.md'; then
+  run_gate
+  watch_said "a path git would quote: the arm still sees it" "1" "$(grep -c 'WARN.*vendored instructions' "$log")"
+  unstage '.agents/q"uote/SKILL.md'
+else
+  watch_skip "stage a quoted path" "a path git would quote: the arm still sees it"
+fi
+rm -rf .agents/selftest-fixture '.agents/q"uote'; unstage watch_me.py; rm -f watch_me.py
+# The shape a real PR runs: nothing staged, the vendored change sitting in a commit above origin/main. The
+# probes above reach the arm through `--cached`, which is not what CI measures (#88).
+ci_base=$(git rev-parse HEAD)
+mkdir -p .agents/selftest-fixture && printf 'skill: probe\n' > .agents/selftest-fixture/SKILL.md
+if git add -A && git commit -q -m "vendored: refresh a skill" \
+   && git update-ref refs/remotes/origin/main "$ci_base"; then
+  run_gate
+  watch_said "a vendored commit above origin/main: the arm names it" "1" \
+    "$(grep -c 'WARN.*vendored instructions' "$log")"
+  git reset -q --hard "$ci_base"; git update-ref -d refs/remotes/origin/main
+else
+  watch_skip "commit a vendored file above origin/main" "a vendored commit above origin/main: the arm names it"
+fi
+rm -rf .agents/selftest-fixture
+report "all vendored-path probes ran" "5" "$watch_probes"
 
 # A pin line is rewritten, not deleted, and by a portable edit: the line has to actually change,
 # because a no-op edit on the wrong platform would look like a passing probe.
@@ -931,8 +998,8 @@ report "all gitleaks assertions ran" "19" "$gl_probes"
 # Measured: the run prints one probe line more than this number, because `restored to baseline` below runs
 # after the comparison reads `probes` — an ordering artefact, not an uncounted printer.
 probes=$((probes + 1))
-if [ "$probes" = "122" ]; then printf '  ok    %-42s %s\n' "every probe printed a line" "$probes"
-else printf '  BROKE %-42s wanted %s, got %s\n' "every probe printed a line" "122" "$probes"
+if [ "$probes" = "128" ]; then printf '  ok    %-42s %s\n' "every probe printed a line" "$probes"
+else printf '  BROKE %-42s wanted %s, got %s\n' "every probe printed a line" "128" "$probes"
   bad=$((bad + 1)); fi
 # A shed probe and a legitimate skip look identical on the last line, and nothing bounded `skipped`: a
 # fixture whose precondition fails used to turn `1 skipped` into `2 skipped` with the run still green.
